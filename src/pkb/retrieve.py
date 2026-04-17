@@ -14,6 +14,7 @@ def _bm25_query(query_text: str, category: str | None) -> dict:
             "should": [
                 {"match": {"content": {"query": query_text, "boost": 1.0}}},
                 {"match": {"title": {"query": query_text, "boost": 0.5}}},
+                {"match": {"section_path": {"query": query_text, "boost": 0.3}}},
             ],
         }
     }
