@@ -37,9 +37,19 @@ def search_knowledge(query: str, category: str = "", top_k: int = 5) -> str:
 
     parts = []
     for i, r in enumerate(results, 1):
-        parts.append(
-            f"[출처 {i}: {r['source_path']} | 카테고리: {r['category']}]\n{r['content']}\n"
-        )
+        title = r.get("title") or ""
+        section = r.get("section_path") or ""
+        ci = r.get("chunk_index")
+        score = r.get("rerank_score") if r.get("rerank_score") is not None else r.get("score", 0.0)
+        header = f"[출처 {i} | {r['source_path']}"
+        if ci is not None:
+            header += f" #{ci}"
+        header += f" | score {score:.3f} | 카테고리: {r['category']}"
+        if title:
+            header += f" | 제목: {title}"
+        header += "]"
+        section_line = f"섹션: {section}\n" if section else ""
+        parts.append(f"{header}\n{section_line}{r['content']}\n")
     return "\n".join(parts)
 
 
