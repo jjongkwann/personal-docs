@@ -46,6 +46,7 @@ def hybrid_search(
     candidate_k: int = 50,
     fusion: str = "rrf",
     rerank: bool = False,
+    expand_context: int = 0,
     log: bool = True,
 ) -> list[dict]:
     """하이브리드 검색.
@@ -55,6 +56,7 @@ def hybrid_search(
         candidate_k: 각 검색(BM25/kNN)에서 가져올 후보 수 (리랭크/RRF 용)
         fusion: "rrf" (BM25/kNN 분리 후 Reciprocal Rank Fusion) 또는 "native" (ES에 같이 넣어 자동 합산)
         rerank: True면 CrossEncoder 재순위 수행 후 top_k 반환
+        expand_context: N>0이면 각 결과의 전후 N개 청크를 neighbors 필드로 함께 반환 (parent context)
     """
     query_vector = embed([query_text])[0]
     fetch_k = candidate_k if (rerank or fusion == "rrf") else top_k
@@ -74,6 +76,9 @@ def hybrid_search(
         candidates = _rerank_fn(query_text, candidates, top_k=top_k)
     else:
         candidates = candidates[:top_k]
+
+    if expand_context > 0:
+        candidates = _attach_neighbors(es, candidates, window=expand_context)
 
     if log:
         try:
@@ -120,6 +125,50 @@ def _native_score(bm25_hits: list[dict]) -> list[dict]:
     for h in bm25_hits:
         h["score"] = h.get("_score", 0.0)
     return bm25_hits
+
+
+def _attach_neighbors(
+    es: Elasticsearch, hits: list[dict], window: int = 1
+) -> list[dict]:
+    """각 hit의 전후 window개 청크를 neighbors 필드로 부착 (동일 doc_id 내).
+    검색 결과를 상위 맥락과 함께 반환할 때 사용."""
+    for hit in hits:
+        doc_id = hit.get("doc_id")
+        ci = hit.get("chunk_index")
+        if doc_id is None or ci is None:
+            hit["neighbors"] = []
+            continue
+
+        start = max(0, ci - window)
+        end = ci + window
+        result = es.search(
+            index=settings.es_index,
+            query={
+                "bool": {
+                    "must": [
+                        {"term": {"doc_id": doc_id}},
+                        {"range": {"chunk_index": {"gte": start, "lte": end}}},
+                    ]
+                }
+            },
+            size=window * 2 + 1,
+            source_excludes=["embedding"],
+            sort=[{"chunk_index": {"order": "asc"}}],
+        )
+        neighbors = []
+        for nh in result["hits"]["hits"]:
+            src = nh["_source"]
+            if src.get("chunk_index") == ci:
+                continue  # 자기 자신 제외
+            neighbors.append(
+                {
+                    "chunk_index": src.get("chunk_index"),
+                    "section_path": src.get("section_path"),
+                    "content": src.get("content"),
+                }
+            )
+        hit["neighbors"] = neighbors
+    return hits
 
 
 def _rrf_search(

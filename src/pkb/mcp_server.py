@@ -28,6 +28,7 @@ def search_knowledge(query: str, category: str = "", top_k: int = 5) -> str:
         candidate_k=_settings.candidate_k,
         fusion=_settings.fusion,
         rerank=_settings.rerank_enabled,
+        expand_context=_settings.expand_context,
     )
 
     if not results:

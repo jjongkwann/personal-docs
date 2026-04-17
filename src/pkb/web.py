@@ -70,7 +70,12 @@ def query_page(
 
         es = get_client()
         results = hybrid_search(
-            es, q, category=category or None, top_k=top_k
+            es, q,
+            category=category or None, top_k=top_k,
+            candidate_k=settings.candidate_k,
+            fusion=settings.fusion,
+            rerank=settings.rerank_enabled,
+            expand_context=settings.expand_context,
         )
 
     return templates.TemplateResponse(

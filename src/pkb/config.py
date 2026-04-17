@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     rerank_enabled: bool = True
     fusion: str = "rrf"  # "rrf" 또는 "native"
     candidate_k: int = 50
+    expand_context: int = 0  # N>0이면 각 검색 결과의 ±N 청크를 neighbors로 부착
     chunk_size: int = 500
     chunk_overlap: int = 100
     default_top_k: int = 5

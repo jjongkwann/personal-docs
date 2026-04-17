@@ -79,6 +79,19 @@ uv run pkb delete data/study/rag-overview.md
 
 ---
 
+## 인덱스 재생성
+
+매핑 스키마가 바뀌었거나 (예: `section_path` 필드 추가) 인덱스가 꼬였을 때:
+
+```bash
+uv run pkb reindex           # 확인 프롬프트 있음
+uv run pkb reindex --yes     # 바로 실행
+```
+
+data/와 OBSIDIAN_PATH 전체를 새로 인덱싱합니다.
+
+---
+
 ## Obsidian 볼트 연동
 
 `.env`에 `OBSIDIAN_PATH=/absolute/path/to/vault` 설정 후:
@@ -182,6 +195,7 @@ OBSIDIAN_PATH=                  # (선택) Obsidian 볼트 절대경로
 | `RERANK_ENABLED` | `true` | 리랭크 기본 사용 여부 |
 | `FUSION` | `rrf` | 하이브리드 결합 방식 (`rrf` 또는 `native`) |
 | `CANDIDATE_K` | `50` | RRF/리랭커 후보 수 |
+| `EXPAND_CONTEXT` | `0` | N>0이면 검색 결과 전후 N 청크를 neighbors로 부착 (parent context) |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | 500 / 100 | 고정 크기 청킹 |
 
 ## 청킹 전략

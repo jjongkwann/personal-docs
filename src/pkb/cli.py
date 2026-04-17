@@ -39,9 +39,59 @@ def init(
 
 
 @app.command()
+def reindex(
+    confirm: bool = typer.Option(False, "--yes", "-y", help="확인 없이 바로 실행"),
+):
+    """ES 인덱스를 완전히 삭제하고 재생성한 뒤 data/ + OBSIDIAN_PATH 전체 재인제스트.
+
+    매핑 스키마가 바뀌었거나 (예: section_path 추가) 인덱스 상태가 꼬였을 때 사용.
+    """
+    from pkb.ingest import find_ingestable_files, ingest_files
+    from pkb.store import create_index, delete_index, get_client
+
+    if not confirm:
+        typer.echo("⚠️  인덱스를 완전히 삭제하고 재생성합니다.")
+        typer.echo(f"   인덱스: {settings.es_index}")
+        typer.echo(f"   대상: data/ + {settings.obsidian_path or '(OBSIDIAN_PATH 미설정)'}")
+        if not typer.confirm("진행하시겠습니까?"):
+            typer.echo("취소.")
+            raise typer.Exit(0)
+
+    es = get_client()
+    typer.echo("1. 인덱스 삭제...")
+    delete_index(es)
+    typer.echo("2. 인덱스 재생성 (새 매핑)...")
+    create_index(es)
+
+    # data/ 재인제스트
+    data_root = Path.cwd() / "data"
+    if data_root.is_dir():
+        data_files = find_ingestable_files(data_root)
+        typer.echo(f"3. data/ 재인제스트: {len(data_files)}개 파일")
+        data_total = ingest_files(data_files, base_dir=Path.cwd())
+        typer.echo(f"   → {data_total}개 청크")
+
+    # Obsidian 재인제스트
+    if settings.obsidian_path:
+        vault = Path(settings.obsidian_path).expanduser().resolve()
+        if vault.is_dir():
+            vault_files = find_ingestable_files(vault)
+            typer.echo(f"4. Obsidian 재인제스트: {len(vault_files)}개 파일")
+            vault_total = ingest_files(
+                vault_files,
+                base_dir=vault,
+                doc_id_prefix="obsidian/",
+                category_override="obsidian",
+            )
+            typer.echo(f"   → {vault_total}개 청크")
+
+    typer.echo("\n완료.")
+
+
+@app.command()
 def convert(
     input_path: Path = typer.Argument(..., help="변환할 파일 경로 (PDF, DOCX, PPTX, XLSX, HTML)"),
-    category: str = typer.Option("auto", help="저장할 카테고리 (auto/about/career/study/writing/misc). auto는 Claude가 자동 분류"),
+    category: str = typer.Option("misc", help="저장할 카테고리 (about/career/study/writing/misc). Claude Haiku로 자동 분류하려면 'auto' 명시"),
     output: Path = typer.Option(None, help="저장 경로 (기본: data/<category>/<파일명>.md)"),
     ingest: bool = typer.Option(True, help="변환 후 자동 인제스트"),
 ):
@@ -180,6 +230,7 @@ def query(
     top_k: int = typer.Option(settings.default_top_k, help="결과 수"),
     rerank: bool = typer.Option(None, help="CrossEncoder 재순위 사용 (기본: 설정값)"),
     fusion: str = typer.Option(None, help="하이브리드 결합 방식: rrf 또는 native (기본: 설정값)"),
+    expand: int = typer.Option(None, help="각 결과 전후 N청크(neighbors)를 함께 조회 (기본: 설정값)"),
 ):
     """하이브리드 검색 (BM25 + kNN + RRF + 옵션 리랭커)."""
     from pkb.retrieve import hybrid_search
@@ -192,6 +243,7 @@ def query(
         candidate_k=settings.candidate_k,
         fusion=fusion if fusion is not None else settings.fusion,
         rerank=rerank if rerank is not None else settings.rerank_enabled,
+        expand_context=expand if expand is not None else settings.expand_context,
     )
 
     if not results:

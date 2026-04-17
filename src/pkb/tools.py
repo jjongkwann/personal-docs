@@ -29,6 +29,7 @@ def search_knowledge(
         candidate_k=settings.candidate_k,
         fusion=settings.fusion,
         rerank=settings.rerank_enabled,
+        expand_context=settings.expand_context,
     )
 
     if not results:
