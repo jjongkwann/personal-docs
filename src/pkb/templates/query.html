@@ -15,6 +15,8 @@
                     <option value="career" {% if category == 'career' %}selected{% endif %}>career</option>
                     <option value="study" {% if category == 'study' %}selected{% endif %}>study</option>
                     <option value="writing" {% if category == 'writing' %}selected{% endif %}>writing</option>
+                    <option value="obsidian" {% if category == 'obsidian' %}selected{% endif %}>obsidian</option>
+                    <option value="misc" {% if category == 'misc' %}selected{% endif %}>misc</option>
                 </select>
             </div>
             <div>
@@ -35,7 +37,27 @@
         &middot; <span class="badge">{{ r.category }}</span>
         &middot; 점수: {{ "%.4f"|format(r.score) }}
     </div>
+    {% if r.section_path %}
+    <div class="meta" style="color:#666; font-size:0.85rem; margin-bottom:0.5rem;">
+        📂 {{ r.section_path }}
+    </div>
+    {% endif %}
     <div class="content">{{ r.content[:500] }}{% if r.content|length > 500 %}...{% endif %}</div>
+    {% if r.neighbors %}
+    <details style="margin-top:0.75rem; background:#f5f5f5; border-radius:6px; padding:0.5rem 0.75rem;">
+        <summary style="cursor:pointer; color:#555; font-size:0.9rem;">
+            📎 주변 청크 {{ r.neighbors|length }}개 보기
+        </summary>
+        {% for n in r.neighbors %}
+        <div style="border-left:2px solid #ccc; padding-left:0.75rem; margin-top:0.5rem;">
+            <div style="color:#888; font-size:0.8rem;">
+                #{{ n.chunk_index }}{% if n.section_path %} · {{ n.section_path }}{% endif %}
+            </div>
+            <div class="content" style="color:#555;">{{ n.content[:300] }}{% if n.content|length > 300 %}...{% endif %}</div>
+        </div>
+        {% endfor %}
+    </details>
+    {% endif %}
 </div>
 {% endfor %}
 {% elif q %}
