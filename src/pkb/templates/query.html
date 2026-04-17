@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}검색{% endblock %}
+{% block content %}
+<h1>하이브리드 검색</h1>
+<div class="card">
+    <form method="get" action="/query">
+        <label for="q">검색어</label>
+        <input type="text" id="q" name="q" value="{{ q }}" placeholder="질문을 입력하세요..." autofocus>
+        <div class="form-row">
+            <div>
+                <label for="category">카테고리</label>
+                <select id="category" name="category">
+                    <option value="">전체</option>
+                    <option value="about" {% if category == 'about' %}selected{% endif %}>about</option>
+                    <option value="career" {% if category == 'career' %}selected{% endif %}>career</option>
+                    <option value="study" {% if category == 'study' %}selected{% endif %}>study</option>
+                    <option value="writing" {% if category == 'writing' %}selected{% endif %}>writing</option>
+                </select>
+            </div>
+            <div>
+                <label for="top_k">결과 수</label>
+                <input type="text" id="top_k" name="top_k" value="{{ top_k }}">
+            </div>
+        </div>
+        <button type="submit">검색</button>
+    </form>
+</div>
+
+{% if results %}
+<h2 style="margin: 1.5rem 0 1rem;">검색 결과 ({{ results|length }}건)</h2>
+{% for r in results %}
+<div class="result">
+    <div class="meta">
+        <strong>{{ r.source_path }}</strong> (chunk #{{ r.chunk_index }})
+        &middot; <span class="badge">{{ r.category }}</span>
+        &middot; 점수: {{ "%.4f"|format(r.score) }}
+    </div>
+    <div class="content">{{ r.content[:500] }}{% if r.content|length > 500 %}...{% endif %}</div>
+</div>
+{% endfor %}
+{% elif q %}
+<p style="margin-top:1rem;">검색 결과가 없습니다.</p>
+{% endif %}
+{% endblock %}

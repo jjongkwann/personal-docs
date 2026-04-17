@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}문서 목록{% endblock %}
+{% block content %}
+<h1>저장된 문서</h1>
+<div class="card">
+    {% if docs %}
+    <table>
+        <thead>
+            <tr>
+                <th>문서 ID</th>
+                <th>카테고리</th>
+                <th>청크</th>
+                <th>수정일</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for doc in docs %}
+            <tr>
+                <td>{{ doc.doc_id }}</td>
+                <td><span class="badge">{{ doc.category }}</span></td>
+                <td>{{ doc.chunks }}</td>
+                <td>{{ doc.date_modified or '-' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    <p style="margin-top:1rem; color:#666;">총 {{ docs|length }}개 문서</p>
+    {% else %}
+    <p>저장된 문서가 없습니다. CLI에서 <code>pkb add</code>로 문서를 추가하세요.</p>
+    {% endif %}
+</div>
+{% endblock %}

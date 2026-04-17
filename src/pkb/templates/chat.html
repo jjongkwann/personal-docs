@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}채팅{% endblock %}
+{% block content %}
+<h1>PKB 채팅</h1>
+<div class="card" id="chat-container" style="min-height:400px; max-height:600px; overflow-y:auto; display:flex; flex-direction:column;">
+    <div id="messages" style="flex:1; padding-bottom:1rem;"></div>
+</div>
+<div class="card" style="margin-top:0.5rem;">
+    <form id="chat-form" style="display:flex; gap:0.5rem;">
+        <input type="hidden" id="session-id" value="{{ session_id }}">
+        <input type="text" id="message-input" placeholder="질문을 입력하세요..." style="margin-bottom:0; flex:1;" autofocus>
+        <button type="submit" id="send-btn">전송</button>
+    </form>
+</div>
+
+<script>
+const messages = document.getElementById('messages');
+const form = document.getElementById('chat-form');
+const input = document.getElementById('message-input');
+const sessionId = document.getElementById('session-id').value;
+const sendBtn = document.getElementById('send-btn');
+
+function addMessage(role, text) {
+    const wrapper = document.createElement('div');
+    wrapper.style.marginBottom = '1rem';
+
+    const alignDiv = document.createElement('div');
+    const bubble = document.createElement('span');
+    bubble.style.padding = '0.5rem 1rem';
+    bubble.style.borderRadius = '12px';
+    bubble.style.display = 'inline-block';
+    bubble.style.maxWidth = '80%';
+    bubble.style.whiteSpace = 'pre-wrap';
+    bubble.textContent = text;
+
+    if (role === 'human') {
+        alignDiv.style.textAlign = 'right';
+        bubble.style.background = '#1a1a2e';
+        bubble.style.color = '#fff';
+        bubble.style.textAlign = 'left';
+    } else {
+        bubble.style.background = '#e8e8e8';
+    }
+
+    alignDiv.appendChild(bubble);
+    wrapper.appendChild(alignDiv);
+    messages.appendChild(wrapper);
+    const container = document.getElementById('chat-container');
+    container.scrollTop = container.scrollHeight;
+}
+
+form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+
+    addMessage('human', text);
+    input.value = '';
+    sendBtn.disabled = true;
+    sendBtn.textContent = '...';
+
+    try {
+        const formData = new FormData();
+        formData.append('message', text);
+        formData.append('session_id', sessionId);
+
+        const res = await fetch('/chat', { method: 'POST', body: formData });
+        const data = await res.json();
+        addMessage('assistant', data.response);
+    } catch (err) {
+        addMessage('assistant', '오류가 발생했습니다: ' + err.message);
+    } finally {
+        sendBtn.disabled = false;
+        sendBtn.textContent = '전송';
+        input.focus();
+    }
+});
+</script>
+{% endblock %}
