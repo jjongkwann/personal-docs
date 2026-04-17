@@ -208,13 +208,54 @@ def _extract_category(file_path: Path, base_dir: Path) -> str:
     return "misc"
 
 
+_NUM_PREFIX_RE = re.compile(r"^\d+(?:\.\d+)*[_\s\-\.]*")
+
+
+def _clean_path_name(name: str) -> str:
+    """경로 조각에서 번호 prefix/언더스코어를 정리해 사람이 읽기 쉬운 형태로.
+    예: '4.2.6_청크_크기_선택' → '청크 크기 선택'
+    """
+    name = _NUM_PREFIX_RE.sub("", name)
+    name = name.replace("_", " ").replace("-", " ")
+    return re.sub(r"\s+", " ", name).strip()
+
+
+def derive_section_path_from_path(file_path: Path, base_dir: Path) -> str:
+    """파일 경로에서 section_path를 파생 (H1~H3 헤딩이 없는 문서의 fallback).
+
+    첫 두 조각(카테고리 + 서브루트)은 제외하고, 그 아래 계층만 사람이 읽기 쉬운
+    형태로 조합한다. 예:
+      data/study/rag-v2/4_신뢰·운영·측정/4.2_코퍼스·청킹·인덱스/4.2.6_청크_크기_선택.md
+      → "신뢰·운영·측정 > 코퍼스·청킹·인덱스 > 청크 크기 선택"
+    """
+    try:
+        rel = file_path.relative_to(base_dir)
+    except ValueError:
+        return ""
+
+    parts = list(rel.parts)
+    if parts and parts[0] == "data":
+        parts = parts[1:]
+    if not parts:
+        return ""
+    # 파일명에서 확장자 제거
+    parts[-1] = Path(parts[-1]).stem
+
+    cleaned = [c for c in (_clean_path_name(p) for p in parts) if c]
+    if len(cleaned) > 2:
+        # 첫 두 단계(카테고리 + 서브루트, 예: study > rag-v2)는 section으로서 가치 낮음
+        cleaned = cleaned[2:]
+    return " > ".join(cleaned)
+
+
 def _extract_title(text: str, file_path: Path) -> str:
-    """마크다운에서 제목 추출. 없으면 파일명 사용."""
+    """마크다운에서 제목 추출. 없으면 파일명에서 번호/언더스코어 정리 후 사용."""
     for line in text.split("\n")[:10]:
         line = line.strip()
         if line.startswith("# ") and not line.startswith("## "):
             return line[2:].strip()
-    return file_path.stem
+    cleaned = _clean_path_name(file_path.stem)
+    return cleaned or file_path.stem
 
 
 def process_file(
@@ -247,6 +288,12 @@ def process_file(
     chunks_with_path = chunk_markdown_hierarchical(text)
     if not chunks_with_path:
         return []
+
+    # H1~H3 헤딩이 전혀 없어 section_path가 모두 빈 경우, 파일 경로에서 파생된 값으로 대체.
+    if all(not sp for sp, _ in chunks_with_path):
+        derived = derive_section_path_from_path(file_path, base_dir)
+        if derived:
+            chunks_with_path = [(derived, c) for _, c in chunks_with_path]
 
     rel = str(file_path.relative_to(base_dir))
     doc_id = f"{doc_id_prefix}{rel}" if doc_id_prefix else rel
