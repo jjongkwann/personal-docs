@@ -206,5 +206,41 @@ def convert_and_ingest(
     return result
 
 
+@mcp.tool()
+def sync_obsidian(path: str = "") -> str:
+    """Obsidian 볼트를 지식 베이스에 동기화(일괄 인제스트)합니다.
+    기존 obsidian/* 문서는 각 파일의 doc_id 기준으로 덮어쓰기됩니다.
+
+    실시간 감시가 필요하면 별도 터미널에서 `uv run pkb watch`를 실행하세요.
+
+    Args:
+        path: Obsidian 볼트 절대경로. 빈 문자열이면 .env의 OBSIDIAN_PATH 사용.
+    """
+    from pathlib import Path
+
+    from pkb.config import settings
+    from pkb.ingest import find_ingestable_files, ingest_files
+
+    vault_path = path or settings.obsidian_path
+    if not vault_path:
+        return "오류: 경로가 제공되지 않았고 .env에 OBSIDIAN_PATH도 없습니다."
+
+    vault = Path(vault_path).expanduser().resolve()
+    if not vault.is_dir():
+        return f"디렉터리를 찾을 수 없습니다: {vault}"
+
+    files = find_ingestable_files(vault)
+    if not files:
+        return f"인제스트할 파일이 없습니다: {vault}"
+
+    total = ingest_files(
+        files,
+        base_dir=vault,
+        doc_id_prefix="obsidian/",
+        category_override="obsidian",
+    )
+    return f"Obsidian 동기화 완료: {len(files)}개 파일, {total}개 청크\n경로: {vault}"
+
+
 if __name__ == "__main__":
     mcp.run()

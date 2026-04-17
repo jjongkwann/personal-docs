@@ -8,13 +8,34 @@ app = typer.Typer(help="PKB - Personal Knowledge Base")
 
 
 @app.command()
-def init():
-    """ES 인덱스 초기화."""
+def init(
+    ingest_obsidian: bool = typer.Option(
+        True, help="OBSIDIAN_PATH가 설정돼 있으면 초기 인제스트 수행"
+    ),
+):
+    """ES 인덱스 초기화 (+ Obsidian 볼트 초기 인제스트)."""
+    from pkb.ingest import find_ingestable_files, ingest_files
     from pkb.store import create_index, get_client
 
     es = get_client()
     create_index(es)
     typer.echo(f"인덱스 '{settings.es_index}' 생성 완료.")
+
+    if ingest_obsidian and settings.obsidian_path:
+        vault = Path(settings.obsidian_path).expanduser().resolve()
+        if not vault.is_dir():
+            typer.echo(f"OBSIDIAN_PATH 디렉터리를 찾을 수 없습니다: {vault}")
+            raise typer.Exit(1)
+
+        files = find_ingestable_files(vault)
+        typer.echo(f"Obsidian 초기 인제스트: {len(files)}개 파일 감지 ({vault})")
+        total = ingest_files(
+            files,
+            base_dir=vault,
+            doc_id_prefix="obsidian/",
+            category_override="obsidian",
+        )
+        typer.echo(f"Obsidian 인제스트 완료: {total}개 청크")
 
 
 @app.command()
@@ -223,6 +244,117 @@ def delete(
     es = get_client()
     deleted = delete_document(es, doc_id)
     typer.echo(f"'{doc_id}' 삭제 완료 ({deleted}개 청크).")
+
+
+@app.command()
+def watch():
+    """data/와 OBSIDIAN_PATH를 감시하여 변경 시 자동 재인제스트."""
+    import time
+
+    from watchdog.events import FileSystemEventHandler
+    from watchdog.observers import Observer
+
+    from pkb.ingest import SUPPORTED_EXTENSIONS, ingest_files
+    from pkb.store import delete_document, get_client
+
+    es = get_client()
+
+    class IngestHandler(FileSystemEventHandler):
+        def __init__(self, base_dir: Path, doc_id_prefix: str = "", category_override: str | None = None):
+            self.base_dir = base_dir
+            self.doc_id_prefix = doc_id_prefix
+            self.category_override = category_override
+
+        def _is_supported(self, path: str) -> bool:
+            return Path(path).suffix.lower() in SUPPORTED_EXTENSIONS
+
+        def _rel_doc_id(self, path: str) -> str:
+            try:
+                rel = str(Path(path).resolve().relative_to(self.base_dir))
+            except ValueError:
+                return ""
+            return f"{self.doc_id_prefix}{rel}" if self.doc_id_prefix else rel
+
+        def on_created(self, event):
+            if event.is_directory or not self._is_supported(event.src_path):
+                return
+            self._reingest(event.src_path)
+
+        def on_modified(self, event):
+            if event.is_directory or not self._is_supported(event.src_path):
+                return
+            self._reingest(event.src_path)
+
+        def on_deleted(self, event):
+            if event.is_directory or not self._is_supported(event.src_path):
+                return
+            doc_id = self._rel_doc_id(event.src_path)
+            if doc_id:
+                deleted = delete_document(es, doc_id)
+                typer.echo(f"[삭제] {doc_id} ({deleted}개 청크)")
+
+        def on_moved(self, event):
+            if event.is_directory:
+                return
+            if self._is_supported(event.src_path):
+                old_id = self._rel_doc_id(event.src_path)
+                if old_id:
+                    delete_document(es, old_id)
+                    typer.echo(f"[이동-삭제] {old_id}")
+            if self._is_supported(event.dest_path):
+                self._reingest(event.dest_path)
+
+        def _reingest(self, path: str):
+            file_path = Path(path).resolve()
+            if not file_path.exists():
+                return
+            try:
+                total = ingest_files(
+                    [file_path],
+                    base_dir=self.base_dir,
+                    doc_id_prefix=self.doc_id_prefix,
+                    category_override=self.category_override,
+                )
+                if total:
+                    doc_id = self._rel_doc_id(path)
+                    typer.echo(f"[인제스트] {doc_id} ({total}개 청크)")
+            except Exception as e:
+                typer.echo(f"[오류] {path}: {e}")
+
+    observer = Observer()
+
+    # data/ 감시
+    data_dir = (Path.cwd() / "data").resolve()
+    if data_dir.is_dir():
+        observer.schedule(
+            IngestHandler(base_dir=Path.cwd().resolve()),
+            str(data_dir), recursive=True,
+        )
+        typer.echo(f"감시 시작: {data_dir}")
+
+    # Obsidian 감시
+    if settings.obsidian_path:
+        vault = Path(settings.obsidian_path).expanduser().resolve()
+        if vault.is_dir():
+            observer.schedule(
+                IngestHandler(
+                    base_dir=vault,
+                    doc_id_prefix="obsidian/",
+                    category_override="obsidian",
+                ),
+                str(vault), recursive=True,
+            )
+            typer.echo(f"감시 시작: {vault} (category=obsidian)")
+
+    observer.start()
+    typer.echo("감시 중... (Ctrl+C로 종료)")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        typer.echo("\n종료합니다.")
+        observer.stop()
+    observer.join()
 
 
 @app.command()

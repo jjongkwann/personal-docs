@@ -20,6 +20,7 @@ dependencies = [
     "langgraph>=0.4",
     "mcp[cli]>=1.0",
     "markitdown[pdf,docx,pptx,xlsx]>=0.1",
+    "watchdog>=4.0",
 ]
 
 [project.scripts]

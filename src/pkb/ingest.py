@@ -36,7 +36,7 @@ def read_file_as_text(file_path: Path) -> str:
     return result.text_content
 
 
-VALID_CATEGORIES = {"about", "career", "study", "writing", "misc"}
+VALID_CATEGORIES = {"about", "career", "study", "writing", "misc", "obsidian"}
 
 
 def classify_category(text: str) -> str:
@@ -176,9 +176,21 @@ def _extract_title(text: str, file_path: Path) -> str:
     return file_path.stem
 
 
-def process_file(file_path: Path, base_dir: Path) -> list[dict]:
+def process_file(
+    file_path: Path,
+    base_dir: Path,
+    doc_id_prefix: str = "",
+    category_override: str | None = None,
+) -> list[dict]:
     """파일을 읽고 청크 + 메타데이터 리스트 반환.
-    md/txt는 그대로, pdf/docx/pptx/xlsx/html은 markitdown으로 변환."""
+    md/txt는 그대로, pdf/docx/pptx/xlsx/html은 markitdown으로 변환.
+
+    Args:
+        file_path: 처리할 파일의 절대경로
+        base_dir: 상대경로 계산 기준 디렉터리
+        doc_id_prefix: doc_id 앞에 붙일 접두사 (예: "obsidian/"). 외부 경로 인제스트 시 사용.
+        category_override: None이 아니면 경로 기반 카테고리 대신 이 값 사용.
+    """
     if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
         return []
     text = read_file_as_text(file_path)
@@ -189,8 +201,9 @@ def process_file(file_path: Path, base_dir: Path) -> list[dict]:
     if not chunks:
         return []
 
-    doc_id = str(file_path.relative_to(base_dir))
-    category = _extract_category(file_path, base_dir)
+    rel = str(file_path.relative_to(base_dir))
+    doc_id = f"{doc_id_prefix}{rel}" if doc_id_prefix else rel
+    category = category_override or _extract_category(file_path, base_dir)
     title = _extract_title(text, file_path)
     language = _detect_language(text)
     mtime = datetime.fromtimestamp(
@@ -202,7 +215,7 @@ def process_file(file_path: Path, base_dir: Path) -> list[dict]:
         results.append(
             {
                 "content": chunk,
-                "source_path": str(file_path.relative_to(base_dir)),
+                "source_path": doc_id,
                 "category": category,
                 "doc_id": doc_id,
                 "chunk_index": i,
@@ -213,6 +226,35 @@ def process_file(file_path: Path, base_dir: Path) -> list[dict]:
             }
         )
     return results
+
+
+def ingest_files(
+    file_paths: list[Path],
+    base_dir: Path,
+    doc_id_prefix: str = "",
+    category_override: str | None = None,
+) -> int:
+    """파일 리스트를 처리 → 임베딩 → ES에 저장. 처리된 청크 수 반환."""
+    from pkb.embeddings import embed
+    from pkb.store import add_chunks, delete_document, get_client
+
+    es = get_client()
+    total = 0
+    for file_path in file_paths:
+        chunks = process_file(
+            file_path, base_dir,
+            doc_id_prefix=doc_id_prefix,
+            category_override=category_override,
+        )
+        if not chunks:
+            continue
+        delete_document(es, chunks[0]["doc_id"])
+        texts = [c["content"] for c in chunks]
+        vectors = embed(texts)
+        for chunk, vector in zip(chunks, vectors):
+            chunk["embedding"] = vector
+        total += add_chunks(es, chunks)
+    return total
 
 
 def find_ingestable_files(path: Path) -> list[Path]:

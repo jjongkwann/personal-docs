@@ -79,6 +79,27 @@ uv run pkb delete data/study/rag-overview.md
 
 ---
 
+## Obsidian 볼트 연동
+
+`.env`에 `OBSIDIAN_PATH=/absolute/path/to/vault` 설정 후:
+
+```bash
+# 최초 설정: ES 인덱스 생성 + Obsidian 전체 초기 인제스트
+uv run pkb init
+
+# 실시간 동기화: data/와 Obsidian 볼트 변경사항을 감지해서 자동 재인제스트
+uv run pkb watch
+```
+
+Obsidian 볼트의 파일은 `category=obsidian`, `doc_id`는 `obsidian/<상대경로>` 로 저장됩니다.
+
+`pkb watch`는 포그라운드 프로세스입니다 (Ctrl+C로 종료). 감지되는 이벤트:
+- 생성/수정: 해당 파일만 재인제스트
+- 삭제: ES에서 해당 문서 제거
+- 이동: 원본 삭제 + 신규 인제스트
+
+---
+
 ## CLI 에이전트 대화 (MCP 없이 단독 사용)
 
 `.env`의 `ANTHROPIC_API_KEY`가 설정되어 있으면 내장 LangGraph 에이전트로 대화 가능:

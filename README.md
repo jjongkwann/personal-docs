@@ -99,6 +99,17 @@ Claude Code 대화 중 바로 인제스트 요청 가능:
 > "`~/Downloads/paper.pdf`를 study 카테고리로 넣어줘"
 > → `convert_and_ingest` 도구가 자동 호출
 
+**Obsidian 볼트 연동** (선택):
+
+`.env`에 `OBSIDIAN_PATH=/path/to/vault`를 설정하면:
+
+```bash
+uv run pkb init    # ES 인덱스 생성 + Obsidian 볼트 초기 인제스트
+uv run pkb watch   # data/와 Obsidian 볼트를 감시, 변경 시 자동 재인제스트
+```
+
+Obsidian에서 노트를 편집하면 `pkb watch`가 실시간으로 ES 인덱스를 갱신합니다.
+
 ### 4. 사용
 
 Claude Code에서 자연스럽게 대화:

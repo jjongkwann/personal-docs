@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     chunk_size: int = 500
     chunk_overlap: int = 100
     default_top_k: int = 5
+    obsidian_path: str = ""  # Obsidian 볼트 절대경로 (비어있으면 비활성화)
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
