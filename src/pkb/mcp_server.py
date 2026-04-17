@@ -2,9 +2,10 @@
 
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("pkb", instructions="""개인 지식 관리 시스템(PKB)입니다.
-사용자의 개인 데이터(경력, 공부 노트, 자기소개 등)가 Elasticsearch에 저장되어 있습니다.
-질문에 답하려면 search_knowledge로 검색하고, 파일 작성은 write_file을 사용하세요.""")
+mcp = FastMCP("pkb", instructions="""개인 지식 관리 시스템(PKB)의 기본 인터페이스입니다.
+사용자의 개인 데이터(경력, 공부 노트, 자기소개, Obsidian 등)가 Elasticsearch에 저장되어 있습니다.
+질문에 답하려면 search_knowledge로 검색하고, 파일 작성은 write_file을 사용하세요.
+개념 관계 질문은 search_concepts, explain_concept, related_concepts를 우선 사용하세요.""")
 
 
 @mcp.tool()
@@ -79,7 +80,7 @@ def list_documents(category: str = "") -> str:
     """저장된 문서 목록을 확인합니다.
 
     Args:
-        category: 카테고리 필터 (about, career, study, writing). 빈 문자열이면 전체.
+        category: 카테고리 필터 (about, career, study, writing, obsidian, misc). 빈 문자열이면 전체.
     """
     from pkb.store import get_client
     from pkb.store import list_documents as _list_documents
@@ -593,7 +594,11 @@ def search_concepts(query: str, top_k: int = 10) -> str:
         results = gstore.search_concepts_by_embedding(conn, vec, top_k=top_k)
 
     if not results:
-        return "개념이 없습니다. 먼저 build_concept_graph로 그래프를 빌드하세요."
+        return (
+            "개념이 없습니다. MCP에서는 graph_list_chunks로 청크를 읽고 "
+            "graph_store_concepts로 개념/관계를 저장하세요. "
+            "일괄 빌드는 `uv run pkb graph build --category <category>`를 사용할 수 있습니다."
+        )
 
     lines = [f"유사 개념 top-{len(results)}:"]
     for row, score in results:

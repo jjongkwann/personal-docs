@@ -1,15 +1,17 @@
-# Phase 3: SQLite Graph RAG MVP 설계
+# SQLite Graph RAG MVP
 
 ## 목적과 경계
 
 **목적**: *"내 자료 전체의 개념이 어떻게 연결돼 있나"* 수준의 질문에 답한다. 기존 RRF+리랭커 검색이 잘 못하는 영역을 **보완**한다 — 대체가 아니다.
+
+**현재 상태**: SQLite 기반 Graph RAG MVP는 구현됨. 기본 운영 경로는 **Claude Code + MCP**이고, `pkb graph build`는 운영/일괄 빌드용 보조 CLI다.
 
 | | 기존 (ES + RRF + 리랭커) | 그래프 RAG |
 |---|---|---|
 | 잘하는 것 | "DI란?", "BM25 공식은?" 같은 **구체 질의** | "DI·IoC·Bean·Container가 어떻게 얽혀?", "학습 로드맵" 같은 **관계/전역 질의** |
 | 데이터 단위 | 청크 (500토큰) | 개념(entity) + 관계(relation) |
 | 응답 재료 | 본문 청크 | 그래프 구조 + 연결된 청크 |
-| 빌드 시점 | 인제스트 즉시 | `build_concept_graph` 호출 시 (명시적) |
+| 빌드 시점 | 인제스트 즉시 | MCP `graph_list_chunks`/`graph_store_concepts` 또는 CLI `pkb graph build`로 명시 실행 |
 
 **안 하는 것 (MVP 범위 밖)**:
 - 자동 전체 그래프 빌드 (카테고리/폴더 단위 opt-in만)
@@ -107,12 +109,24 @@ CREATE INDEX idx_aliases_slug ON concept_aliases(alias_slug);
 ## 추출 파이프라인
 
 ### 1. 대상 선정
-`build_concept_graph(category=, doc_id=)` 호출 시:
-- `category` 지정 → 해당 카테고리 모든 청크
-- `doc_id` 지정 → 그 문서의 청크만
-- 둘 다 없음 → 거부 (전체 빌드는 의도치 않은 대규모 추출 방지)
 
-### 2. 청크별 LLM 호출 (Claude Haiku)
+MCP 기본 흐름:
+
+- `graph_list_chunks(category=..., limit=...)` → 해당 카테고리 청크 페이지 조회
+- `graph_list_chunks(doc_id=..., limit=...)` → 단일 문서 청크 조회
+- `category`와 `doc_id`가 모두 없으면 거부
+
+CLI 보조 흐름:
+
+- `pkb graph build --category study`
+- `pkb graph build --doc-id obsidian/...`
+- 둘 다 없으면 거부
+
+### 2. 청크별 개념/관계 추출
+
+MCP-first 방식에서는 Claude Code가 `graph_list_chunks` 결과를 직접 읽고 아래 규칙으로 개념/관계를 추출한다. 이 경우 프로젝트 `.env`의 `ANTHROPIC_API_KEY`가 필수는 아니다.
+
+CLI `pkb graph build`를 쓰면 내부 빌더가 `GRAPH_EXTRACT_MODEL`로 설정된 Claude Haiku를 호출한다.
 
 프롬프트 개요:
 
@@ -155,18 +169,28 @@ CREATE INDEX idx_aliases_slug ON concept_aliases(alias_slug);
 
 ---
 
-## MCP 도구 4개
+## MCP 도구 5개
 
-### `build_concept_graph`
+### `graph_list_chunks`
 ```python
-build_concept_graph(
-    category: str = "",          # ""면 doc_id 필수
-    doc_id: str = "",            # 단일 문서 빌드
-    rebuild: bool = False,       # True면 기존 해당 scope 삭제 후 빌드
+graph_list_chunks(
+    category: str = "",
+    doc_id: str = "",
+    offset: int = 0,
+    limit: int = 20,
 ) -> str
 ```
-- Haiku 호출하며 진행. 비용 추정치 반환: `"study 830 청크 → 약 $2.5 예상. 진행하려면 confirm=True"`
-- `confirm=True` 필요 (대규모 API 호출 방지)
+- ES 청크를 JSON으로 반환
+- `limit` 최대 50
+- Claude Code가 반환된 청크를 읽고 개념/관계를 추출
+
+### `graph_store_concepts`
+```python
+graph_store_concepts(items_json: str) -> str
+```
+- Claude Code가 추출한 개념/관계 JSON을 SQLite에 저장
+- 개념 alias, mention, edge를 함께 upsert
+- 임베딩 기반 중복 병합 사용
 
 ### `search_concepts`
 ```python
@@ -186,10 +210,16 @@ explain_concept(name: str, depth: int = 1) -> str
 
 ### `related_concepts`
 ```python
-related_concepts(name: str, relation: str = "", top_k: int = 20) -> str
+related_concepts(
+    name: str,
+    relation: str = "",
+    direction: str = "both",
+    top_k: int = 20,
+) -> str
 ```
 - 특정 개념의 직접 이웃 (가중치 순)
 - `relation` 필터: `"prerequisite_of"` 지정 시 해당 타입만
+- `direction`: `out`, `in`, `both`
 
 ---
 
@@ -219,41 +249,29 @@ Claude Code 흐름:
 
 ---
 
-## 구현 단계 (최소 단위)
+## 구현된 구성요소
 
-### Step 1 — 스키마 + 저장 레이어 (반나절)
+### SQLite 스키마 + 저장 레이어
 - `src/pkb/graph/schema.py`: SQLite 초기화
-- `src/pkb/graph/store.py`: upsert_concept, upsert_alias, add_edge, add_mention 등 기본 CRUD
+- `src/pkb/graph/store.py`: concept/document/alias/edge/mention CRUD, 임베딩 유사도 검색
 - `src/pkb/graph/__init__.py`
-- 단위 테스트: 개념 중복 제거, alias 해석
 
-### Step 2 — 추출기 (하루)
-- `src/pkb/graph/extract.py`: 
-  - `extract_from_chunk(chunk_text) -> (concepts, relations)` — Haiku 호출 + JSON 파싱
-  - 재시도/파싱 실패 스킵
-- 프롬프트 파일: `src/pkb/graph/prompts/extract.txt`
-
-### Step 3 — 빌더 (반나절)
-- `src/pkb/graph/builder.py`:
-  - `build(scope_category, scope_doc_id) -> run_stats`
-  - 청크 이터레이션 (ES에서 조회) → 추출 → 정규화 → 저장
-  - 진행률 출력
-  - 비용 추정 (청크 수 × 추정 토큰)
-
-### Step 4 — MCP 도구 (반나절)
-- `src/pkb/mcp_server.py`에 4개 도구 추가
-- `build_concept_graph`는 `confirm=True` 가드
-
-### Step 5 — CLI 래퍼 (1시간)
+### CLI 일괄 빌더
+- `src/pkb/graph/extract.py`: Haiku 호출 + JSON 파싱
+- `src/pkb/graph/prompts/extract.txt`: 개념/관계 추출 프롬프트
+- `src/pkb/graph/builder.py`: ES 청크 순회 → 추출 → 정규화 → SQLite 저장
 - `pkb graph build --category <cat>`
-- `pkb graph stats` (총 개념/관계 수)
-- `pkb graph export` (JSON/Mermaid)
+- `pkb graph stats`
+- `pkb graph export <out.json|out.mmd>`
 
-### Step 6 — 문서 + 검증 (1시간)
-- `docs/phase3-graph-rag.md` 업데이트
-- study 카테고리 RAG 자료로 빌드 → 4개 테스트 질의 실행
+### MCP-first 그래프 도구
+- `graph_list_chunks`: Claude Code가 읽을 청크 조회
+- `graph_store_concepts`: Claude Code가 추출한 JSON 저장
+- `search_concepts`: 개념 검색
+- `explain_concept`: 개념 설명/관계/언급 문서 조회
+- `related_concepts`: 직접 이웃 조회
 
-**총 소요**: 2~3일 (개인 작업 기준)
+MCP-first 방식이 기본이고, CLI 빌더는 많은 청크를 한 번에 처리해야 할 때 쓰는 보조 경로다.
 
 ---
 
@@ -265,7 +283,7 @@ Claude Code 흐름:
 - Obsidian (7930 청크): ~$15
 - 전체 (8760 청크): ~$17
 
-**권장**: 처음엔 `build --category study`부터 시작. Obsidian은 유용성 확인 후.
+**권장**: 처음엔 MCP로 `study` 일부 청크부터 만들고, 유용성이 확인되면 `pkb graph build --category study` 또는 Obsidian 일부 문서로 확장한다.
 
 ---
 
@@ -279,11 +297,11 @@ Claude Code 흐름:
 
 ---
 
-## 시작 체크리스트
+## 운영 체크리스트
 
-Phase 3 착수 시:
-- [ ] `.env`에 `GRAPH_DB_PATH=data/.graph/pkb_graph.sqlite` 기본값 설정
-- [ ] `pyproject.toml`에 추가 의존성은 없음 (`sqlite3` 표준, `anthropic`은 이미 있음)
-- [ ] `src/pkb/graph/` 디렉터리 생성
-- [ ] Step 1부터 순서대로 구현
-- [ ] 빌드 비용 제한: 최초에는 `--category study`만 (비용 ~$2)
+- [x] `.env.example`에 `GRAPH_DB_PATH=data/.graph/pkb_graph.sqlite` 기본값 문서화
+- [x] 추가 런타임 DB 의존성 없음 (`sqlite3` 표준 라이브러리 사용)
+- [x] `src/pkb/graph/` 구현
+- [x] MCP 그래프 도구 구현
+- [x] CLI 그래프 빌드/통계/내보내기 구현
+- [ ] 실제 사용 시에는 소규모 scope부터 구축 (`category=study` 일부 또는 단일 `doc_id`)

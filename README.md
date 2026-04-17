@@ -2,7 +2,7 @@
 
 **로컬 저장소와 로컬 검색 인덱스**를 중심으로 돌아가는 개인 지식 베이스. 내가 큐레이션한 문서(경력, 공부 노트, 자료 등)만을 소스로 사용해, 외부 웹 검색 없이 **통제된 데이터**에서 정보를 빠르게 꺼내 씁니다.
 
-Claude Code에 **MCP**로 연결하면 대화 중 이 데이터를 바로 검색/참조/작성할 수 있습니다. 문서 원본과 Elasticsearch/SQLite 인덱스는 로컬에 두고, Claude Code 또는 CLI/Web 에이전트를 쓸 때만 선택적으로 LLM API를 호출합니다.
+Claude Code에 **MCP**로 연결해서 대화 중 이 데이터를 바로 검색/참조/작성하는 것이 기본 사용 방식입니다. 문서 원본과 Elasticsearch/SQLite 인덱스는 로컬에 두고, CLI/Web은 운영·검증·대체 인터페이스로만 사용합니다.
 
 주요 용도:
 - "내가 예전에 정리한 X 내용이 뭐였지?" 즉시 조회
@@ -17,7 +17,7 @@ Claude Code에 **MCP**로 연결하면 대화 중 이 데이터를 바로 검색
 1. **`data/`** — 개인 문서 원본 저장소 (Source of Truth)
 2. **Elasticsearch** — 청크 검색 엔진 (nori 한국어 분석 + dense_vector kNN)
 3. **SQLite Graph DB** — 개념/관계 그래프 (Graph RAG 보조)
-4. **MCP 서버** — Claude Code에서 도구로 바로 접근
+4. **MCP 서버** — Claude Code에서 도구로 바로 접근하는 기본 인터페이스
 
 ```
 [인제스트]
@@ -41,7 +41,7 @@ Claude Code에 **MCP**로 연결하면 대화 중 이 데이터를 바로 검색
 
 상세 구조는 [docs/architecture.md](docs/architecture.md)를 참조하세요.
 
-## 시작하기 (MCP 중심)
+## 시작하기 (MCP 우선)
 
 ### 사전 요구사항
 
@@ -127,7 +127,7 @@ Claude Code에서 자연스럽게 대화:
 - *"방금 찾은 내용 요약해서 `data/writing/summary.md`에 저장해줘"*
 - *"DI, IoC, Bean, Container 개념이 어떻게 연결돼 있어?"*
 
-CLI로 직접 확인:
+운영/검증용 CLI (보조):
 
 ```bash
 # 검색 (RRF + 리랭커)
@@ -191,8 +191,8 @@ GRAPH_DEDUP_THRESHOLD=0.88
 
 - [MCP 연동 상세](docs/mcp.md) — 등록, 도구 목록, 사용 예시
 - [아키텍처 상세](docs/architecture.md) — 데이터 흐름, 구성요소
-- [CLI 사용법](docs/usage.md) — MCP 외 직접 사용(옵션)
-- [Phase 3: Graph RAG 설계](docs/phase3-graph-rag.md) — SQLite 기반 개념 그래프 MVP
+- [CLI 사용법](docs/usage.md) — 운영·검증·대체 인터페이스
+- [Graph RAG 설계](docs/graph-rag.md) — SQLite 기반 개념 그래프 MVP
 
 ## 기술 스택
 

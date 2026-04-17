@@ -1,271 +1,302 @@
 # PKB 아키텍처
 
-PKB는 세 개의 층으로 구성됩니다:
+PKB는 **MCP-first 개인 지식 베이스**입니다. 기본 사용자는 Claude Code이고, CLI/Web은 운영·검증·대체 인터페이스입니다.
 
-1. **`data/`** — 개인 문서 원본 저장소 (Source of Truth)
-2. **Elasticsearch** — 검색 엔진 (Runtime Index)
-3. **LangChain + LangGraph** — 에이전트 (Reasoning Layer)
+핵심 구성은 네 층입니다:
 
-각 층은 독립적이어서 한 부분만 교체해도 나머지는 영향을 받지 않습니다 (예: ES → Qdrant로 교체해도 에이전트 코드 불변).
+1. **`data/`와 Obsidian 원본** — 개인 문서의 Source of Truth
+2. **Elasticsearch** — 청크 단위 검색 인덱스
+3. **SQLite Graph DB** — 개념/관계 그래프
+4. **MCP 서버** — Claude Code가 호출하는 기본 작업 인터페이스
+
+LangGraph 기반 CLI/Web 에이전트는 보조 경로입니다. MCP 흐름에서는 Claude Code 자체가 에이전트 역할을 하므로 `src/pkb/agent.py`를 거치지 않습니다.
 
 ---
 
 ## 전체 다이어그램
 
 ```
-[사용자 인터페이스]
-  ├─ CLI (typer)         pkb chat, pkb query, pkb add/convert
-  ├─ Web (FastAPI)       /chat, /query, / (index)
-  └─ Claude Code (MCP)   search_knowledge, write_file, ...
-           │
-           ▼
-[LangGraph 에이전트]  (src/pkb/agent.py)
-  ├─ Claude (LangChain ChatAnthropic)
-  ├─ ReAct 루프: 관찰 → 판단 → 행동
-  ├─ 대화 히스토리 (HumanMessage / AIMessage)
-  └─ tool_use로 도구 호출
-           │
-           ▼
-[도구]  (src/pkb/tools.py, src/pkb/mcp_server.py)
-  ├─ search_knowledge    ──┐
-  ├─ list_documents      ──┤──→ Elasticsearch
-  ├─ add_document        ──┘
-  ├─ write_file          ────→ data/ 파일 생성
-  └─ convert_and_ingest  ────→ markitdown + data/ 저장 + ES 인제스트
-           │
-           ▼
-[하이브리드 검색]  (src/pkb/retrieve.py)
-  ├─ BM25 (nori 분석기)
-  ├─ kNN (dense_vector, cosine)
-  ├─ RRF 결합 (Reciprocal Rank Fusion, k=60)
-  └─ CrossEncoder 재순위 (선택, BAAI/bge-reranker-v2-m3)
-           │
-           ▼
-[Elasticsearch]  (Docker 컨테이너: pkb-es)
-  인덱스: pkb_documents
-  각 청크 = 문서 1개:
-    content       "청크 텍스트..."        (nori 한국어 분석기로 인덱싱)
-    embedding     [0.1, 0.2, ...]       (384차원 dense_vector, 코사인 유사도)
-    doc_id        "data/study/x.md"
-    category      "study"
-    chunk_index   3
-    section_path  "대주제 > 소주제 > 세부"  (H1~H3 경로)
-    title, tags, date_modified, language
-           ▲
-           │ 인제스트 파이프라인 (src/pkb/ingest.py):
-           │   1. read_file_as_text       — md/txt는 그대로, 나머지는 markitdown
-           │   2. chunk_markdown           — 500토큰 + 100 오버랩, ## 헤딩 우선
-           │   3. embed                    — sentence-transformers (로컬)
-           │   4. add_chunks               — ES bulk index (기존 청크 삭제 후 삽입)
-           │
-[data/ 폴더]  (원본, gitignored)
-  about/    career/    study/    writing/
-  .md  .txt  .pdf  .docx  .pptx  .xlsx  .html
+[사용자]
+  ↓
+[Claude Code]
+  ↓ MCP stdio
+[PKB MCP 서버]  src/pkb/mcp_server.py
+  ├─ search_knowledge      → Elasticsearch 검색
+  ├─ write_file            → data/ 작성 + 자동 인제스트
+  ├─ add_document          → data/ 파일 인제스트
+  ├─ convert_and_ingest    → 외부 파일 → data/<category>/.md → 인제스트
+  ├─ sync_obsidian         → Obsidian 볼트 일괄 인제스트
+  ├─ get_document          → 문서 청크/section_path 조회
+  ├─ reindex_document      → 단일 문서 재인제스트
+  ├─ doctor                → 상태 점검
+  └─ graph_*               → SQLite 개념 그래프 조회/저장
+
+[인제스트 파이프라인]  src/pkb/ingest.py
+  원본 파일
+    → markitdown 변환
+    → YAML frontmatter 파싱
+    → H1~H3 section_path 기반 계층 청킹
+    → sentence-transformers 임베딩
+    → Elasticsearch bulk 저장
+
+[검색 파이프라인]  src/pkb/retrieve.py
+  질의
+    ├─ BM25 검색
+    ├─ kNN 벡터 검색
+    ├─ RRF 결합
+    ├─ CrossEncoder 재순위
+    └─ 선택: neighbors(parent context) 부착
+
+[Graph RAG]  src/pkb/graph/
+  ES 청크
+    → graph_list_chunks로 Claude Code가 읽음
+    → Claude Code가 개념/관계 추출
+    → graph_store_concepts로 SQLite 저장
+    → search_concepts / explain_concept / related_concepts 조회
+```
+
+보조 인터페이스:
+
+```
+CLI       src/pkb/cli.py    pkb query, pkb reindex, pkb graph stats/build/export
+Web UI    src/pkb/web.py    /query, /chat, /
+Agent     src/pkb/agent.py  CLI/Web용 LangGraph ReAct 에이전트
 ```
 
 ---
 
-## 1. `data/` 폴더 — 원본 저장소
+## 1. 원본 저장소
 
-사용자의 **개인 문서 원본**이 보관되는 곳. git에서 추적되지 않습니다 (`.gitignore`).
+### `data/`
 
-### 구조
+`data/`는 프로젝트 내부 개인 문서 저장소입니다. git에서 추적하지 않는 것을 기본으로 합니다.
 
 ```
 data/
 ├── about/      # 자기소개, 관심사
 ├── career/     # 경력, 기술 스택, 프로젝트
 ├── study/      # 공부 노트, 교재
-└── writing/    # 초안, 노트
+├── writing/    # 초안, 노트
+├── misc/       # 분류 애매한 자료
+├── .logs/      # 검색 로그 JSONL
+└── .graph/     # SQLite 그래프 DB
 ```
 
-### 지원 포맷
+지원 포맷:
 
-| 확장자 | 처리 방식 |
-|-------|----------|
-| `.md`, `.markdown`, `.txt` | 그대로 읽음 |
+| 확장자 | 처리 |
+|-------|------|
+| `.md`, `.markdown`, `.txt` | 직접 읽기 |
 | `.pdf`, `.docx`, `.pptx`, `.xlsx`, `.html` | `markitdown`으로 마크다운 변환 |
 
-### 원칙
+### Obsidian
 
-- **단일 소스**: data/의 파일이 진실의 원본. ES 인덱스는 이 파일들의 검색용 사본
-- **편집 가능**: `.md` 상태로 보관하면 추출 노이즈(PDF 사이드바, 페이지 번호 등) 수동 정리 가능
-- **git 버전 관리 가능**: 개인 선택에 따라 git 추적하여 변경 이력 관리 가능
-- **변경 시 재인제스트 필요**: 파일 수정 후 `pkb add` 또는 `pkb convert`로 ES 동기화
+`.env`의 `OBSIDIAN_PATH`가 설정되어 있으면 외부 Obsidian 볼트를 읽어 ES에 인덱싱합니다.
+
+- `category`: `obsidian`
+- `doc_id`: `obsidian/<볼트 상대경로>`
+- 원본 파일은 복사하거나 수정하지 않음
 
 ---
 
-## 2. Elasticsearch — 검색 엔진
+## 2. Elasticsearch 검색 인덱스
 
-Docker 컨테이너(`pkb-es`)로 실행. 단일 인덱스 `pkb_documents`에 모든 청크가 저장됩니다.
+Docker 컨테이너 `pkb-es`로 실행되며, 기본 인덱스는 `pkb_documents`입니다.
 
 ### 저장 단위
 
-파일 하나가 여러 청크(500토큰 + 100토큰 오버랩)로 분할되어 각 청크가 ES 문서 1개로 저장됩니다.
-
-예: `data/study/1.1.1_NLP_과제.md`가 6개 청크면 ES에 6개 문서로 존재.
-
-### 문서 스키마
+파일 하나는 여러 청크로 분할되고, 각 청크가 ES 문서 1개로 저장됩니다.
 
 ```python
 {
-    "content": "청크 텍스트 내용...",       # nori 분석기로 인덱싱
-    "embedding": [0.1, 0.2, ...],          # 384차원 벡터
-    "source_path": "data/study/x.md",
-    "category": "study",                    # about|career|study|writing|misc
-    "doc_id": "data/study/x.md",
+    "content": "청크 텍스트...",
+    "embedding": [0.1, 0.2, ...],
+    "source_path": "data/study/rag/example.md",
+    "doc_id": "data/study/rag/example.md",
+    "category": "study",
     "chunk_index": 0,
-    "title": "추출된 제목",
-    "tags": ["python", "backend"],
+    "section_path": "대주제 > 소주제 > 세부",
+    "title": "문서 제목",
+    "tags": ["rag", "search"],
     "date_modified": "2026-04-16",
-    "language": "ko",
+    "language": "ko"
 }
 ```
 
-### 하이브리드 검색 (retrieve.py)
+### 청킹
 
-두 가지 검색을 동시에 수행하고 ES가 점수를 자동 결합:
+- YAML frontmatter가 있으면 `title`, `tags` 등 메타데이터를 파싱
+- H1~H3 헤딩 경로를 `section_path`로 저장
+- 섹션 내부는 기본 500토큰, 100토큰 오버랩으로 분할
+- 검색 결과에는 `section_path`가 함께 반환됨
 
-- **BM25 (키워드)**: `nori_tokenizer`로 한국어 형태소 분석 후 매칭. "FastAPI" 같은 고유명사/기술용어에 강함
-- **kNN (벡터)**: sentence-transformers로 질의 임베딩 → 코사인 유사도 검색. "백엔드 프레임워크"처럼 의미적 유사성에 강함
+### 검색
 
-```
-BM25 결과 ─┐
-           ├─→ ES가 점수 합산 → top-K 청크 반환
-kNN 결과  ─┘
-```
+`search_knowledge`와 `pkb query`는 같은 검색 파이프라인을 사용합니다.
 
-### 인덱스 갱신
+1. BM25 검색: 한국어 nori 분석기 기반 키워드 검색
+2. kNN 검색: sentence-transformers 임베딩 기반 의미 검색
+3. RRF 결합: 두 결과 집합의 순위를 Reciprocal Rank Fusion으로 결합
+4. CrossEncoder 재순위: 기본 `BAAI/bge-reranker-v2-m3`
+5. 선택적 주변 청크: `EXPAND_CONTEXT=N` 또는 CLI `--expand N`
 
-- `pkb add <file>`: 파일의 기존 청크 삭제 → 새로 청킹/임베딩/삽입 (증분 빌드)
-- `pkb delete <doc_id>`: 문서의 모든 청크 제거
-- 내부적으로 `doc_id` 메타데이터로 매핑 추적
+검색 호출은 `data/.logs/search.jsonl`에 JSONL로 기록됩니다.
 
 ---
 
-## 3. LangChain + LangGraph — 에이전트 (Reasoning Layer)
+## 3. SQLite Graph DB
 
-### LangChain (도구 정의)
+Graph RAG는 검색을 대체하지 않고, 개념 간 관계 질의를 보완합니다.
 
-- `ChatAnthropic`: Claude API 래퍼
-- `@tool` 데코레이터: Python 함수를 LLM이 호출 가능한 도구로 노출
+저장 위치:
 
-**등록된 도구** (`tools.py`):
+```text
+data/.graph/pkb_graph.sqlite
+```
 
-| 도구 | 역할 |
+주요 테이블:
+
+| 테이블 | 역할 |
+|--------|------|
+| `concepts` | 정규화된 개념 노드 |
+| `concept_aliases` | DI 같은 별칭 |
+| `documents` | ES `doc_id`와 연결되는 문서 노드 |
+| `concept_edges` | 개념 간 관계 |
+| `concept_mentions` | 개념이 등장한 `doc_id`/`chunk_index` |
+| `graph_runs` | CLI 일괄 빌드 실행 기록 |
+
+MCP-first 그래프 구축:
+
+1. Claude Code가 `graph_list_chunks(category="study", limit=20)`로 청크를 읽음
+2. Claude Code가 청크 내용에서 개념과 관계를 추출
+3. `graph_store_concepts(items_json=...)`로 SQLite에 저장
+4. `search_concepts`, `explain_concept`, `related_concepts`로 조회
+
+CLI 일괄 빌드:
+
+```bash
+uv run pkb graph build --category study
+```
+
+이 경로는 `ANTHROPIC_API_KEY`를 사용해 내부 빌더가 Haiku를 호출합니다. MCP 기본 흐름은 아닙니다.
+
+---
+
+## 4. MCP 서버
+
+`src/pkb/mcp_server.py`가 PKB의 기본 인터페이스입니다.
+
+```
+Claude Code → MCP stdio → mcp_server.py → ES / data / SQLite
+```
+
+제공 도구:
+
+| 범주 | 도구 |
 |------|------|
-| `search_knowledge` | ES 하이브리드 검색 |
-| `write_file` | `data/` 하위에 파일 작성 (.md만) |
-| `list_documents` | 저장된 문서 목록 조회 |
+| 검색 | `search_knowledge` |
+| 파일/문서 | `write_file`, `list_documents`, `add_document`, `convert_and_ingest`, `sync_obsidian`, `get_document`, `reindex_document` |
+| 상태 | `doctor` |
+| Graph RAG | `graph_list_chunks`, `graph_store_concepts`, `search_concepts`, `explain_concept`, `related_concepts` |
 
-### LangGraph (에이전트 루프)
+MCP 서버가 지키는 경계:
 
-`create_react_agent`가 ReAct 패턴을 구현:
-
-```
-사용자 메시지
-  ↓
-[관찰] Claude가 현재 상태와 필요한 정보 평가
-  ↓
-[판단] "검색이 필요한가? 어떤 도구를 어떤 인자로 호출할까?"
-  ↓
-[행동] 도구 호출 (tool_use)
-  ↓
-[관찰] 도구 결과를 컨텍스트에 추가
-  ↓
-[판단] "답변하기 충분한가? 추가 검색이 필요한가?"
-  ↓
-↑────────────── 반복 (반성 루프) ──────────────
-  ↓
-최종 답변 생성
-```
-
-### 시스템 프롬프트 (`agent.py`)
-
-Claude에게 언제 어떤 도구를 써야 하는지 지시:
-
-- 질문 답변 → `search_knowledge` 먼저
-- 파일 작성 요청 → 검색 후 `write_file`
-- 문서 확인 요청 → `list_documents`
-- 검색 결과 부족 → 다른 키워드/카테고리로 재검색
-
-### 대화 히스토리
-
-`agent.py`의 `chat()` 함수가 `HumanMessage`/`AIMessage` 리스트로 세션별 히스토리 유지. CLI에서는 프로세스 종료까지, 웹에서는 `session_id`별 in-memory 딕셔너리로 관리.
+- `write_file`은 `data/` 하위 `.md`만 작성
+- `add_document`는 `data/` 하위만 인제스트
+- `convert_and_ingest`는 외부 파일을 읽을 수 있지만 결과는 `data/<category>/`에 저장
+- Obsidian 동기화는 원본 볼트를 수정하지 않고 ES에만 반영
+- 장기 실행 감시(`pkb watch`)는 MCP 도구가 아니라 별도 CLI 프로세스
 
 ---
 
-## 4. MCP 서버 (별도 통합 층)
+## 5. 보조 인터페이스
 
-`mcp_server.py`는 Claude Code가 PKB 도구를 직접 호출할 수 있도록 MCP 프로토콜로 노출합니다. **LangGraph 에이전트를 거치지 않고** Claude Code 자체가 에이전트 역할을 합니다.
+### CLI
 
+`src/pkb/cli.py`는 운영과 검증에 사용합니다.
+
+주요 명령:
+
+```bash
+uv run pkb init
+uv run pkb reindex
+uv run pkb query "DI IoC 의존성 주입" --category obsidian --expand 1
+uv run pkb graph stats
+uv run pkb graph export /tmp/pkb-graph.mmd
 ```
-Claude Code → MCP (stdio) → mcp_server.py → 직접 ES/파일 조작
-```
 
-노출되는 도구:
-- `search_knowledge`
-- `write_file`
-- `list_documents`
-- `add_document`
-- `convert_and_ingest`
+### Web UI
+
+`uv run pkb serve`로 실행합니다. 검색 결과의 `section_path`와 선택적 `neighbors` 확인에 유용합니다.
+
+### LangGraph 에이전트
+
+`src/pkb/agent.py`는 CLI/Web의 대화형 모드용입니다.
+
+- CLI: `uv run pkb chat`
+- Web: `/chat`
+
+MCP 경로에서는 사용하지 않습니다.
 
 ---
 
-## 실제 질의 흐름 예시
+## 실제 흐름 예시
 
-### 예시 1: 저장된 자료 기반 요약 생성
+### 예시 1: 자료 기반 정리 노트 생성
 
 ```
 사용자: "저장된 BM25 관련 내용 정리해서 data/writing/bm25.md에 저장해줘"
-   │
-   ▼
-LangGraph 에이전트
-   ├─ [판단] "BM25 관련 study 노트 검색 필요"
-   ├─ [행동] search_knowledge(query="BM25", category="study")
-   │     └─→ ES가 BM25 + kNN으로 top-5 청크 반환
-   │           • data/study/1.2.10_BM25의_확률적_관련_모델_배경.md #2
-   │           • data/study/3.1.2_BM25_vs_밀집_정밀도.md #1
-   │           • ...
-   ├─ [판단] "충분한 자료 확보, 요약 생성"
-   ├─ [생성] Claude가 검색 결과를 읽고 요약 작성
-   ├─ [행동] write_file("data/writing/bm25.md", "# BM25 정리\n...")
-   │     └─→ data/ 폴더에 새 .md 파일 생성
-   └─ [답변] "data/writing/bm25.md에 저장했습니다"
+  ↓
+Claude Code
+  ├─ search_knowledge(query="BM25", category="study")
+  ├─ 검색 결과를 읽고 요약 작성
+  └─ write_file(file_path="data/writing/bm25.md", content="...")
+       └─ 저장 후 자동 인제스트
 ```
 
-### 예시 2: PDF 논문 추가 후 검색
+### 예시 2: 외부 PDF 추가
 
 ```
-1. pkb convert ~/Downloads/paper.pdf --category study
-    ├─ markitdown이 PDF → .md 변환
-    ├─ data/study/paper.md 저장
-    └─ 자동 인제스트 (청킹 → 임베딩 → ES)
+사용자: "~/Downloads/paper.pdf를 study 카테고리로 넣어줘"
+  ↓
+Claude Code
+  └─ convert_and_ingest(input_path="~/Downloads/paper.pdf", category="study")
+       ├─ markitdown 변환
+       ├─ data/study/paper.md 저장
+       └─ ES 인제스트
+```
 
-2. pkb chat
-    질문> paper에서 제안한 핵심 방법이 뭐야?
-    └─ 에이전트가 search_knowledge("paper 핵심 방법", "study") 호출
-        └─ ES가 paper.md의 관련 청크 반환
-        └─ Claude가 답변 생성
+### 예시 3: 개념 관계 질의
+
+```
+사용자: "DI, IoC, Bean, Container가 어떻게 연결돼 있어?"
+  ↓
+Claude Code
+  ├─ search_concepts("DI IoC Bean Container")
+  ├─ explain_concept("Dependency Injection", depth=1)
+  ├─ related_concepts("IoC")
+  └─ 필요한 경우 get_document로 근거 청크 확인
 ```
 
 ---
 
 ## 왜 이 구조인가
 
-| 구성요소 | 역할 | 대안이 있을 때 이 선택을 한 이유 |
-|---------|------|------------------------------|
-| `data/` 원본 | 편집 가능, 영구 저장 | 단일 소스로 진실 유지, git 추적 가능 |
-| Elasticsearch | 고속 검색 (키워드+의미) | 한국어 형태소 + 벡터 검색을 단일 쿼리로 지원 |
-| LangChain | LLM·도구 추상화 | Claude API 직접 호출 없이 도구 체이닝 |
-| LangGraph | ReAct 루프 | 다단계 추론 (검색 → 반성 → 재검색 → 답변) 자동 관리 |
-| MCP | Claude Code 직접 통합 | 별도 CLI 없이 Claude Code 대화에서 PKB 사용 |
+| 구성요소 | 역할 | 선택 이유 |
+|---------|------|-----------|
+| MCP | 기본 인터페이스 | Claude Code가 바로 개인 지식 도구를 호출할 수 있음 |
+| `data/` | 원본 저장소 | 사람이 읽고 편집 가능한 단일 원본 |
+| Elasticsearch | 검색 인덱스 | 한국어 키워드 검색과 벡터 검색을 함께 운용 |
+| RRF + 리랭커 | 검색 품질 | 키워드/의미 검색의 장점을 결합하고 최종 정밀도 보정 |
+| SQLite Graph DB | 개념 관계 저장 | 개인 규모에서 설치/운영 부담이 작고 백업 쉬움 |
+| CLI/Web | 보조 인터페이스 | 재인덱싱, 디버깅, 검색 품질 확인에 적합 |
 
 ---
 
 ## 교체 가능 지점
 
-- **ES → Qdrant/Chroma/pgvector**: `store.py`와 `retrieve.py`만 교체. 에이전트는 불변
-- **sentence-transformers → OpenAI 임베딩**: `embeddings.py`의 `embed()` 함수만 교체
-- **Claude → 다른 LLM**: `agent.py`의 `ChatAnthropic` → 다른 LangChain 통합체로 교체
-- **markitdown → docling/unstructured**: `ingest.py`의 `read_file_as_text()` 교체
+- **Elasticsearch → Qdrant/Chroma/pgvector**: `store.py`, `retrieve.py` 교체
+- **sentence-transformers → 다른 임베딩**: `embeddings.py` 교체
+- **SQLite Graph DB → Neo4j**: `src/pkb/graph/store.py` 계층 교체
+- **markitdown → docling/unstructured**: `ingest.py`의 파일 읽기 경로 교체
+- **Claude Code MCP → 다른 MCP 클라이언트**: `mcp_server.py`는 그대로 사용 가능

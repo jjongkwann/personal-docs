@@ -4,14 +4,14 @@
 
 ## 사전 준비
 
-`.env` 파일에 Claude API 키 설정 (CLI 대화/Web UI 에이전트에 필요):
+`.env` 파일에 Claude API 키 설정 (CLI 대화/Web UI 에이전트/`pkb graph build`에 필요):
 
 ```bash
 cp .env.example .env
 # ANTHROPIC_API_KEY 입력
 ```
 
-MCP만 사용할 거면 `.env` 설정은 불필요합니다 (Claude Code가 LLM 역할).
+MCP만 사용할 거면 Claude API 키는 불필요합니다 (Claude Code가 LLM 역할). `OBSIDIAN_PATH`처럼 로컬 경로 설정이 필요할 때만 `.env`를 사용합니다.
 
 ---
 
@@ -48,17 +48,23 @@ data/
 원본은 어느 위치든 상관없습니다. 변환된 `.md`가 `data/<category>/`에 저장되고 자동 인제스트됩니다:
 
 ```bash
-# 카테고리 자동 분류 (Claude Haiku가 내용 기반으로 판단)
+# 기본값: misc 카테고리에 저장
 uv run pkb convert ~/Downloads/paper.pdf
-# → "카테고리 자동 분류 중... → study" 후 data/study/paper.md에 저장
+# → data/misc/paper.md에 저장
 
-# 명시적 카테고리 지정
+# 명시적 카테고리 지정 (권장)
 uv run pkb convert ~/Downloads/paper.pdf --category study
+
+# CLI에서 자동 분류를 명시적으로 사용
+uv run pkb convert ~/Downloads/paper.pdf --category auto
+# → "카테고리 자동 분류 중... → study" 후 data/study/paper.md에 저장
 
 # 자동 인제스트 끄기 (검토 후 수동 인제스트)
 uv run pkb convert ~/Downloads/doc.docx --ingest false
 uv run pkb add data/<분류된-카테고리>/doc.md   # 나중에 인제스트
 ```
+
+MCP 기본 경로에서는 `convert_and_ingest` 호출 시 Claude Code가 `category`를 직접 지정합니다.
 
 ---
 
@@ -89,6 +95,29 @@ uv run pkb reindex --yes     # 바로 실행
 ```
 
 data/와 OBSIDIAN_PATH 전체를 새로 인덱싱합니다.
+
+---
+
+## Graph RAG 운영 CLI
+
+개념 그래프 조회와 일괄 빌드는 CLI로도 할 수 있습니다. 다만 기본 흐름은 Claude Code가 MCP의 `graph_list_chunks`와 `graph_store_concepts`를 사용하는 방식입니다.
+
+```bash
+# 현재 그래프 통계
+uv run pkb graph stats
+
+# 카테고리 단위 일괄 빌드 (LLM API 호출 발생)
+uv run pkb graph build --category study
+
+# 확인 프롬프트 생략
+uv run pkb graph build --category study --yes
+
+# Mermaid 또는 JSON으로 내보내기
+uv run pkb graph export /tmp/pkb-graph.mmd
+uv run pkb graph export /tmp/pkb-graph.json --category study
+```
+
+`pkb graph build`는 내부 빌더가 `GRAPH_EXTRACT_MODEL`을 호출하므로 `ANTHROPIC_API_KEY`가 필요합니다. MCP-first 방식으로 Claude Code가 직접 청크를 읽고 저장할 때는 프로젝트 `.env`의 API 키가 필수는 아닙니다.
 
 ---
 
@@ -169,6 +198,7 @@ uv run pkb serve --host 0.0.0.0
     ├── embeddings.py        # sentence-transformers 임베딩
     ├── store.py             # Elasticsearch CRUD, 인덱스 관리
     ├── retrieve.py          # 하이브리드 검색 (BM25 + kNN)
+    ├── graph/               # SQLite 기반 Graph RAG
     ├── web.py               # FastAPI 웹 서버
     └── templates/           # Jinja2 HTML 템플릿
 ```
@@ -180,10 +210,13 @@ uv run pkb serve --host 0.0.0.0
 `.env` 파일:
 
 ```
-ANTHROPIC_API_KEY=sk-ant-...    # CLI 에이전트/Web UI용 (MCP만 쓸 거면 불필요)
+ANTHROPIC_API_KEY=sk-ant-...    # CLI 에이전트/Web UI/pkb graph build용 (MCP만 쓸 거면 불필요)
 ES_HOST=http://localhost:9200   # Elasticsearch 호스트 (기본값)
 ES_INDEX=pkb_documents          # 인덱스 이름 (기본값)
 OBSIDIAN_PATH=                  # (선택) Obsidian 볼트 절대경로
+GRAPH_DB_PATH=data/.graph/pkb_graph.sqlite
+GRAPH_EXTRACT_MODEL=claude-haiku-4-5-20251001
+GRAPH_DEDUP_THRESHOLD=0.88
 ```
 
 `pkb.config.Settings`의 다른 튜닝 옵션 (환경변수로 오버라이드 가능):
@@ -197,6 +230,9 @@ OBSIDIAN_PATH=                  # (선택) Obsidian 볼트 절대경로
 | `CANDIDATE_K` | `50` | RRF/리랭커 후보 수 |
 | `EXPAND_CONTEXT` | `0` | N>0이면 검색 결과 전후 N 청크를 neighbors로 부착 (parent context) |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | 500 / 100 | 고정 크기 청킹 |
+| `GRAPH_DB_PATH` | `data/.graph/pkb_graph.sqlite` | SQLite 개념 그래프 파일 |
+| `GRAPH_EXTRACT_MODEL` | `claude-haiku-4-5-20251001` | CLI 그래프 일괄 빌드용 추출 모델 |
+| `GRAPH_DEDUP_THRESHOLD` | `0.88` | 개념 병합 임베딩 유사도 임계값 |
 
 ## 청킹 전략
 
