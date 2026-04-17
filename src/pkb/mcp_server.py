@@ -373,5 +373,346 @@ def doctor() -> str:
     return "\n".join(lines)
 
 
+@mcp.tool()
+def graph_list_chunks(
+    category: str = "",
+    doc_id: str = "",
+    offset: int = 0,
+    limit: int = 20,
+) -> str:
+    """개념 그래프 빌드를 위한 청크를 가져옵니다.
+
+    **사용 방법**: 반환된 각 청크의 content를 직접 읽고 개념(concept)과 관계(relation)를 추출한 뒤
+    `graph_store_concepts` 도구로 저장하세요. 이렇게 하면 별도 API 호출 없이
+    Claude Code 세션이 그대로 추출기로 작동합니다.
+
+    **추출 규칙**:
+    - 개념(concept): 구체적 명사구 (예: "Dependency Injection", "BM25", "ReAct")
+      일반 단어("방법","예시","내용")/인명/지명 제외
+    - 각 개념: name, description(1~2문장 한국어), aliases(텍스트에 등장한 약어만)
+    - 관계(relation): related_to | part_of | prerequisite_of | example_of 중 하나
+      (필요 시 snake_case 자유 라벨도 허용)
+    - 청크당 개념 8개·관계 12개 이내
+
+    Args:
+        category: 카테고리 필터 (study, obsidian, about, career, writing, misc)
+        doc_id: 단일 문서 ID (category와 함께 사용 가능)
+        offset: 페이지네이션 시작 위치
+        limit: 반환 청크 수 (최대 50)
+
+    Returns: 청크 목록 JSON + 다음 호출을 위한 next_offset
+    """
+    import json
+
+    from pkb.config import settings as _settings
+    from pkb.store import get_client
+
+    if not category and not doc_id:
+        return "오류: category 또는 doc_id 중 최소 하나는 지정해야 합니다."
+    limit = max(1, min(limit, 50))
+
+    es = get_client()
+    filters = []
+    if category:
+        filters.append({"term": {"category": category}})
+    if doc_id:
+        filters.append({"term": {"doc_id": doc_id}})
+
+    query = {"bool": {"filter": filters}} if filters else {"match_all": {}}
+    count_resp = es.count(index=_settings.es_index, query=query)
+    total = count_resp["count"]
+
+    result = es.search(
+        index=_settings.es_index,
+        query=query,
+        size=limit,
+        from_=offset,
+        source_excludes=["embedding"],
+        sort=[{"doc_id": "asc"}, {"chunk_index": "asc"}],
+    )
+    hits = result["hits"]["hits"]
+    chunks = [
+        {
+            "doc_id": h["_source"]["doc_id"],
+            "chunk_index": h["_source"]["chunk_index"],
+            "category": h["_source"].get("category"),
+            "title": h["_source"].get("title"),
+            "section_path": h["_source"].get("section_path", ""),
+            "content": h["_source"].get("content", ""),
+        }
+        for h in hits
+    ]
+
+    next_offset = offset + len(chunks)
+    has_more = next_offset < total
+    return json.dumps(
+        {
+            "total": total,
+            "offset": offset,
+            "returned": len(chunks),
+            "next_offset": next_offset if has_more else None,
+            "chunks": chunks,
+        },
+        ensure_ascii=False,
+    )
+
+
+@mcp.tool()
+def graph_store_concepts(items_json: str) -> str:
+    """Claude Code가 추출한 개념/관계를 SQLite 그래프 DB에 저장합니다.
+
+    Args:
+        items_json: JSON 문자열. 스키마:
+            {
+              "items": [
+                {
+                  "doc_id": "obsidian/Spring/DI.md",
+                  "chunk_index": 0,
+                  "section_path": "...",
+                  "category": "obsidian",
+                  "title": "...",
+                  "concepts": [
+                    {"name": "Dependency Injection",
+                     "aliases": ["DI"],
+                     "description": "객체 간 의존성을 외부에서 주입..."}
+                  ],
+                  "relations": [
+                    {"src": "Dependency Injection", "dst": "IoC", "type": "part_of"}
+                  ]
+                }
+              ]
+            }
+    """
+    import json
+
+    from pkb.config import settings as _settings
+    from pkb.embeddings import embed
+    from pkb.graph import store as gstore
+    from pkb.graph.schema import get_connection, init_schema
+
+    try:
+        data = json.loads(items_json)
+    except json.JSONDecodeError as e:
+        return f"오류: JSON 파싱 실패: {e}"
+
+    items = data.get("items") or []
+    if not items:
+        return "저장할 항목이 없습니다."
+
+    init_schema(_settings.graph_db_path)
+    conn = get_connection(_settings.graph_db_path)
+    total_concepts = 0
+    total_edges = 0
+    total_mentions = 0
+
+    try:
+        for item in items:
+            doc_id = item.get("doc_id")
+            chunk_index = item.get("chunk_index")
+            if not doc_id or chunk_index is None:
+                continue
+
+            gstore.upsert_document(
+                conn,
+                doc_id=doc_id,
+                title=item.get("title"),
+                category=item.get("category"),
+            )
+
+            concepts = item.get("concepts") or []
+            if concepts:
+                name_and_desc = [
+                    f"{c.get('name','')}: {c.get('description','')}".strip(": ")
+                    for c in concepts
+                ]
+                vecs = embed(name_and_desc) if name_and_desc else []
+
+                name_to_id: dict[str, int] = {}
+                for c, vec in zip(concepts, vecs):
+                    name = c.get("name", "").strip()
+                    if not name:
+                        continue
+                    cid = gstore.upsert_concept(
+                        conn,
+                        name=name,
+                        description=(c.get("description") or "").strip(),
+                        category=item.get("category"),
+                        embedding=vec,
+                    )
+                    total_concepts += 1
+                    name_to_id[gstore.make_slug(name)] = cid
+                    for alias in c.get("aliases", []) or []:
+                        if isinstance(alias, str) and alias.strip():
+                            gstore.add_alias(conn, cid, alias)
+                    gstore.add_mention(
+                        conn, cid, doc_id, int(chunk_index), item.get("section_path", "") or ""
+                    )
+                    total_mentions += 1
+
+                for r in item.get("relations") or []:
+                    src, dst, rtype = r.get("src"), r.get("dst"), r.get("type")
+                    if not all(isinstance(x, str) and x.strip() for x in (src, dst, rtype)):
+                        continue
+                    src_id = name_to_id.get(gstore.make_slug(src))
+                    dst_id = name_to_id.get(gstore.make_slug(dst))
+                    if not src_id:
+                        row = gstore.get_concept(conn, src)
+                        src_id = row["id"] if row else None
+                    if not dst_id:
+                        row = gstore.get_concept(conn, dst)
+                        dst_id = row["id"] if row else None
+                    if src_id and dst_id and src_id != dst_id:
+                        gstore.add_edge(conn, src_id, dst_id, rtype)
+                        total_edges += 1
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    return (
+        f"저장 완료: 항목 {len(items)}개 처리, "
+        f"개념 {total_concepts}개 / 관계 {total_edges}개 / 언급 {total_mentions}개 반영"
+    )
+
+
+@mcp.tool()
+def search_concepts(query: str, top_k: int = 10) -> str:
+    """개념 그래프에서 질의 임베딩과 유사한 개념을 검색합니다.
+
+    Args:
+        query: 검색 질의
+        top_k: 반환할 개념 수
+    """
+    from pkb.config import settings as _settings
+    from pkb.embeddings import embed
+    from pkb.graph import store as gstore
+    from pkb.graph.schema import get_connection
+
+    vec = embed([query])[0]
+    with get_connection(_settings.graph_db_path) as conn:
+        results = gstore.search_concepts_by_embedding(conn, vec, top_k=top_k)
+
+    if not results:
+        return "개념이 없습니다. 먼저 build_concept_graph로 그래프를 빌드하세요."
+
+    lines = [f"유사 개념 top-{len(results)}:"]
+    for row, score in results:
+        lines.append(
+            f"- [{score:.3f}] {row['name']} ({row['category'] or '-'}) "
+            f"mentions={row['mention_count']} | {row['description'] or ''}"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def explain_concept(name: str, depth: int = 1) -> str:
+    """개념의 설명, 이웃 개념(관계), 언급된 문서를 조회합니다.
+
+    Args:
+        name: 개념 이름 (별칭도 인식)
+        depth: 1=직접 이웃만, 2=이웃의 이웃까지 BFS
+    """
+    from pkb.config import settings as _settings
+    from pkb.graph import store as gstore
+    from pkb.graph.schema import get_connection
+
+    with get_connection(_settings.graph_db_path) as conn:
+        row = gstore.get_concept(conn, name)
+        if not row:
+            return f"개념을 찾을 수 없습니다: {name}"
+
+        lines = [f"# {row['name']}"]
+        if row["description"]:
+            lines.append(row["description"])
+        lines.append(f"\ncategory: {row['category'] or '-'}, mentions: {row['mention_count']}")
+
+        # 1-hop 관계 (outbound + inbound)
+        out_edges = gstore.list_edges(conn, row["id"])
+        in_edges = gstore.list_inbound_edges(conn, row["id"])
+        if out_edges:
+            lines.append(f"\n## 직접 관계 — 나가는 엣지 ({len(out_edges)}개)")
+            for e in out_edges:
+                lines.append(
+                    f"- [{e['relation']}] → {e['dst_name']} (weight={e['weight']:.1f})"
+                )
+        if in_edges:
+            lines.append(f"\n## 직접 관계 — 들어오는 엣지 ({len(in_edges)}개)")
+            for e in in_edges:
+                lines.append(
+                    f"- {e['src_name']} → [{e['relation']}] (weight={e['weight']:.1f})"
+                )
+
+        # 2-hop (outbound만)
+        if depth >= 2 and out_edges:
+            lines.append("\n## 2-hop 이웃 (outbound)")
+            seen = {row["id"]} | {e["dst_id"] for e in out_edges}
+            for e in out_edges:
+                sub = gstore.list_edges(conn, e["dst_id"])
+                for s in sub:
+                    if s["dst_id"] in seen:
+                        continue
+                    seen.add(s["dst_id"])
+                    lines.append(
+                        f"- {e['dst_name']} → [{s['relation']}] → {s['dst_name']}"
+                    )
+
+        # 언급 문서
+        mentions = gstore.list_mentions(conn, row["id"], limit=10)
+        if mentions:
+            lines.append(f"\n## 언급 문서 (상위 {len(mentions)})")
+            for m in mentions:
+                lines.append(
+                    f"- {m['doc_id']} #chunk{m['chunk_index']}"
+                    + (f" ({m['section_path']})" if m["section_path"] else "")
+                )
+
+        return "\n".join(lines)
+
+
+@mcp.tool()
+def related_concepts(
+    name: str, relation: str = "", direction: str = "both", top_k: int = 20
+) -> str:
+    """특정 개념의 직접 이웃을 조회 (outbound + inbound).
+
+    Args:
+        name: 개념 이름 또는 별칭
+        relation: 관계 타입 필터 (예: part_of). 빈 문자열이면 전체.
+        direction: "out" | "in" | "both" (기본 both)
+        top_k: 각 방향별 최대 반환 수
+    """
+    from pkb.config import settings as _settings
+    from pkb.graph import store as gstore
+    from pkb.graph.schema import get_connection
+
+    with get_connection(_settings.graph_db_path) as conn:
+        row = gstore.get_concept(conn, name)
+        if not row:
+            return f"개념을 찾을 수 없습니다: {name}"
+
+        out_edges = []
+        in_edges = []
+        if direction in ("out", "both"):
+            out_edges = gstore.list_edges(conn, row["id"], relation=relation or None)[:top_k]
+        if direction in ("in", "both"):
+            in_edges = gstore.list_inbound_edges(
+                conn, row["id"], relation=relation or None
+            )[:top_k]
+
+    if not out_edges and not in_edges:
+        return f"{row['name']}의 이웃이 없습니다."
+
+    lines = [f"{row['name']}의 이웃:"]
+    if out_edges:
+        lines.append(f"\n## Outbound ({len(out_edges)}개)")
+        for e in out_edges:
+            lines.append(f"- [{e['relation']}] → {e['dst_name']} (weight={e['weight']:.1f})")
+    if in_edges:
+        lines.append(f"\n## Inbound ({len(in_edges)}개)")
+        for e in in_edges:
+            lines.append(f"- {e['src_name']} → [{e['relation']}] (weight={e['weight']:.1f})")
+    return "\n".join(lines)
+
+
 if __name__ == "__main__":
     mcp.run()

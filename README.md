@@ -123,6 +123,7 @@ Claude Code에서 자연스럽게 대화:
 - [MCP 연동 상세](docs/mcp.md) — 등록, 도구 목록, 사용 예시
 - [아키텍처 상세](docs/architecture.md) — 데이터 흐름, 구성요소
 - [CLI 사용법](docs/usage.md) — MCP 외 직접 사용(옵션)
+- [Phase 3: Graph RAG 설계](docs/phase3-graph-rag.md) — SQLite 기반 개념 그래프 MVP (예정)
 
 ## 기술 스택
 

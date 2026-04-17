@@ -434,5 +434,129 @@ def serve(
     uvicorn.run(web_app, host=host, port=port)
 
 
+graph_app = typer.Typer(help="개념 그래프 빌드/조회 (SQLite 기반 Graph RAG 보조)")
+app.add_typer(graph_app, name="graph")
+
+
+@graph_app.command("build")
+def graph_build(
+    category: str = typer.Option("", help="대상 카테고리"),
+    doc_id: str = typer.Option("", help="대상 문서 ID"),
+    rebuild: bool = typer.Option(False, help="기존 mentions 삭제 후 재빌드"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="비용 추정 확인 생략"),
+):
+    """개념 그래프를 빌드합니다 (LLM 호출 발생)."""
+    from pkb.graph import builder
+    from pkb.store import get_client
+
+    if not category and not doc_id:
+        typer.echo("category 또는 doc_id 중 최소 하나는 지정해야 합니다.")
+        raise typer.Exit(1)
+
+    es = get_client()
+    filters = []
+    if category:
+        filters.append({"term": {"category": category}})
+    if doc_id:
+        filters.append({"term": {"doc_id": doc_id}})
+    pre = es.count(
+        index=settings.es_index,
+        query={"bool": {"filter": filters}} if filters else {"match_all": {}},
+    )
+    total = pre["count"]
+    typer.echo(f"빌드 대상: {total}개 청크")
+    typer.echo(f"비용 추정: {builder.estimate_cost(total)}")
+
+    if not yes and not typer.confirm("진행하시겠습니까?"):
+        typer.echo("취소.")
+        raise typer.Exit(0)
+
+    def cb(i, total, doc):
+        if i % 20 == 0 or i == total:
+            typer.echo(f"  [{i}/{total}] {doc}")
+
+    stats = builder.build(es, category=category, doc_id=doc_id, rebuild=rebuild, progress_cb=cb)
+    typer.echo(
+        f"\n완료: 처리 {stats['chunks_processed']}개 / 신규 개념 {stats['concepts_added']}개 / 신규 관계 {stats['edges_added']}개"
+    )
+
+
+@graph_app.command("stats")
+def graph_stats():
+    """그래프 통계 출력."""
+    from pkb.graph import store as gstore
+    from pkb.graph.schema import get_connection, init_schema
+
+    init_schema(settings.graph_db_path)
+    with get_connection(settings.graph_db_path) as conn:
+        s = gstore.stats(conn)
+    typer.echo(f"DB: {settings.graph_db_path}")
+    for k, v in s.items():
+        typer.echo(f"  {k}: {v}")
+
+
+@graph_app.command("export")
+def graph_export(
+    out: Path = typer.Argument(..., help="출력 파일 경로 (.json 또는 .mmd)"),
+    category: str = typer.Option("", help="카테고리 필터"),
+    min_weight: float = typer.Option(1.0, help="관계 최소 weight"),
+):
+    """그래프를 JSON 또는 Mermaid 파일로 내보냅니다."""
+    from pkb.graph.schema import get_connection, init_schema
+
+    init_schema(settings.graph_db_path)
+    with get_connection(settings.graph_db_path) as conn:
+        if category:
+            concepts = conn.execute(
+                "SELECT id, name, category, description, mention_count FROM concepts WHERE category = ?",
+                (category,),
+            ).fetchall()
+        else:
+            concepts = conn.execute(
+                "SELECT id, name, category, description, mention_count FROM concepts"
+            ).fetchall()
+        concept_ids = {c["id"] for c in concepts}
+        edges = conn.execute(
+            "SELECT src_id, dst_id, relation, weight FROM concept_edges WHERE weight >= ?",
+            (min_weight,),
+        ).fetchall()
+
+    edges = [e for e in edges if e["src_id"] in concept_ids and e["dst_id"] in concept_ids]
+    id_to_name = {c["id"]: c["name"] for c in concepts}
+
+    suffix = out.suffix.lower()
+    if suffix == ".json":
+        import json
+
+        data = {
+            "concepts": [dict(c) for c in concepts],
+            "edges": [
+                {
+                    "src": id_to_name[e["src_id"]],
+                    "dst": id_to_name[e["dst_id"]],
+                    "type": e["relation"],
+                    "weight": e["weight"],
+                }
+                for e in edges
+            ],
+        }
+        out.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    elif suffix in (".mmd", ".md"):
+        lines = ["graph LR"]
+        for c in concepts:
+            safe = c["name"].replace('"', "'")
+            lines.append(f'  n{c["id"]}["{safe}"]')
+        for e in edges:
+            lines.append(f'  n{e["src_id"]} -- {e["relation"]} --> n{e["dst_id"]}')
+        out.write_text("\n".join(lines), encoding="utf-8")
+    else:
+        typer.echo("지원 확장자: .json, .mmd")
+        raise typer.Exit(1)
+
+    typer.echo(
+        f"저장 완료: {out} (개념 {len(concepts)}, 관계 {len(edges)})"
+    )
+
+
 if __name__ == "__main__":
     app()
