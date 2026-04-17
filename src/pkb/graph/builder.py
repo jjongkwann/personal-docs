@@ -3,7 +3,8 @@
 ES에서 청크를 스캔 → LLM 추출 → SQLite에 저장.
 """
 
-from typing import Iterator
+import contextlib
+from collections.abc import Iterator
 
 from elasticsearch import Elasticsearch
 
@@ -47,10 +48,8 @@ def _iter_chunks(
             scroll_id = resp.get("_scroll_id")
     finally:
         if scroll_id:
-            try:
+            with contextlib.suppress(Exception):
                 es.clear_scroll(scroll_id=scroll_id)
-            except Exception:
-                pass
 
 
 def estimate_cost(chunk_count: int) -> str:
@@ -148,7 +147,7 @@ def build(
             embeddings = embed(names_for_embed) if names_for_embed else []
 
             name_to_id: dict[str, int] = {}
-            for c, emb in zip(concepts, embeddings):
+            for c, emb in zip(concepts, embeddings, strict=False):
                 cid = store.upsert_concept(
                     conn,
                     name=c["name"],
@@ -161,7 +160,8 @@ def build(
                     if isinstance(alias, str) and alias.strip():
                         store.add_alias(conn, cid, alias)
                 store.add_mention(
-                    conn, cid, chunk["doc_id"], chunk["chunk_index"], chunk.get("section_path") or ""
+                    conn, cid, chunk["doc_id"], chunk["chunk_index"],
+                    chunk.get("section_path") or "",
                 )
 
             # 관계

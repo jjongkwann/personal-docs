@@ -40,8 +40,8 @@ def _check_same_origin(request: Request) -> None:
         return
     try:
         origin_host = urlparse(origin).netloc
-    except ValueError:
-        raise HTTPException(status_code=403, detail="invalid origin")
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail="invalid origin") from e
 
     request_host = request.headers.get("host", "")
     if origin_host != request_host:

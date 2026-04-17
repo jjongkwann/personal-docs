@@ -1,3 +1,5 @@
+import contextlib
+
 from elasticsearch import Elasticsearch, NotFoundError
 
 from pkb.config import settings
@@ -51,10 +53,8 @@ def create_index(es: Elasticsearch) -> None:
 
 
 def delete_index(es: Elasticsearch) -> None:
-    try:
+    with contextlib.suppress(NotFoundError):
         es.indices.delete(index=settings.es_index)
-    except NotFoundError:
-        pass
 
 
 def add_chunks(

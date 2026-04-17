@@ -54,7 +54,9 @@ class ExtractionError(Exception):
     """추출 실패. API 크레딧/네트워크 등 치명적 오류에 발생."""
 
 
-def extract_from_chunk(chunk_content: str, raise_on_api_error: bool = True) -> tuple[list[dict], list[dict]]:
+def extract_from_chunk(
+    chunk_content: str, raise_on_api_error: bool = True
+) -> tuple[list[dict], list[dict]]:
     """청크에서 개념/관계 추출. (concepts, relations) 반환.
 
     Args:

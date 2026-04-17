@@ -1,17 +1,17 @@
 from pathlib import Path
-from typing import Optional
 
 from langchain_core.tools import tool
 
 from pkb.config import settings
 from pkb.retrieve import hybrid_search
-from pkb.store import get_client, list_documents as _list_documents
+from pkb.store import get_client
+from pkb.store import list_documents as _list_documents
 
 
 @tool
 def search_knowledge(
     query: str,
-    category: Optional[str] = None,
+    category: str | None = None,
     top_k: int = 5,
 ) -> str:
     """개인 지식 베이스에서 관련 정보를 검색합니다.
@@ -19,7 +19,7 @@ def search_knowledge(
 
     Args:
         query: 검색할 질문 또는 키워드
-        category: 카테고리 필터 (about: 자기소개, career: 경력, study: 공부 노트, writing: 글쓰기). None이면 전체 검색.
+        category: 카테고리 필터 (about/career/study/writing). None이면 전체 검색.
         top_k: 반환할 결과 수
     """
     es = get_client()
@@ -74,7 +74,7 @@ def write_file(file_path: str, content: str, ingest: bool = True) -> str:
 
 
 @tool
-def list_documents(category: Optional[str] = None) -> str:
+def list_documents(category: str | None = None) -> str:
     """저장된 문서 목록을 확인합니다.
 
     Args:

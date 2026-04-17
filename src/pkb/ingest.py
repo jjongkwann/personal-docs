@@ -1,6 +1,6 @@
 import os
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import tiktoken
@@ -263,7 +263,7 @@ def process_file(
     title = fm_title or _extract_title(text, file_path)
     language = _detect_language(text)
     mtime = datetime.fromtimestamp(
-        os.path.getmtime(file_path), tz=timezone.utc
+        os.path.getmtime(file_path), tz=UTC
     ).strftime("%Y-%m-%d")
 
     results = []
@@ -308,7 +308,7 @@ def ingest_files(
         delete_document(es, chunks[0]["doc_id"])
         texts = [c["content"] for c in chunks]
         vectors = embed(texts)
-        for chunk, vector in zip(chunks, vectors):
+        for chunk, vector in zip(chunks, vectors, strict=False):
             chunk["embedding"] = vector
         total += add_chunks(es, chunks)
     return total

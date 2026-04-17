@@ -91,7 +91,10 @@ def reindex(
 @app.command()
 def convert(
     input_path: Path = typer.Argument(..., help="변환할 파일 경로 (PDF, DOCX, PPTX, XLSX, HTML)"),
-    category: str = typer.Option("misc", help="저장할 카테고리 (about/career/study/writing/misc). Claude Haiku로 자동 분류하려면 'auto' 명시"),
+    category: str = typer.Option(
+        "misc",
+        help="카테고리 (about/career/study/writing/misc). 자동 분류는 'auto'",
+    ),
     output: Path = typer.Option(None, help="저장 경로 (기본: data/<category>/<파일명>.md)"),
     ingest: bool = typer.Option(True, help="변환 후 자동 인제스트"),
 ):
@@ -116,10 +119,11 @@ def convert(
         typer.echo(f"→ {category}")
 
     # 출력 경로 결정
-    if output is None:
-        output = Path.cwd() / "data" / category / f"{input_path.stem}.md"
-    else:
-        output = output.resolve()
+    output = (
+        Path.cwd() / "data" / category / f"{input_path.stem}.md"
+        if output is None
+        else output.resolve()
+    )
 
     # data/ 하위인지 검증
     data_root = (Path.cwd() / "data").resolve()
@@ -148,7 +152,7 @@ def convert(
         delete_document(es, chunks[0]["doc_id"])
         texts = [c["content"] for c in chunks]
         vectors = embed(texts)
-        for chunk, vector in zip(chunks, vectors):
+        for chunk, vector in zip(chunks, vectors, strict=False):
             chunk["embedding"] = vector
         count = add_chunks(es, chunks)
         typer.echo(f"인제스트 완료: {count}개 청크")
@@ -156,7 +160,9 @@ def convert(
 
 @app.command()
 def add(
-    path: Path = typer.Argument(..., help="파일 또는 디렉터리 경로 (md, txt, pdf, docx, pptx, xlsx, html 지원)"),
+    path: Path = typer.Argument(
+        ..., help="파일/디렉터리 경로 (md/txt/pdf/docx/pptx/xlsx/html)"
+    ),
     tags: str = typer.Option("", help="쉼표 구분 태그 (예: python,backend)"),
 ):
     """문서를 인제스트하여 ES에 저장."""
@@ -191,7 +197,7 @@ def add(
         # 임베딩 생성
         texts = [c["content"] for c in chunks]
         vectors = embed(texts)
-        for chunk, vector in zip(chunks, vectors):
+        for chunk, vector in zip(chunks, vectors, strict=False):
             chunk["embedding"] = vector
 
         count = add_chunks(es, chunks)
@@ -217,8 +223,9 @@ def list(
     typer.echo(f"{'문서 ID':<40} {'카테고리':<10} {'청크':<6} {'수정일'}")
     typer.echo("-" * 75)
     for doc in docs:
+        mtime = doc.get("date_modified", "-")
         typer.echo(
-            f"{doc['doc_id']:<40} {doc['category']:<10} {doc['chunks']:<6} {doc.get('date_modified', '-')}"
+            f"{doc['doc_id']:<40} {doc['category']:<10} {doc['chunks']:<6} {mtime}"
         )
     typer.echo(f"\n총 {len(docs)}개 문서")
 
@@ -229,8 +236,8 @@ def query(
     category: str = typer.Option(None, help="카테고리 필터"),
     top_k: int = typer.Option(settings.default_top_k, help="결과 수"),
     rerank: bool = typer.Option(None, help="CrossEncoder 재순위 사용 (기본: 설정값)"),
-    fusion: str = typer.Option(None, help="하이브리드 결합 방식: rrf 또는 native (기본: 설정값)"),
-    expand: int = typer.Option(None, help="각 결과 전후 N청크(neighbors)를 함께 조회 (기본: 설정값)"),
+    fusion: str = typer.Option(None, help="결합 방식: rrf | native (기본: 설정값)"),
+    expand: int = typer.Option(None, help="전후 N청크 neighbors 포함 (기본: 설정값)"),
 ):
     """하이브리드 검색 (BM25 + kNN + RRF + 옵션 리랭커)."""
     from pkb.retrieve import hybrid_search
@@ -323,7 +330,12 @@ def watch():
     es = get_client()
 
     class IngestHandler(FileSystemEventHandler):
-        def __init__(self, base_dir: Path, doc_id_prefix: str = "", category_override: str | None = None):
+        def __init__(
+            self,
+            base_dir: Path,
+            doc_id_prefix: str = "",
+            category_override: str | None = None,
+        ):
             self.base_dir = base_dir
             self.doc_id_prefix = doc_id_prefix
             self.category_override = category_override
@@ -475,9 +487,13 @@ def graph_build(
         if i % 20 == 0 or i == total:
             typer.echo(f"  [{i}/{total}] {doc}")
 
-    stats = builder.build(es, category=category, doc_id=doc_id, rebuild=rebuild, progress_cb=cb)
+    stats = builder.build(
+        es, category=category, doc_id=doc_id, rebuild=rebuild, progress_cb=cb
+    )
     typer.echo(
-        f"\n완료: 처리 {stats['chunks_processed']}개 / 신규 개념 {stats['concepts_added']}개 / 신규 관계 {stats['edges_added']}개"
+        f"\n완료: 청크 {stats['chunks_processed']}개 / "
+        f"신규 개념 {stats['concepts_added']}개 / "
+        f"신규 관계 {stats['edges_added']}개"
     )
 
 

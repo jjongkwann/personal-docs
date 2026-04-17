@@ -22,7 +22,7 @@ def rerank(query: str, candidates: list[dict], top_k: int = 5) -> list[dict]:
     pairs = [(query, c.get("content", "")) for c in candidates]
     scores = get_reranker().predict(pairs, show_progress_bar=False)
 
-    for c, s in zip(candidates, scores):
+    for c, s in zip(candidates, scores, strict=False):
         c["rerank_score"] = float(s)
         c["score"] = float(s)  # rerank 후 점수는 CrossEncoder 기준
 

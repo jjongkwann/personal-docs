@@ -14,7 +14,7 @@ def search_knowledge(query: str, category: str = "", top_k: int = 5) -> str:
 
     Args:
         query: 검색할 질문 또는 키워드
-        category: 카테고리 필터 (about: 자기소개, career: 경력, study: 공부, writing: 글, obsidian). 빈 문자열이면 전체 검색.
+        category: 카테고리 필터 (about/career/study/writing/obsidian). 빈 문자열이면 전체.
         top_k: 반환할 결과 수
     """
     from pkb.config import settings as _settings
@@ -138,7 +138,7 @@ def add_document(file_path: str, tags: str = "") -> str:
 
     texts = [c["content"] for c in chunks]
     vectors = embed(texts)
-    for chunk, vector in zip(chunks, vectors):
+    for chunk, vector in zip(chunks, vectors, strict=False):
         chunk["embedding"] = vector
 
     count = add_chunks(es, chunks)
@@ -212,7 +212,7 @@ def convert_and_ingest(
             delete_document(es, chunks[0]["doc_id"])
             texts = [c["content"] for c in chunks]
             vectors = embed(texts)
-            for chunk, vector in zip(chunks, vectors):
+            for chunk, vector in zip(chunks, vectors, strict=False):
                 chunk["embedding"] = vector
             count = add_chunks(es, chunks)
             result += f"\n인제스트 완료: {count}개 청크"
@@ -528,7 +528,7 @@ def graph_store_concepts(items_json: str) -> str:
                 vecs = embed(name_and_desc) if name_and_desc else []
 
                 name_to_id: dict[str, int] = {}
-                for c, vec in zip(concepts, vecs):
+                for c, vec in zip(concepts, vecs, strict=False):
                     name = c.get("name", "").strip()
                     if not name:
                         continue

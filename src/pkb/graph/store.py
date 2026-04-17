@@ -1,16 +1,16 @@
 """개념 그래프 CRUD 레이어."""
 
+import contextlib
 import re
 import sqlite3
 import struct
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from pkb.config import settings
-from pkb.graph.schema import get_connection
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def make_slug(name: str) -> str:
@@ -34,7 +34,7 @@ def _unpack_embedding(blob: bytes) -> list[float]:
 def _cosine(a: list[float], b: list[float]) -> float:
     if not a or not b or len(a) != len(b):
         return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
+    dot = sum(x * y for x, y in zip(a, b, strict=False))
     na = sum(x * x for x in a) ** 0.5
     nb = sum(x * x for x in b) ** 0.5
     if na == 0 or nb == 0:
@@ -116,13 +116,11 @@ def upsert_concept(
         if match:
             existing = match[0]
             # 새 이름을 alias로 추가
-            try:
+            with contextlib.suppress(sqlite3.IntegrityError):
                 conn.execute(
                     "INSERT INTO concept_aliases (concept_id, alias, alias_slug) VALUES (?, ?, ?)",
                     (existing["id"], name, slug),
                 )
-            except sqlite3.IntegrityError:
-                pass
             conn.execute(
                 "UPDATE concepts SET mention_count = mention_count + 1, updated_at = ? WHERE id = ?",
                 (now, existing["id"]),
@@ -132,7 +130,8 @@ def upsert_concept(
     # 4. 신규 insert
     blob = _pack_embedding(embedding) if embedding else None
     cur = conn.execute(
-        "INSERT INTO concepts (name, slug, category, description, embedding, mention_count, created_at, updated_at) "
+        "INSERT INTO concepts "
+        "(name, slug, category, description, embedding, mention_count, created_at, updated_at) "
         "VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
         (name, slug, category, description, blob, now, now),
     )
@@ -141,13 +140,11 @@ def upsert_concept(
 
 def add_alias(conn: sqlite3.Connection, concept_id: int, alias: str) -> None:
     alias_slug = make_slug(alias)
-    try:
+    with contextlib.suppress(sqlite3.IntegrityError):
         conn.execute(
             "INSERT INTO concept_aliases (concept_id, alias, alias_slug) VALUES (?, ?, ?)",
             (concept_id, alias, alias_slug),
         )
-    except sqlite3.IntegrityError:
-        pass
 
 
 # ---------- Documents ----------
@@ -204,14 +201,12 @@ def add_mention(
     chunk_index: int,
     section_path: str = "",
 ) -> None:
-    try:
+    with contextlib.suppress(sqlite3.IntegrityError):
         conn.execute(
             "INSERT INTO concept_mentions (concept_id, doc_id, chunk_index, section_path) "
             "VALUES (?, ?, ?, ?)",
             (concept_id, doc_id, chunk_index, section_path),
         )
-    except sqlite3.IntegrityError:
-        pass
 
 
 # ---------- Queries ----------
