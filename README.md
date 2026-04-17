@@ -1,24 +1,30 @@
 # PKB - Personal Knowledge Base
 
-**로컬**에서 돌아가는 개인 지식 베이스. 내가 큐레이션한 문서(경력, 공부 노트, 자료 등)만을 소스로 사용해, 외부 검색 없이 **통제된 데이터**에서 정보를 빠르게 꺼내 씁니다.
+**로컬 저장소와 로컬 검색 인덱스**를 중심으로 돌아가는 개인 지식 베이스. 내가 큐레이션한 문서(경력, 공부 노트, 자료 등)만을 소스로 사용해, 외부 웹 검색 없이 **통제된 데이터**에서 정보를 빠르게 꺼내 씁니다.
 
-Claude Code에 **MCP**로 연결하면 대화 중 이 데이터를 바로 검색/참조/작성할 수 있습니다. 웹 검색이나 일반 문서 업로드가 아니라, **내가 쌓은 자료만** 근거로 답하는 구조.
+Claude Code에 **MCP**로 연결하면 대화 중 이 데이터를 바로 검색/참조/작성할 수 있습니다. 문서 원본과 Elasticsearch/SQLite 인덱스는 로컬에 두고, Claude Code 또는 CLI/Web 에이전트를 쓸 때만 선택적으로 LLM API를 호출합니다.
 
 주요 용도:
 - "내가 예전에 정리한 X 내용이 뭐였지?" 즉시 조회
-- 외부 유출 없이 완전 로컬에서 처리
+- Obsidian 노트, 공부 자료, 경력 문서 검색
+- 검색 결과를 바탕으로 새 마크다운 작성 후 자동 인제스트
+- 개념 그래프를 이용해 자료 전체의 관계/로드맵 탐색
 
 ## 아키텍처 (요약)
 
-세 개의 층으로 구성됩니다:
+네 개의 층으로 구성됩니다:
 
 1. **`data/`** — 개인 문서 원본 저장소 (Source of Truth)
-2. **Elasticsearch** — 검색 엔진 (nori 한국어 분석 + dense_vector kNN)
-3. **MCP 서버** — Claude Code에서 도구로 바로 접근
+2. **Elasticsearch** — 청크 검색 엔진 (nori 한국어 분석 + dense_vector kNN)
+3. **SQLite Graph DB** — 개념/관계 그래프 (Graph RAG 보조)
+4. **MCP 서버** — Claude Code에서 도구로 바로 접근
 
 ```
 [인제스트]
   data/의 문서(md/pdf/docx) → frontmatter 파싱 → 계층적 청킹 → 임베딩 → Elasticsearch 저장
+
+[개념 그래프]
+  ES 청크 → Claude Code/Haiku로 개념·관계 추출 → data/.graph/pkb_graph.sqlite 저장
 
 [대화 (Claude Code + MCP)]
   Claude Code 대화 메시지
@@ -28,7 +34,9 @@ Claude Code에 **MCP**로 연결하면 대화 중 이 데이터를 바로 검색
     ├─ write_file        → data/ 파일 작성 (자동 인제스트)
     ├─ list_documents    → 저장된 문서 목록
     ├─ add_document      → 문서 인제스트
-    └─ convert_and_ingest → PDF/DOCX → .md 변환 + 인제스트
+    ├─ convert_and_ingest → PDF/DOCX → .md 변환 + 인제스트
+    ├─ sync_obsidian / reindex_document / doctor
+    └─ search_concepts / explain_concept / related_concepts
 ```
 
 상세 구조는 [docs/architecture.md](docs/architecture.md)를 참조하세요.
@@ -117,19 +125,82 @@ Claude Code에서 자연스럽게 대화:
 - *"내 study 자료 중 BM25 관련 내용 찾아줘"*
 - *"저장된 문서 목록 보여줘"*
 - *"방금 찾은 내용 요약해서 `data/writing/summary.md`에 저장해줘"*
+- *"DI, IoC, Bean, Container 개념이 어떻게 연결돼 있어?"*
+
+CLI로 직접 확인:
+
+```bash
+# 검색 (RRF + 리랭커)
+uv run pkb query "DI IoC 의존성 주입" --category obsidian
+
+# 주변 청크를 함께 확인
+uv run pkb query "RAG 검색 품질 개선" --category study --expand 1
+
+# 매핑 변경 후 전체 재인덱싱
+uv run pkb reindex
+
+# SQLite 개념 그래프
+uv run pkb graph stats
+uv run pkb graph build --category study
+uv run pkb graph export /tmp/pkb-graph.mmd
+```
+
+## MCP 도구
+
+Claude Code에서 사용할 수 있는 주요 도구:
+
+| 도구 | 역할 |
+|------|------|
+| `search_knowledge` | 개인 지식 베이스 검색 (BM25 + kNN + RRF + 리랭커) |
+| `write_file` | `data/` 하위 `.md` 작성 + 기본 자동 인제스트 |
+| `list_documents` | ES에 저장된 문서 목록 조회 |
+| `add_document` | `data/` 하위 문서 인제스트 |
+| `convert_and_ingest` | 외부 PDF/DOCX/PPTX/XLSX/HTML을 `.md`로 변환 후 인제스트 |
+| `sync_obsidian` | Obsidian 볼트 일괄 동기화 |
+| `get_document` | 특정 문서의 청크와 `section_path` 조회 |
+| `reindex_document` | 특정 원본 문서 재인제스트 |
+| `doctor` | ES 연결, 인덱스, 설정 상태 점검 |
+| `graph_list_chunks` | Graph RAG 추출용 청크 페이지 조회 |
+| `graph_store_concepts` | Claude Code가 추출한 개념/관계를 SQLite에 저장 |
+| `search_concepts` | 개념 그래프에서 유사 개념 검색 |
+| `explain_concept` | 개념 설명, 관계, 언급 문서 조회 |
+| `related_concepts` | 특정 개념의 직접 이웃 조회 |
+
+## 설정
+
+`.env`에서 자주 쓰는 설정:
+
+```env
+ES_HOST=http://localhost:9200
+ES_INDEX=pkb_documents
+OBSIDIAN_PATH=/path/to/obsidian-vault
+
+FUSION=rrf
+RERANK_ENABLED=true
+CANDIDATE_K=50
+EXPAND_CONTEXT=0
+
+GRAPH_DB_PATH=data/.graph/pkb_graph.sqlite
+GRAPH_EXTRACT_MODEL=claude-haiku-4-5-20251001
+GRAPH_DEDUP_THRESHOLD=0.88
+```
+
+`EXPAND_CONTEXT=1`로 설정하면 검색 결과마다 전후 청크가 `neighbors`로 붙고, Web UI에서는 접을 수 있는 주변 청크 영역으로 표시됩니다.
 
 ## 문서
 
 - [MCP 연동 상세](docs/mcp.md) — 등록, 도구 목록, 사용 예시
 - [아키텍처 상세](docs/architecture.md) — 데이터 흐름, 구성요소
 - [CLI 사용법](docs/usage.md) — MCP 외 직접 사용(옵션)
-- [Phase 3: Graph RAG 설계](docs/phase3-graph-rag.md) — SQLite 기반 개념 그래프 MVP (예정)
+- [Phase 3: Graph RAG 설계](docs/phase3-graph-rag.md) — SQLite 기반 개념 그래프 MVP
 
 ## 기술 스택
 
 - **MCP** — Claude Code 직접 통합 (기본 사용 방법)
 - **Elasticsearch 8.x** — nori 한국어 형태소 분석 + dense_vector kNN
-- **sentence-transformers** — 로컬 임베딩 (`paraphrase-multilingual-MiniLM-L12-v2`, 384차원)
+- **sentence-transformers** — 로컬 임베딩 + CrossEncoder 리랭커
 - **markitdown** — PDF/DOCX/PPTX/XLSX/HTML → 마크다운 변환
+- **SQLite** — 개념 그래프 저장소 (`data/.graph/pkb_graph.sqlite`)
 - **LangGraph + LangChain** — 대화형 에이전트 (CLI/Web 대체 인터페이스용)
 - **typer** — CLI / **FastAPI + Jinja2** — Web UI (옵션)
+- **PyYAML** — 마크다운 frontmatter 파싱
