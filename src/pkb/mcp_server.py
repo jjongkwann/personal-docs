@@ -719,5 +719,30 @@ def related_concepts(
     return "\n".join(lines)
 
 
+def _warmup_background() -> None:
+    """서버 기동 직후 백그라운드로 embedding/rerank 모델 + ES 경로를 예열.
+    실패해도 서버 기동·정상 경로를 막지 않는다."""
+    try:
+        from pkb.retrieve import hybrid_search
+        from pkb.store import get_client
+
+        hybrid_search(
+            get_client(),
+            "warmup",
+            top_k=1,
+            rerank=True,
+            log=False,
+        )
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
+    import threading
+
+    from pkb.config import settings as _settings
+
+    if _settings.warmup_on_start:
+        threading.Thread(target=_warmup_background, daemon=True).start()
+
     mcp.run()
