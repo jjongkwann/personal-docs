@@ -20,12 +20,12 @@ def init():
 @app.command()
 def convert(
     input_path: Path = typer.Argument(..., help="변환할 파일 경로 (PDF, DOCX, PPTX, XLSX, HTML)"),
-    category: str = typer.Option("misc", help="저장할 카테고리 (about/career/study/writing/misc)"),
+    category: str = typer.Option("auto", help="저장할 카테고리 (auto/about/career/study/writing/misc). auto는 Claude가 자동 분류"),
     output: Path = typer.Option(None, help="저장 경로 (기본: data/<category>/<파일명>.md)"),
     ingest: bool = typer.Option(True, help="변환 후 자동 인제스트"),
 ):
     """PDF/DOCX/PPTX/XLSX/HTML을 마크다운으로 변환하여 data/에 저장."""
-    from pkb.ingest import SUPPORTED_EXTENSIONS, read_file_as_text
+    from pkb.ingest import SUPPORTED_EXTENSIONS, classify_category, read_file_as_text
 
     input_path = input_path.resolve()
     if not input_path.exists():
@@ -34,6 +34,15 @@ def convert(
     if input_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
         typer.echo(f"지원하지 않는 형식입니다: {input_path.suffix}")
         raise typer.Exit(1)
+
+    # 텍스트 추출 먼저 (자동 분류에도 필요)
+    text = read_file_as_text(input_path)
+
+    # 카테고리 자동 분류
+    if category == "auto":
+        typer.echo("카테고리 자동 분류 중...")
+        category = classify_category(text)
+        typer.echo(f"→ {category}")
 
     # 출력 경로 결정
     if output is None:
@@ -48,7 +57,6 @@ def convert(
         raise typer.Exit(1)
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    text = read_file_as_text(input_path)
     # 원본 파일 정보를 주석 헤더로 추가
     header = f"<!-- source: {input_path.name} | converted: {input_path.suffix} → .md -->\n\n"
     output.write_text(header + text, encoding="utf-8")

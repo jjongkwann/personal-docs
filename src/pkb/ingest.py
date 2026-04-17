@@ -36,6 +36,38 @@ def read_file_as_text(file_path: Path) -> str:
     return result.text_content
 
 
+VALID_CATEGORIES = {"about", "career", "study", "writing", "misc"}
+
+
+def classify_category(text: str) -> str:
+    """Claude로 문서 내용 기반 카테고리 자동 분류."""
+    from langchain_anthropic import ChatAnthropic
+
+    preview = text[:2000]
+    llm = ChatAnthropic(
+        model="claude-haiku-4-5-20251001",
+        api_key=settings.anthropic_api_key,
+        max_tokens=10,
+    )
+    prompt = f"""다음 문서를 카테고리 하나로 분류하세요. 답변은 카테고리 이름 한 단어만.
+
+카테고리:
+- about: 자기소개, 개인 관심사/취향
+- career: 경력, 프로젝트, 기술 스택, 업무 이력
+- study: 공부 노트, 학습 자료, 교재, 논문
+- writing: 글 초안, 아이디어, 에세이
+- misc: 위 중 어느 것도 아닌 경우
+
+문서 내용 (앞부분):
+{preview}
+
+카테고리:"""
+    response = llm.invoke(prompt)
+    content = response.content if isinstance(response.content, str) else str(response.content)
+    category = content.strip().lower()
+    return category if category in VALID_CATEGORIES else "misc"
+
+
 def _get_encoder() -> tiktoken.Encoding:
     global _encoder
     if _encoder is None:

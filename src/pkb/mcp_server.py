@@ -134,23 +134,37 @@ def add_document(file_path: str, tags: str = "") -> str:
 @mcp.tool()
 def convert_and_ingest(
     input_path: str,
-    category: str = "misc",
+    category: str,
     output_name: str = "",
     ingest: bool = True,
 ) -> str:
     """PDF/DOCX/PPTX/XLSX/HTML 파일을 마크다운으로 변환하여 data/에 저장하고 인제스트합니다.
     원본 파일은 어느 위치에 있어도 되며, 변환된 .md는 data/<category>/에 저장됩니다.
 
+    **카테고리 선택 가이드** (내용을 보고 직접 판단하여 지정):
+    - about: 자기소개, 개인 관심사/취향
+    - career: 경력, 프로젝트, 기술 스택, 업무 이력
+    - study: 공부 노트, 학습 자료, 교재, 논문
+    - writing: 글 초안, 아이디어, 에세이
+    - misc: 위 중 어느 것도 아닌 경우
+
+    파일 내용(또는 파일명/경로)을 보고 위 5가지 중 하나로 분류한 뒤 호출하세요.
+
     Args:
         input_path: 변환할 원본 파일 경로 (절대경로 가능)
-        category: 저장할 카테고리 (about, career, study, writing, misc). 기본값: misc
+        category: 저장할 카테고리. 위 5가지 중 하나를 내용 기반으로 선택.
         output_name: 저장할 파일명 (확장자 제외). 빈 문자열이면 원본 파일명 사용.
         ingest: 변환 후 자동 인제스트 여부
     """
     from pathlib import Path
 
     from pkb.embeddings import embed
-    from pkb.ingest import SUPPORTED_EXTENSIONS, process_file, read_file_as_text
+    from pkb.ingest import (
+        SUPPORTED_EXTENSIONS,
+        VALID_CATEGORIES,
+        process_file,
+        read_file_as_text,
+    )
     from pkb.store import add_chunks, delete_document, get_client
 
     src = Path(input_path).expanduser().resolve()
@@ -158,6 +172,10 @@ def convert_and_ingest(
         return f"파일을 찾을 수 없습니다: {input_path}"
     if src.suffix.lower() not in SUPPORTED_EXTENSIONS:
         return f"지원하지 않는 형식입니다: {src.suffix} (지원: {sorted(SUPPORTED_EXTENSIONS)})"
+    if category not in VALID_CATEGORIES:
+        return f"유효하지 않은 카테고리: {category} (허용: {sorted(VALID_CATEGORIES)})"
+
+    text = read_file_as_text(src)
 
     base_dir = Path.cwd()
     data_root = (base_dir / "data").resolve()
@@ -168,7 +186,6 @@ def convert_and_ingest(
         return f"오류: 저장 경로가 data/ 밖입니다. (카테고리/파일명 확인: {category}/{stem})"
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    text = read_file_as_text(src)
     header = f"<!-- source: {src.name} | converted: {src.suffix} → .md -->\n\n"
     output.write_text(header + text, encoding="utf-8")
 

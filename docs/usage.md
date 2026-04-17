@@ -48,12 +48,16 @@ data/
 원본은 어느 위치든 상관없습니다. 변환된 `.md`가 `data/<category>/`에 저장되고 자동 인제스트됩니다:
 
 ```bash
-# PDF → data/study/논문.md + 인제스트
+# 카테고리 자동 분류 (Claude Haiku가 내용 기반으로 판단)
+uv run pkb convert ~/Downloads/paper.pdf
+# → "카테고리 자동 분류 중... → study" 후 data/study/paper.md에 저장
+
+# 명시적 카테고리 지정
 uv run pkb convert ~/Downloads/paper.pdf --category study
 
 # 자동 인제스트 끄기 (검토 후 수동 인제스트)
-uv run pkb convert ~/Downloads/doc.docx --category study --ingest false
-uv run pkb add data/study/doc.md   # 나중에 인제스트
+uv run pkb convert ~/Downloads/doc.docx --ingest false
+uv run pkb add data/<분류된-카테고리>/doc.md   # 나중에 인제스트
 ```
 
 ---
