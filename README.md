@@ -1,130 +1,73 @@
 # PKB - Personal Knowledge Base
 
-대화형 에이전틱 RAG 시스템. 개인 데이터를 저장하고, 대화를 통해 질문에 답하거나 블로그/이력서 등을 생성합니다.
+**로컬**에서 돌아가는 개인 지식 베이스. 내가 큐레이션한 문서(경력, 공부 노트, 자료 등)만을 소스로 사용해, 외부 검색 없이 **통제된 데이터**에서 정보를 빠르게 꺼내 씁니다.
 
-## 아키텍처
+Claude Code에 **MCP**로 연결하면 대화 중 이 데이터를 바로 검색/참조/작성할 수 있습니다. 웹 검색이나 일반 문서 업로드가 아니라, **내가 쌓은 자료만** 근거로 답하는 구조.
+
+주요 용도:
+- "내가 예전에 정리한 X 내용이 뭐였지?" 즉시 조회
+- 외부 유출 없이 완전 로컬에서 처리
+
+## 아키텍처 (요약)
+
+세 개의 층으로 구성됩니다:
+
+1. **`data/`** — 개인 문서 원본 저장소 (Source of Truth)
+2. **Elasticsearch** — 검색 엔진 (nori 한국어 분석 + dense_vector kNN)
+3. **MCP 서버** — Claude Code에서 도구로 바로 접근
 
 ```
-문서(Markdown) → 청킹 → 임베딩 → Elasticsearch 저장
-                                        ↓
-사용자 대화 → LangGraph 에이전트 (ReAct) → 도구 호출 판단
-                ├─ search_knowledge: ES 하이브리드 검색 (BM25 + kNN)
-                ├─ write_file: 파일 작성 (블로그, 이력서 등)
-                ├─ list_documents: 저장된 문서 목록
-                └─ 직접 답변
+[인제스트]
+  data/의 문서(md/pdf/docx) → 청킹 → 임베딩 → Elasticsearch 저장
+
+[대화 (Claude Code + MCP)]
+  Claude Code 대화 메시지
+    ↓
+  PKB MCP 도구 호출
+    ├─ search_knowledge  → ES 하이브리드 검색 (BM25 + kNN)
+    ├─ write_file        → data/ 파일 작성
+    ├─ list_documents    → 저장된 문서 목록
+    ├─ add_document      → 문서 인제스트
+    └─ convert_and_ingest → PDF/DOCX → .md 변환 + 인제스트
 ```
 
-- **LangGraph + LangChain** — 에이전트 루프, 도구 사용, 대화 히스토리
-- **Elasticsearch 8.x** — nori 한국어 형태소 분석 + dense_vector kNN
-- **sentence-transformers** — 로컬 임베딩 (`paraphrase-multilingual-MiniLM-L12-v2`, 384차원)
-- **Claude API** — LLM (langchain-anthropic)
-- **typer** — CLI / **FastAPI + Jinja2** — Web UI
+상세 구조는 [docs/architecture.md](docs/architecture.md)를 참조하세요.
 
-## 시작하기
+## 시작하기 (MCP 중심)
 
 ### 사전 요구사항
 
 - Python 3.11+
 - Docker
 - [uv](https://docs.astral.sh/uv/)
-- `ANTHROPIC_API_KEY` (Claude API 키)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
 
-### 설치
+### 1. 설치 및 ES 시작
 
 ```bash
+# 레포 클론
+git clone <repo-url> personal-docs
+cd personal-docs
+
 # ES 컨테이너 빌드 및 실행 (nori 플러그인 포함)
 docker compose up -d
 
 # Python 의존성 설치
 uv sync
 
-# 환경 변수 설정
-cp .env.example .env
-# .env 파일에 ANTHROPIC_API_KEY 입력
-
 # ES 인덱스 초기화
 uv run pkb init
 ```
 
-## 사용법
+### 2. MCP 서버를 Claude Code에 등록
 
-### 대화형 RAG
-
-```bash
-uv run pkb chat
-```
-
-```
-질문> 내가 공부한 RAG 관련 내용 정리해줘
-# → search_knowledge 도구로 study 카테고리 검색 후 답변
-
-질문> 그걸 블로그 포스트로 만들어서 data/writing/rag-blog.md에 저장해줘
-# → 검색 + write_file 도구로 파일 생성
-
-질문> 내 경력 정보로 ML 엔지니어 이력서 만들어줘
-# → career 카테고리 검색 + 이력서 작성 + 파일 저장
-```
-
-에이전트가 자동으로 검색 필요 여부를 판단하고, 적절한 도구를 호출합니다.
-
-### 문서 인제스트
+프로젝트 디렉터리에서:
 
 ```bash
-# 단일 파일
-uv run pkb add data/about/bio.md
-
-# 디렉터리 전체 (재귀)
-uv run pkb add data/study/
-
-# 태그 지정
-uv run pkb add data/career/ --tags "python,backend,fastapi"
+claude mcp add pkb -s user -- uv --directory "$(pwd)" run python -m pkb.mcp_server
 ```
 
-`data/` 디렉터리 구조:
-
-```
-data/
-├── about/       # 자기소개, 관심사
-├── career/      # 경력, 기술 스택, 프로젝트
-├── study/       # 공부 노트, 교재
-└── writing/     # 블로그 아이디어, 초안
-```
-
-### 단순 검색 (에이전트 없이)
-
-```bash
-uv run pkb query "벡터 검색의 원리는?"
-uv run pkb query "Python 프레임워크 경험" --category career --top-k 10
-```
-
-### 문서 관리
-
-```bash
-uv run pkb list
-uv run pkb list --category study
-uv run pkb delete data/study/rag-overview.md
-```
-
-### Web UI
-
-```bash
-uv run pkb serve
-# http://localhost:8000
-```
-
-브라우저에서 문서 목록, 검색, 채팅을 할 수 있습니다.
-
-### Claude Code MCP 연동
-
-Claude Code 어느 세션에서든 PKB MCP 도구를 사용할 수 있습니다.
-
-MCP 도구:
-- `search_knowledge` — 하이브리드 검색 (BM25 + kNN)
-- `write_file` — 파일 작성 (data/ 하위만 허용)
-- `list_documents` — 문서 목록
-- `add_document` — 문서 인제스트
-
-`~/.claude.json`의 `mcpServers`에 등록 (경로는 이 레포를 클론한 실제 경로로 교체):
+또는 `~/.claude.json`의 `mcpServers`에 직접 추가 (경로는 실제 경로로):
 
 ```json
 {
@@ -137,50 +80,44 @@ MCP 도구:
 }
 ```
 
-또는 프로젝트 디렉터리에서 CLI로 등록:
+Claude Code 재시작 후 `/mcp`로 `pkb` 서버가 연결됐는지 확인.
 
-```bash
-claude mcp add pkb -s user -- uv --directory "$(pwd)" run python -m pkb.mcp_server
-```
+### 3. 데이터 추가
 
-등록 후 Claude Code 재시작 → `/mcp`로 확인.
-
-## 프로젝트 구조
+`data/` 하위에 문서를 넣습니다:
 
 ```
-├── docker-compose.yml       # ES + nori 컨테이너
-├── Dockerfile.es            # ES 이미지 + nori 플러그인
-├── pyproject.toml
-├── .env.example             # 환경 변수 템플릿
-│
-├── data/                    # 개인 문서 (gitignored)
-│
-└── src/pkb/
-    ├── mcp_server.py        # MCP 서버 (Claude Code 연동)
-    ├── agent.py             # LangGraph ReAct 에이전트
-    ├── tools.py             # 에이전트 도구 (search, write, list)
-    ├── cli.py               # CLI 커맨드 (chat, add, query, list, delete, serve)
-    ├── config.py            # 설정 관리
-    ├── ingest.py            # 마크다운 파싱, 청킹
-    ├── embeddings.py        # sentence-transformers 임베딩
-    ├── store.py             # Elasticsearch CRUD, 인덱스 관리
-    ├── retrieve.py          # 하이브리드 검색 (BM25 + kNN)
-    ├── web.py               # FastAPI 웹 서버
-    └── templates/           # Jinja2 HTML 템플릿
+data/
+├── about/       # 자기소개, 관심사
+├── career/      # 경력, 기술 스택, 프로젝트
+├── study/       # 공부 노트, 교재
+└── writing/     # 초안, 노트
 ```
 
-## 설정
+Claude Code 대화 중 바로 인제스트 요청 가능:
 
-`.env` 파일:
+> "`~/Downloads/paper.pdf`를 study 카테고리로 넣어줘"
+> → `convert_and_ingest` 도구가 자동 호출
 
-```
-ANTHROPIC_API_KEY=sk-ant-...    # Claude API 키 (필수)
-ES_HOST=http://localhost:9200   # Elasticsearch 호스트 (기본값)
-ES_INDEX=pkb_documents          # 인덱스 이름 (기본값)
-```
+### 4. 사용
 
-## 청킹 전략
+Claude Code에서 자연스럽게 대화:
 
-- 마크다운 `## Heading` 경계에서 우선 분할
-- 고정 크기 500토큰 + 100토큰 오버랩
-- 단락(`\n\n`) 경계 존중
+- *"내 study 자료 중 BM25 관련 내용 찾아줘"*
+- *"저장된 문서 목록 보여줘"*
+- *"방금 찾은 내용 요약해서 `data/writing/summary.md`에 저장해줘"*
+
+## 문서
+
+- [MCP 연동 상세](docs/mcp.md) — 등록, 도구 목록, 사용 예시
+- [아키텍처 상세](docs/architecture.md) — 데이터 흐름, 구성요소
+- [CLI 사용법](docs/usage.md) — MCP 외 직접 사용(옵션)
+
+## 기술 스택
+
+- **MCP** — Claude Code 직접 통합 (기본 사용 방법)
+- **Elasticsearch 8.x** — nori 한국어 형태소 분석 + dense_vector kNN
+- **sentence-transformers** — 로컬 임베딩 (`paraphrase-multilingual-MiniLM-L12-v2`, 384차원)
+- **markitdown** — PDF/DOCX/PPTX/XLSX/HTML → 마크다운 변환
+- **LangGraph + LangChain** — 대화형 에이전트 (CLI/Web 대체 인터페이스용)
+- **typer** — CLI / **FastAPI + Jinja2** — Web UI (옵션)

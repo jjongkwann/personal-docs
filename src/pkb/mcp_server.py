@@ -37,7 +37,7 @@ def search_knowledge(query: str, category: str = "", top_k: int = 5) -> str:
 
 @mcp.tool()
 def write_file(file_path: str, content: str) -> str:
-    """파일을 작성합니다. 블로그 포스트, 이력서, 메모 등을 마크다운 파일로 저장합니다.
+    """파일을 작성합니다. 문서, 요약, 메모 등을 마크다운 파일로 저장합니다.
     data/ 하위 경로에만 저장 가능합니다.
 
     Args:
@@ -86,16 +86,16 @@ def list_documents(category: str = "") -> str:
 
 @mcp.tool()
 def add_document(file_path: str, tags: str = "") -> str:
-    """마크다운 파일을 지식 베이스에 인제스트합니다.
+    """파일을 지식 베이스에 인제스트합니다. md, txt, pdf, docx, pptx, xlsx, html 지원.
 
     Args:
-        file_path: 인제스트할 마크다운 파일 경로 (예: data/career/resume.md)
+        file_path: 인제스트할 파일 경로 (예: data/study/paper.pdf)
         tags: 쉼표 구분 태그 (예: python,backend)
     """
     from pathlib import Path
 
     from pkb.embeddings import embed
-    from pkb.ingest import process_file
+    from pkb.ingest import SUPPORTED_EXTENSIONS, process_file
     from pkb.store import add_chunks, delete_document, get_client
 
     base_dir = Path.cwd()
@@ -106,8 +106,8 @@ def add_document(file_path: str, tags: str = "") -> str:
         return f"오류: data/ 하위 경로만 인제스트할 수 있습니다. (입력: {file_path})"
     if not full_path.exists():
         return f"파일을 찾을 수 없습니다: {file_path}"
-    if full_path.suffix != ".md":
-        return f"마크다운 파일만 지원합니다: {file_path}"
+    if full_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+        return f"지원하지 않는 파일 형식입니다: {file_path} (지원: {sorted(SUPPORTED_EXTENSIONS)})"
 
     chunks = process_file(full_path, base_dir)
     if not chunks:
@@ -129,6 +129,64 @@ def add_document(file_path: str, tags: str = "") -> str:
 
     count = add_chunks(es, chunks)
     return f"인제스트 완료: {file_path} ({count}개 청크)"
+
+
+@mcp.tool()
+def convert_and_ingest(
+    input_path: str,
+    category: str = "misc",
+    output_name: str = "",
+    ingest: bool = True,
+) -> str:
+    """PDF/DOCX/PPTX/XLSX/HTML 파일을 마크다운으로 변환하여 data/에 저장하고 인제스트합니다.
+    원본 파일은 어느 위치에 있어도 되며, 변환된 .md는 data/<category>/에 저장됩니다.
+
+    Args:
+        input_path: 변환할 원본 파일 경로 (절대경로 가능)
+        category: 저장할 카테고리 (about, career, study, writing, misc). 기본값: misc
+        output_name: 저장할 파일명 (확장자 제외). 빈 문자열이면 원본 파일명 사용.
+        ingest: 변환 후 자동 인제스트 여부
+    """
+    from pathlib import Path
+
+    from pkb.embeddings import embed
+    from pkb.ingest import SUPPORTED_EXTENSIONS, process_file, read_file_as_text
+    from pkb.store import add_chunks, delete_document, get_client
+
+    src = Path(input_path).expanduser().resolve()
+    if not src.exists():
+        return f"파일을 찾을 수 없습니다: {input_path}"
+    if src.suffix.lower() not in SUPPORTED_EXTENSIONS:
+        return f"지원하지 않는 형식입니다: {src.suffix} (지원: {sorted(SUPPORTED_EXTENSIONS)})"
+
+    base_dir = Path.cwd()
+    data_root = (base_dir / "data").resolve()
+    stem = output_name or src.stem
+    output = (data_root / category / f"{stem}.md").resolve()
+
+    if not output.is_relative_to(data_root):
+        return f"오류: 저장 경로가 data/ 밖입니다. (카테고리/파일명 확인: {category}/{stem})"
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    text = read_file_as_text(src)
+    header = f"<!-- source: {src.name} | converted: {src.suffix} → .md -->\n\n"
+    output.write_text(header + text, encoding="utf-8")
+
+    result = f"변환 완료: {output.relative_to(base_dir)} ({len(text)}자)"
+
+    if ingest:
+        chunks = process_file(output, base_dir)
+        if chunks:
+            es = get_client()
+            delete_document(es, chunks[0]["doc_id"])
+            texts = [c["content"] for c in chunks]
+            vectors = embed(texts)
+            for chunk, vector in zip(chunks, vectors):
+                chunk["embedding"] = vector
+            count = add_chunks(es, chunks)
+            result += f"\n인제스트 완료: {count}개 청크"
+
+    return result
 
 
 if __name__ == "__main__":

@@ -18,20 +18,78 @@ def init():
 
 
 @app.command()
+def convert(
+    input_path: Path = typer.Argument(..., help="변환할 파일 경로 (PDF, DOCX, PPTX, XLSX, HTML)"),
+    category: str = typer.Option("misc", help="저장할 카테고리 (about/career/study/writing/misc)"),
+    output: Path = typer.Option(None, help="저장 경로 (기본: data/<category>/<파일명>.md)"),
+    ingest: bool = typer.Option(True, help="변환 후 자동 인제스트"),
+):
+    """PDF/DOCX/PPTX/XLSX/HTML을 마크다운으로 변환하여 data/에 저장."""
+    from pkb.ingest import SUPPORTED_EXTENSIONS, read_file_as_text
+
+    input_path = input_path.resolve()
+    if not input_path.exists():
+        typer.echo(f"파일을 찾을 수 없습니다: {input_path}")
+        raise typer.Exit(1)
+    if input_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+        typer.echo(f"지원하지 않는 형식입니다: {input_path.suffix}")
+        raise typer.Exit(1)
+
+    # 출력 경로 결정
+    if output is None:
+        output = Path.cwd() / "data" / category / f"{input_path.stem}.md"
+    else:
+        output = output.resolve()
+
+    # data/ 하위인지 검증
+    data_root = (Path.cwd() / "data").resolve()
+    if not output.is_relative_to(data_root):
+        typer.echo(f"출력 경로는 data/ 하위여야 합니다: {output}")
+        raise typer.Exit(1)
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    text = read_file_as_text(input_path)
+    # 원본 파일 정보를 주석 헤더로 추가
+    header = f"<!-- source: {input_path.name} | converted: {input_path.suffix} → .md -->\n\n"
+    output.write_text(header + text, encoding="utf-8")
+    typer.echo(f"변환 완료: {output} ({len(text)}자)")
+
+    if ingest:
+        from pkb.embeddings import embed
+        from pkb.ingest import process_file
+        from pkb.store import add_chunks, delete_document, get_client
+
+        base_dir = Path.cwd()
+        chunks = process_file(output, base_dir)
+        if not chunks:
+            typer.echo("인제스트할 내용이 없습니다.")
+            return
+
+        es = get_client()
+        delete_document(es, chunks[0]["doc_id"])
+        texts = [c["content"] for c in chunks]
+        vectors = embed(texts)
+        for chunk, vector in zip(chunks, vectors):
+            chunk["embedding"] = vector
+        count = add_chunks(es, chunks)
+        typer.echo(f"인제스트 완료: {count}개 청크")
+
+
+@app.command()
 def add(
-    path: Path = typer.Argument(..., help="마크다운 파일 또는 디렉터리 경로"),
+    path: Path = typer.Argument(..., help="파일 또는 디렉터리 경로 (md, txt, pdf, docx, pptx, xlsx, html 지원)"),
     tags: str = typer.Option("", help="쉼표 구분 태그 (예: python,backend)"),
 ):
     """문서를 인제스트하여 ES에 저장."""
     from pkb.embeddings import embed
-    from pkb.ingest import find_markdown_files, process_file
+    from pkb.ingest import find_ingestable_files, process_file
     from pkb.store import add_chunks, delete_document, get_client
 
     base_dir = Path.cwd()
     path = path.resolve()
-    files = find_markdown_files(path)
+    files = find_ingestable_files(path)
     if not files:
-        typer.echo(f"마크다운 파일을 찾을 수 없습니다: {path}")
+        typer.echo(f"인제스트 가능한 파일을 찾을 수 없습니다: {path}")
         raise typer.Exit(1)
 
     es = get_client()

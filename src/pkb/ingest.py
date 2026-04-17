@@ -6,7 +6,34 @@ import tiktoken
 
 from pkb.config import settings
 
+# markitdown이 마크다운으로 변환 가능한 포맷 + 원본 마크다운/텍스트
+SUPPORTED_EXTENSIONS = {
+    ".md", ".markdown", ".txt",
+    ".pdf", ".docx", ".pptx", ".xlsx",
+    ".html", ".htm",
+}
+TEXT_EXTENSIONS = {".md", ".markdown", ".txt"}
+
 _encoder: tiktoken.Encoding | None = None
+_markitdown = None
+
+
+def _get_markitdown():
+    global _markitdown
+    if _markitdown is None:
+        from markitdown import MarkItDown
+
+        _markitdown = MarkItDown()
+    return _markitdown
+
+
+def read_file_as_text(file_path: Path) -> str:
+    """파일을 텍스트로 변환. md/txt는 그대로, 나머지는 markitdown 사용."""
+    ext = file_path.suffix.lower()
+    if ext in TEXT_EXTENSIONS:
+        return file_path.read_text(encoding="utf-8")
+    result = _get_markitdown().convert(str(file_path))
+    return result.text_content
 
 
 def _get_encoder() -> tiktoken.Encoding:
@@ -118,8 +145,11 @@ def _extract_title(text: str, file_path: Path) -> str:
 
 
 def process_file(file_path: Path, base_dir: Path) -> list[dict]:
-    """파일을 읽고 청크 + 메타데이터 리스트 반환."""
-    text = file_path.read_text(encoding="utf-8")
+    """파일을 읽고 청크 + 메타데이터 리스트 반환.
+    md/txt는 그대로, pdf/docx/pptx/xlsx/html은 markitdown으로 변환."""
+    if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+        return []
+    text = read_file_as_text(file_path)
     if not text.strip():
         return []
 
@@ -153,10 +183,18 @@ def process_file(file_path: Path, base_dir: Path) -> list[dict]:
     return results
 
 
-def find_markdown_files(path: Path) -> list[Path]:
-    """경로에서 마크다운 파일 찾기. 파일이면 그대로, 디렉터리면 재귀 탐색."""
-    if path.is_file() and path.suffix == ".md":
-        return [path]
+def find_ingestable_files(path: Path) -> list[Path]:
+    """경로에서 인제스트 가능한 파일 찾기. md/txt/pdf/docx/pptx/xlsx/html 지원."""
+    if path.is_file():
+        return [path] if path.suffix.lower() in SUPPORTED_EXTENSIONS else []
     if path.is_dir():
-        return sorted(path.rglob("*.md"))
+        files = [
+            p for p in path.rglob("*")
+            if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS
+        ]
+        return sorted(files)
     return []
+
+
+# 하위 호환용 별칭
+find_markdown_files = find_ingestable_files

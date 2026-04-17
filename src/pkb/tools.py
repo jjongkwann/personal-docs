@@ -38,7 +38,7 @@ def search_knowledge(
 
 @tool
 def write_file(file_path: str, content: str) -> str:
-    """파일을 작성합니다. 블로그 포스트, 이력서, 메모 등을 마크다운 파일로 저장합니다.
+    """파일을 작성합니다. 문서, 요약, 메모 등을 마크다운 파일로 저장합니다.
 
     Args:
         file_path: 저장할 파일 경로 (예: data/writing/blog-post.md). data/ 하위 경로만 허용.
