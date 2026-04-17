@@ -170,11 +170,32 @@ uv run pkb serve --host 0.0.0.0
 ANTHROPIC_API_KEY=sk-ant-...    # CLI 에이전트/Web UI용 (MCP만 쓸 거면 불필요)
 ES_HOST=http://localhost:9200   # Elasticsearch 호스트 (기본값)
 ES_INDEX=pkb_documents          # 인덱스 이름 (기본값)
+OBSIDIAN_PATH=                  # (선택) Obsidian 볼트 절대경로
 ```
+
+`pkb.config.Settings`의 다른 튜닝 옵션 (환경변수로 오버라이드 가능):
+
+| 이름 | 기본값 | 설명 |
+|------|--------|------|
+| `EMBEDDING_MODEL` | `paraphrase-multilingual-MiniLM-L12-v2` | sentence-transformers 모델 |
+| `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | CrossEncoder 리랭커 모델 |
+| `RERANK_ENABLED` | `true` | 리랭크 기본 사용 여부 |
+| `FUSION` | `rrf` | 하이브리드 결합 방식 (`rrf` 또는 `native`) |
+| `CANDIDATE_K` | `50` | RRF/리랭커 후보 수 |
+| `CHUNK_SIZE` / `CHUNK_OVERLAP` | 500 / 100 | 고정 크기 청킹 |
 
 ## 청킹 전략
 
 - 비마크다운 파일(PDF/docx/pptx/xlsx/html)은 `markitdown`으로 마크다운 변환
-- 마크다운 `## Heading` 경계에서 우선 분할
-- 고정 크기 500토큰 + 100토큰 오버랩
+- YAML frontmatter(있으면) 파싱하여 `title`/`tags` 추출
+- H1~H3 헤딩 경계로 계층 분할 (각 청크에 `section_path` 기록: `대주제 > 소주제 > 세부`)
+- 섹션 내부에서 고정 크기 500토큰 + 100토큰 오버랩
 - 단락(`\n\n`) 경계 존중
+
+## 검색 로그
+
+모든 검색 호출은 `data/.logs/search.jsonl`에 기록됩니다 (query, category, fusion, reranked, results).
+
+```bash
+tail data/.logs/search.jsonl | jq .
+```

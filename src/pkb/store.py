@@ -31,6 +31,7 @@ INDEX_SETTINGS = {
             "category": {"type": "keyword"},
             "doc_id": {"type": "keyword"},
             "chunk_index": {"type": "integer"},
+            "section_path": {"type": "text", "analyzer": "korean"},
             "title": {"type": "text", "analyzer": "korean"},
             "tags": {"type": "keyword"},
             "date_modified": {"type": "date"},

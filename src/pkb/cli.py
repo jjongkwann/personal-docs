@@ -178,13 +178,21 @@ def query(
     question: str = typer.Argument(..., help="검색 질문"),
     category: str = typer.Option(None, help="카테고리 필터"),
     top_k: int = typer.Option(settings.default_top_k, help="결과 수"),
+    rerank: bool = typer.Option(None, help="CrossEncoder 재순위 사용 (기본: 설정값)"),
+    fusion: str = typer.Option(None, help="하이브리드 결합 방식: rrf 또는 native (기본: 설정값)"),
 ):
-    """하이브리드 검색 (BM25 + kNN)."""
+    """하이브리드 검색 (BM25 + kNN + RRF + 옵션 리랭커)."""
     from pkb.retrieve import hybrid_search
     from pkb.store import get_client
 
     es = get_client()
-    results = hybrid_search(es, question, category=category, top_k=top_k)
+    results = hybrid_search(
+        es, question,
+        category=category, top_k=top_k,
+        candidate_k=settings.candidate_k,
+        fusion=fusion if fusion is not None else settings.fusion,
+        rerank=rerank if rerank is not None else settings.rerank_enabled,
+    )
 
     if not results:
         typer.echo("검색 결과가 없습니다.")
@@ -193,6 +201,9 @@ def query(
     for i, r in enumerate(results, 1):
         typer.echo(f"\n{'='*60}")
         typer.echo(f"[{i}] {r['source_path']} (chunk #{r['chunk_index']})")
+        sp = r.get('section_path', '')
+        if sp:
+            typer.echo(f"    섹션: {sp}")
         typer.echo(f"    카테고리: {r['category']} | 점수: {r['score']:.4f}")
         typer.echo(f"{'─'*60}")
         # 내용 미리보기 (처음 300자)

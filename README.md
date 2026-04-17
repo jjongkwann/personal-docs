@@ -18,14 +18,14 @@ Claude Code에 **MCP**로 연결하면 대화 중 이 데이터를 바로 검색
 
 ```
 [인제스트]
-  data/의 문서(md/pdf/docx) → 청킹 → 임베딩 → Elasticsearch 저장
+  data/의 문서(md/pdf/docx) → frontmatter 파싱 → 계층적 청킹 → 임베딩 → Elasticsearch 저장
 
 [대화 (Claude Code + MCP)]
   Claude Code 대화 메시지
     ↓
   PKB MCP 도구 호출
-    ├─ search_knowledge  → ES 하이브리드 검색 (BM25 + kNN)
-    ├─ write_file        → data/ 파일 작성
+    ├─ search_knowledge  → BM25 + kNN + RRF 결합 + CrossEncoder 재순위
+    ├─ write_file        → data/ 파일 작성 (자동 인제스트)
     ├─ list_documents    → 저장된 문서 목록
     ├─ add_document      → 문서 인제스트
     └─ convert_and_ingest → PDF/DOCX → .md 변환 + 인제스트

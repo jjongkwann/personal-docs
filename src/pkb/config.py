@@ -7,6 +7,10 @@ class Settings(BaseSettings):
     es_index: str = "pkb_documents"
     embedding_model: str = "paraphrase-multilingual-MiniLM-L12-v2"
     embedding_dims: int = 384
+    rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    rerank_enabled: bool = True
+    fusion: str = "rrf"  # "rrf" 또는 "native"
+    candidate_k: int = 50
     chunk_size: int = 500
     chunk_overlap: int = 100
     default_top_k: int = 5

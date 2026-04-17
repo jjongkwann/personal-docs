@@ -23,7 +23,13 @@ def search_knowledge(
         top_k: 반환할 결과 수
     """
     es = get_client()
-    results = hybrid_search(es, query, category=category, top_k=top_k)
+    results = hybrid_search(
+        es, query,
+        category=category, top_k=top_k,
+        candidate_k=settings.candidate_k,
+        fusion=settings.fusion,
+        rerank=settings.rerank_enabled,
+    )
 
     if not results:
         return "검색 결과가 없습니다."
@@ -37,12 +43,13 @@ def search_knowledge(
 
 
 @tool
-def write_file(file_path: str, content: str) -> str:
+def write_file(file_path: str, content: str, ingest: bool = True) -> str:
     """파일을 작성합니다. 문서, 요약, 메모 등을 마크다운 파일로 저장합니다.
 
     Args:
         file_path: 저장할 파일 경로 (예: data/writing/blog-post.md). data/ 하위 경로만 허용.
         content: 파일에 작성할 내용
+        ingest: True면 저장 후 ES에 자동 인제스트 (기본값 True)
     """
     data_root = (Path.cwd() / "data").resolve()
     full_path = (Path.cwd() / file_path).resolve()
@@ -56,7 +63,13 @@ def write_file(file_path: str, content: str) -> str:
     full_path.parent.mkdir(parents=True, exist_ok=True)
     full_path.write_text(content, encoding="utf-8")
 
-    return f"파일 저장 완료: {file_path} ({len(content)}자)"
+    result = f"파일 저장 완료: {file_path} ({len(content)}자)"
+    if ingest:
+        from pkb.ingest import ingest_files
+
+        count = ingest_files([full_path], base_dir=Path.cwd())
+        result += f" | 인제스트: {count}개 청크"
+    return result
 
 
 @tool

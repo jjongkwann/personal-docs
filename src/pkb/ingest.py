@@ -1,8 +1,10 @@
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 import tiktoken
+import yaml
 
 from pkb.config import settings
 
@@ -79,20 +81,53 @@ def _count_tokens(text: str) -> int:
     return len(_get_encoder().encode(text))
 
 
-def _split_by_headings(text: str) -> list[str]:
-    """마크다운 ## 헤딩 기준으로 분할."""
-    sections = []
+def parse_frontmatter(text: str) -> tuple[dict, str]:
+    """YAML frontmatter가 있으면 (metadata, 본문) 반환. 없으면 ({}, 원문)."""
+    if not text.startswith("---\n") and not text.startswith("---\r\n"):
+        return {}, text
+    match = re.match(r"^---\r?\n(.*?)\r?\n---\r?\n(.*)", text, re.DOTALL)
+    if not match:
+        return {}, text
+    try:
+        metadata = yaml.safe_load(match.group(1)) or {}
+        if not isinstance(metadata, dict):
+            return {}, text
+        return metadata, match.group(2)
+    except yaml.YAMLError:
+        return {}, text
+
+
+def _split_by_headings_hierarchical(text: str) -> list[tuple[str, str]]:
+    """H1~H3 헤딩 경계로 분할하되 section_path 동반.
+    반환: [(section_path, section_text), ...]
+    section_path 예: "RAG 개요 > 하이브리드 검색"
+    """
+    sections: list[tuple[str, str]] = []
     current: list[str] = []
+    path_stack: list[tuple[int, str]] = []  # [(level, heading_text)]
+    current_path = ""
+
+    def flush():
+        if current:
+            sections.append((current_path, "\n".join(current)))
 
     for line in text.split("\n"):
-        if line.startswith("## ") and current:
-            sections.append("\n".join(current))
-            current = [line]
-        else:
-            current.append(line)
+        m = re.match(r"^(#{1,3})\s+(.+)$", line)
+        if m:
+            level = len(m.group(1))
+            heading = m.group(2).strip()
 
-    if current:
-        sections.append("\n".join(current))
+            flush()
+            current = []
+
+            # 스택 갱신
+            path_stack = [x for x in path_stack if x[0] < level]
+            path_stack.append((level, heading))
+            current_path = " > ".join(h for _, h in path_stack)
+
+        current.append(line)
+
+    flush()
     return sections
 
 
@@ -138,13 +173,19 @@ def _chunk_text(text: str, max_tokens: int, overlap_tokens: int) -> list[str]:
 
 
 def chunk_markdown(text: str) -> list[str]:
-    """마크다운 텍스트를 청크로 분할. 헤딩 경계 우선, 고정 크기 폴백."""
-    sections = _split_by_headings(text)
-    all_chunks: list[str] = []
+    """하위 호환용: section_path를 버리고 텍스트 청크 리스트만 반환."""
+    return [c[1] for c in chunk_markdown_hierarchical(text)]
 
-    for section in sections:
+
+def chunk_markdown_hierarchical(text: str) -> list[tuple[str, str]]:
+    """섹션 경로를 유지하며 청크 생성. [(section_path, chunk_text), ...]"""
+    sections = _split_by_headings_hierarchical(text)
+    all_chunks: list[tuple[str, str]] = []
+
+    for section_path, section in sections:
         chunks = _chunk_text(section, settings.chunk_size, settings.chunk_overlap)
-        all_chunks.extend(chunks)
+        for chunk in chunks:
+            all_chunks.append((section_path, chunk))
 
     return all_chunks
 
@@ -193,34 +234,50 @@ def process_file(
     """
     if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
         return []
-    text = read_file_as_text(file_path)
-    if not text.strip():
+    raw_text = read_file_as_text(file_path)
+    if not raw_text.strip():
         return []
 
-    chunks = chunk_markdown(text)
-    if not chunks:
+    # YAML frontmatter 추출 (md/markdown 파일만)
+    frontmatter: dict = {}
+    text = raw_text
+    if file_path.suffix.lower() in {".md", ".markdown"}:
+        frontmatter, text = parse_frontmatter(raw_text)
+
+    chunks_with_path = chunk_markdown_hierarchical(text)
+    if not chunks_with_path:
         return []
 
     rel = str(file_path.relative_to(base_dir))
     doc_id = f"{doc_id_prefix}{rel}" if doc_id_prefix else rel
     category = category_override or _extract_category(file_path, base_dir)
-    title = _extract_title(text, file_path)
+
+    # frontmatter에서 메타데이터 추출 (있으면 우선)
+    fm_title = frontmatter.get("title") if isinstance(frontmatter.get("title"), str) else None
+    fm_tags = frontmatter.get("tags") or []
+    if isinstance(fm_tags, str):
+        fm_tags = [t.strip() for t in fm_tags.split(",") if t.strip()]
+    elif not isinstance(fm_tags, list):
+        fm_tags = []
+
+    title = fm_title or _extract_title(text, file_path)
     language = _detect_language(text)
     mtime = datetime.fromtimestamp(
         os.path.getmtime(file_path), tz=timezone.utc
     ).strftime("%Y-%m-%d")
 
     results = []
-    for i, chunk in enumerate(chunks):
+    for i, (section_path, chunk_text) in enumerate(chunks_with_path):
         results.append(
             {
-                "content": chunk,
+                "content": chunk_text,
                 "source_path": doc_id,
                 "category": category,
                 "doc_id": doc_id,
                 "chunk_index": i,
+                "section_path": section_path,
                 "title": title,
-                "tags": [],
+                "tags": [str(t) for t in fm_tags],
                 "date_modified": mtime,
                 "language": language,
             }

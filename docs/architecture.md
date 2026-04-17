@@ -35,7 +35,10 @@ PKB는 세 개의 층으로 구성됩니다:
            │
            ▼
 [하이브리드 검색]  (src/pkb/retrieve.py)
-  BM25 쿼리 (키워드) + kNN 벡터 쿼리 (의미) 병렬 → ES가 점수 합산
+  ├─ BM25 (nori 분석기)
+  ├─ kNN (dense_vector, cosine)
+  ├─ RRF 결합 (Reciprocal Rank Fusion, k=60)
+  └─ CrossEncoder 재순위 (선택, BAAI/bge-reranker-v2-m3)
            │
            ▼
 [Elasticsearch]  (Docker 컨테이너: pkb-es)
@@ -46,6 +49,7 @@ PKB는 세 개의 층으로 구성됩니다:
     doc_id        "data/study/x.md"
     category      "study"
     chunk_index   3
+    section_path  "대주제 > 소주제 > 세부"  (H1~H3 경로)
     title, tags, date_modified, language
            ▲
            │ 인제스트 파이프라인 (src/pkb/ingest.py):
