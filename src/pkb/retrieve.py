@@ -45,7 +45,7 @@ def hybrid_search(
     query_text: str,
     category: str | None = None,
     top_k: int = 5,
-    candidate_k: int = 50,
+    candidate_k: int = settings.candidate_k,
     fusion: str = "rrf",
     rerank: bool = False,
     expand_context: int = 0,

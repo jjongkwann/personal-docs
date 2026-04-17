@@ -211,6 +211,7 @@ def main() -> None:
     # baseline 대비 변화 (RRF-only ck=50 기준)
     base = next((s for s in summary if s["label"] == "RRF-only ck=50"), None)
     if base:
+        base_ms = base["total_ms_med"]
         print("\n=== baseline(RRF-only ck=50) 대비 변화 ===")
         for s in summary:
             if s is base:
@@ -218,9 +219,17 @@ def main() -> None:
             d_ndcg = s["ndcg"] - base["ndcg"]
             d_mrr = s["mrr"] - base["mrr"]
             d_hit1 = s["hit_at_1"] - base["hit_at_1"]
-            speedup = base["total_ms_med"] / s["total_ms_med"] if s["total_ms_med"] else 0.0
+            s_ms = s["total_ms_med"]
+            d_ms = s_ms - base_ms
+            ratio = s_ms / base_ms if base_ms else 0.0
+            if ratio >= 1.05:
+                speed_str = f"{ratio:.1f}x slower"
+            elif ratio > 0 and ratio <= 0.95:
+                speed_str = f"{1 / ratio:.1f}x faster"
+            else:
+                speed_str = "~same"
             print(f"  {s['label']:30s}  ΔnDCG={d_ndcg:+.3f}  ΔMRR={d_mrr:+.3f}  ΔHit@1={d_hit1:+.3f}  "
-                  f"latency {s['total_ms_med']:.0f}ms ({speedup:.2f}x slower)")
+                  f"latency {s_ms:.0f}ms ({d_ms:+.0f}ms, {speed_str})")
 
 
 if __name__ == "__main__":
