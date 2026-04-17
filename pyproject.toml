@@ -30,6 +30,7 @@ pkb = "pkb.cli:app"
 [dependency-groups]
 dev = [
     "ruff>=0.9",
+    "pytest>=8.0",
 ]
 
 [build-system]

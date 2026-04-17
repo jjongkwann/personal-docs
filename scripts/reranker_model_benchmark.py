@@ -18,7 +18,6 @@ Per-query raw는 data/.eval/reranker_model_benchmark.jsonl 로 남긴다.
 from __future__ import annotations
 
 import json
-import math
 import statistics
 import sys
 from pathlib import Path
@@ -29,45 +28,20 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from pkb import rerank as rerank_module  # noqa: E402
 from pkb.config import settings  # noqa: E402
+from pkb.eval_metrics import (  # noqa: E402
+    dedupe_doc_ids as dedupe,
+)
+from pkb.eval_metrics import (  # noqa: E402
+    ndcg_at_k,
+    reciprocal_rank,
+    relevance_map,
+)
 from pkb.retrieve import hybrid_search  # noqa: E402
 from pkb.store import get_client  # noqa: E402
 
 QUERIES = ROOT / "data" / ".eval" / "golden_queries.jsonl"
 OUT_PATH = ROOT / "data" / ".eval" / "reranker_model_benchmark.jsonl"
 REPEATS = 2  # latency 중앙값 산정용
-
-
-# ------- 평가 유틸 (golden_retrieval_eval.py와 동일 로직 — 중복 허용) -------
-
-def dcg(grades: list[int]) -> float:
-    return sum((2**g - 1) / math.log2(i + 2) for i, g in enumerate(grades))
-
-
-def ndcg_at_k(ranked_doc_ids: list[str], rel: dict[str, int], k: int) -> float:
-    actual = [rel.get(d, 0) for d in ranked_doc_ids[:k]]
-    ideal = sorted(rel.values(), reverse=True)[:k]
-    ideal_dcg = dcg(ideal)
-    return dcg(actual) / ideal_dcg if ideal_dcg else 0.0
-
-
-def reciprocal_rank(ranked: list[str], rel: dict[str, int]) -> float:
-    for idx, d in enumerate(ranked, start=1):
-        if d in rel:
-            return 1.0 / idx
-    return 0.0
-
-
-def dedupe(doc_ids: list[str]) -> list[str]:
-    seen, out = set(), []
-    for d in doc_ids:
-        if d and d not in seen:
-            seen.add(d)
-            out.append(d)
-    return out
-
-
-def relevance_map(q: dict) -> dict[str, int]:
-    return {item["doc_id"]: int(item.get("grade", 1)) for item in q.get("relevant", []) if item.get("doc_id")}
 
 
 # ------- 모델 스위칭 -------

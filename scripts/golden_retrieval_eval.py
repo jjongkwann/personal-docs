@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import statistics
 import sys
 from pathlib import Path
@@ -31,6 +30,12 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from pkb.config import settings  # noqa: E402
+from pkb.eval_metrics import (  # noqa: E402
+    dedupe_doc_ids,
+    ndcg_at_k,
+    reciprocal_rank,
+    relevance_map,
+)
 from pkb.retrieve import hybrid_search  # noqa: E402
 from pkb.store import get_client  # noqa: E402
 
@@ -40,43 +45,6 @@ DEFAULT_QUERIES = ROOT / "data" / ".eval" / "golden_queries.jsonl"
 def load_queries(path: Path, limit: int | None = None) -> list[dict]:
     rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     return rows[:limit] if limit else rows
-
-
-def relevance_map(query: dict) -> dict[str, int]:
-    return {
-        item["doc_id"]: int(item.get("grade", 1))
-        for item in query.get("relevant", [])
-        if item.get("doc_id")
-    }
-
-
-def dcg(grades: list[int]) -> float:
-    return sum((2**grade - 1) / math.log2(rank + 2) for rank, grade in enumerate(grades))
-
-
-def ndcg_at_k(ranked_doc_ids: list[str], relevant: dict[str, int], k: int) -> float:
-    actual = [relevant.get(doc_id, 0) for doc_id in ranked_doc_ids[:k]]
-    ideal = sorted(relevant.values(), reverse=True)[:k]
-    ideal_dcg = dcg(ideal)
-    return dcg(actual) / ideal_dcg if ideal_dcg else 0.0
-
-
-def reciprocal_rank(ranked_doc_ids: list[str], relevant: dict[str, int]) -> float:
-    for idx, doc_id in enumerate(ranked_doc_ids, start=1):
-        if doc_id in relevant:
-            return 1.0 / idx
-    return 0.0
-
-
-def dedupe_doc_ids(doc_ids: list[str]) -> list[str]:
-    seen = set()
-    unique = []
-    for doc_id in doc_ids:
-        if not doc_id or doc_id in seen:
-            continue
-        seen.add(doc_id)
-        unique.append(doc_id)
-    return unique
 
 
 def evaluate_query(es, query: dict, *, rerank: bool, top_k: int, candidate_k: int) -> dict:
