@@ -249,3 +249,23 @@ GRAPH_DEDUP_THRESHOLD=0.88
 ```bash
 tail data/.logs/search.jsonl | jq .
 ```
+
+## 검색 품질 평가
+
+조건부 리랭크나 모델 교체 전에는 골든 쿼리셋으로 RRF와 rerank 품질을 비교합니다.
+
+```bash
+# RRF gap 분포와 조건부 리랭크 스킵 위험 분석
+uv run python scripts/rerank_gap_probe.py
+
+# 정답 라벨 기반 검색 품질 평가
+uv run python scripts/golden_retrieval_eval.py --mode both
+
+# 빠른 스모크 테스트
+uv run python scripts/golden_retrieval_eval.py --mode rrf --limit 3
+```
+
+평가 파일:
+- `data/.eval/queries.jsonl`: gap probe용 임시 쿼리 seed
+- `data/.eval/rerank_gap_probe.jsonl`: 조건부 리랭크 판단용 probe 결과
+- `data/.eval/golden_queries.jsonl`: doc-level relevance 라벨이 붙은 골든 쿼리셋
