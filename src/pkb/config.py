@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     rerank_batch_size: int = 8  # MPS에선 작은 배치가 더 빠름 (bench_rerank_models.py 결과)
     warmup_on_start: bool = True  # MCP 서버 기동 시 백그라운드로 모델·ES 워밍업
     fusion: str = "rrf"  # "rrf" 또는 "native"
-    candidate_k: int = 50
+    candidate_k: int = 20  # 기본 경로(rerank=on)에서 ck=50 대비 latency 2.4x↓, 품질 동일. RRF-only도 nDCG 미세 우위.
     expand_context: int = 0  # N>0이면 각 검색 결과의 ±N 청크를 neighbors로 부착
     chunk_size: int = 500
     chunk_overlap: int = 100

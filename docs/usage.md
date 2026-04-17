@@ -227,7 +227,7 @@ GRAPH_DEDUP_THRESHOLD=0.88
 | `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | CrossEncoder 리랭커 모델 |
 | `RERANK_ENABLED` | `true` | 리랭크 기본 사용 여부 |
 | `FUSION` | `rrf` | 하이브리드 결합 방식 (`rrf` 또는 `native`) |
-| `CANDIDATE_K` | `50` | RRF/리랭커 후보 수 |
+| `CANDIDATE_K` | `20` | RRF/리랭커 후보 수. 기본값은 rerank 경로 벤치마크(`data/.eval/reranker_model_benchmark.jsonl`)에서 `ck=50` 대비 latency 2.4x↓·품질 동일로 채택. 같은 벤치에서 RRF-only 경로도 `ck=20`이 nDCG/MRR 미세 우위. 더 큰 후보 풀이 필요하면 50으로 상향. |
 | `EXPAND_CONTEXT` | `0` | N>0이면 검색 결과 전후 N 청크를 neighbors로 부착 (parent context) |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | 500 / 100 | 고정 크기 청킹 |
 | `GRAPH_DB_PATH` | `data/.graph/pkb_graph.sqlite` | SQLite 개념 그래프 파일 |

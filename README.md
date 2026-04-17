@@ -177,7 +177,7 @@ OBSIDIAN_PATH=/path/to/obsidian-vault
 
 FUSION=rrf
 RERANK_ENABLED=true
-CANDIDATE_K=50
+CANDIDATE_K=20
 EXPAND_CONTEXT=0
 
 GRAPH_DB_PATH=data/.graph/pkb_graph.sqlite
