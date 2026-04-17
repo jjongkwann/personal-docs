@@ -7,7 +7,9 @@ build/
 .venv/
 
 # Personal data
-data/
+data/*
+!data/.eval/
+!data/.eval/**
 
 # Environment
 .env

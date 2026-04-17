@@ -1,0 +1,20 @@
+{"id":"ob_01","bucket":"obsidian","type":"exact","query":"DI와 IoC의 차이"}
+{"id":"ob_02","bucket":"obsidian","type":"abbrev","query":"RRF 알고리즘"}
+{"id":"ob_03","bucket":"obsidian","type":"exact","query":"Celery worker 큐 분리"}
+{"id":"ob_04","bucket":"obsidian","type":"exact","query":"스프링 빈 등록 방법"}
+{"id":"ob_05","bucket":"obsidian","type":"relation","query":"Observer 패턴과 Pub/Sub 차이"}
+{"id":"ob_06","bucket":"obsidian","type":"compare","query":"OOP 생성 패턴 종류"}
+{"id":"ob_07","bucket":"obsidian","type":"exact","query":"MongoDB 인덱스 설계"}
+{"id":"ob_08","bucket":"obsidian","type":"vague","query":"코드 복잡도 줄이는 방법"}
+{"id":"rag_01","bucket":"study_rag","type":"exact","query":"하이브리드 검색 장점"}
+{"id":"rag_02","bucket":"study_rag","type":"abbrev","query":"BM25 한계"}
+{"id":"rag_03","bucket":"study_rag","type":"exact","query":"CrossEncoder 재순위 원리"}
+{"id":"rag_04","bucket":"study_rag","type":"relation","query":"dense와 sparse retrieval 차이"}
+{"id":"rag_05","bucket":"study_rag","type":"exact","query":"RAG faithfulness 측정"}
+{"id":"rag_06","bucket":"study_rag","type":"exact","query":"벡터 chunk 크기 튜닝"}
+{"id":"rag_07","bucket":"study_rag","type":"vague","query":"검색 결과 품질 개선"}
+{"id":"rag_08","bucket":"study_rag","type":"vague","query":"RAG 운영에서 자주 하는 실수"}
+{"id":"cw_01","bucket":"career","type":"exact","query":"에이오팜 PLC Modbus 통신"}
+{"id":"cw_02","bucket":"career","type":"exact","query":"멀티에이전트 자동매매 PersonalTrader"}
+{"id":"cw_03","bucket":"about","type":"vague","query":"이종관 핵심 역량"}
+{"id":"cw_04","bucket":"writing","type":"vague","query":"기술 면접 자주 나오는 질문"}
