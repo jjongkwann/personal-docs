@@ -72,7 +72,7 @@ def hybrid_search(
     t = perf_counter()
     if fusion == "rrf":
         candidates = _rrf_search(
-            es, query_text, query_vector, category, fetch_k
+            es, query_text, query_vector, category, fetch_k, timings=timings
         )
     else:
         candidates = _native_search(
@@ -194,21 +194,33 @@ def _rrf_search(
     query_vector: list[float],
     category: str | None,
     candidate_k: int,
+    timings: dict[str, float] | None = None,
 ) -> list[dict]:
-    """BM25와 kNN을 각각 실행 → Reciprocal Rank Fusion으로 결합."""
+    """BM25와 kNN을 각각 실행 → Reciprocal Rank Fusion으로 결합.
+
+    timings이 주어지면 bm25_ms/knn_ms/fusion_ms/candidate_count/rrf_top_gap 기록.
+    """
+    t = perf_counter()
     bm25_result = es.search(
         index=settings.es_index,
         query=_bm25_query(query_text, category),
         size=candidate_k,
         source_excludes=["embedding"],
     )
+    if timings is not None:
+        timings["bm25_ms"] = round((perf_counter() - t) * 1000, 2)
+
+    t = perf_counter()
     knn_result = es.search(
         index=settings.es_index,
         knn=_knn_query(query_vector, candidate_k, category),
         size=candidate_k,
         source_excludes=["embedding"],
     )
+    if timings is not None:
+        timings["knn_ms"] = round((perf_counter() - t) * 1000, 2)
 
+    t = perf_counter()
     # doc_id(_id) → {rrf_score, source}
     combined: dict[str, dict] = {}
     for rank, hit in enumerate(bm25_result["hits"]["hits"]):
@@ -230,4 +242,14 @@ def _rrf_search(
         source = item["source"]
         source["score"] = item["score"]
         results.append(source)
+
+    if timings is not None:
+        timings["fusion_ms"] = round((perf_counter() - t) * 1000, 2)
+        timings["candidate_count"] = len(sorted_hits)
+        if len(sorted_hits) >= 2:
+            timings["rrf_top_gap"] = round(
+                sorted_hits[0]["score"] - sorted_hits[1]["score"], 6
+            )
+        else:
+            timings["rrf_top_gap"] = 0.0
     return results
