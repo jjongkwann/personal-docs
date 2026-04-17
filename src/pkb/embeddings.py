@@ -1,6 +1,6 @@
 from sentence_transformers import SentenceTransformer
 
-from pkb.config import settings
+from pkb.config import resolve_device, settings
 
 _model: SentenceTransformer | None = None
 
@@ -8,7 +8,10 @@ _model: SentenceTransformer | None = None
 def get_model() -> SentenceTransformer:
     global _model
     if _model is None:
-        _model = SentenceTransformer(settings.embedding_model)
+        _model = SentenceTransformer(
+            settings.embedding_model,
+            device=resolve_device(settings.embedding_device),
+        )
     return _model
 
 

@@ -15,6 +15,7 @@ def log_search(
     fusion: str,
     reranked: bool,
     results: list[dict],
+    latency_ms: dict[str, float] | None = None,
 ) -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     entry = {
@@ -24,6 +25,7 @@ def log_search(
         "top_k": top_k,
         "fusion": fusion,
         "reranked": reranked,
+        "latency_ms": latency_ms or {},
         "results": [
             {
                 "doc_id": r.get("doc_id"),

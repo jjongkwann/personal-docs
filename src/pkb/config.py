@@ -7,8 +7,11 @@ class Settings(BaseSettings):
     es_index: str = "pkb_documents"
     embedding_model: str = "paraphrase-multilingual-MiniLM-L12-v2"
     embedding_dims: int = 384
+    embedding_device: str = "auto"  # auto | cpu | mps | cuda
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
     rerank_enabled: bool = True
+    rerank_device: str = "auto"  # auto | cpu | mps | cuda
+    rerank_batch_size: int = 8  # MPS에선 작은 배치가 더 빠름 (bench_rerank_models.py 결과)
     fusion: str = "rrf"  # "rrf" 또는 "native"
     candidate_k: int = 50
     expand_context: int = 0  # N>0이면 각 검색 결과의 ±N 청크를 neighbors로 부착
@@ -24,3 +27,15 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def resolve_device(name: str) -> str:
+    """auto면 mps > cuda > cpu 순으로 선택. 그 외는 그대로 반환."""
+    if name != "auto":
+        return name
+    import torch
+    if torch.backends.mps.is_available():
+        return "mps"
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"

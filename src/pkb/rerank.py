@@ -2,7 +2,7 @@
 
 from sentence_transformers import CrossEncoder
 
-from pkb.config import settings
+from pkb.config import resolve_device, settings
 
 _reranker: CrossEncoder | None = None
 
@@ -10,7 +10,11 @@ _reranker: CrossEncoder | None = None
 def get_reranker() -> CrossEncoder:
     global _reranker
     if _reranker is None:
-        _reranker = CrossEncoder(settings.rerank_model, max_length=512)
+        _reranker = CrossEncoder(
+            settings.rerank_model,
+            max_length=512,
+            device=resolve_device(settings.rerank_device),
+        )
     return _reranker
 
 
@@ -20,7 +24,11 @@ def rerank(query: str, candidates: list[dict], top_k: int = 5) -> list[dict]:
         return []
 
     pairs = [(query, c.get("content", "")) for c in candidates]
-    scores = get_reranker().predict(pairs, show_progress_bar=False)
+    scores = get_reranker().predict(
+        pairs,
+        show_progress_bar=False,
+        batch_size=settings.rerank_batch_size,
+    )
 
     for c, s in zip(candidates, scores, strict=False):
         c["rerank_score"] = float(s)

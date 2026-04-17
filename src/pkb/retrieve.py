@@ -1,3 +1,5 @@
+from time import perf_counter
+
 from elasticsearch import Elasticsearch
 
 from pkb.config import settings
@@ -58,9 +60,16 @@ def hybrid_search(
         rerank: True면 CrossEncoder 재순위 수행 후 top_k 반환
         expand_context: N>0이면 각 결과 전후 N개 청크를 neighbors 필드로 함께 반환
     """
+    timings: dict[str, float] = {}
+    t_total = perf_counter()
+
+    t = perf_counter()
     query_vector = embed([query_text])[0]
+    timings["embed_ms"] = round((perf_counter() - t) * 1000, 2)
+
     fetch_k = candidate_k if (rerank or fusion == "rrf") else top_k
 
+    t = perf_counter()
     if fusion == "rrf":
         candidates = _rrf_search(
             es, query_text, query_vector, category, fetch_k
@@ -69,16 +78,23 @@ def hybrid_search(
         candidates = _native_search(
             es, query_text, query_vector, category, fetch_k
         )
+    timings["retrieve_ms"] = round((perf_counter() - t) * 1000, 2)
 
     if rerank:
         from pkb.rerank import rerank as _rerank_fn
 
+        t = perf_counter()
         candidates = _rerank_fn(query_text, candidates, top_k=top_k)
+        timings["rerank_ms"] = round((perf_counter() - t) * 1000, 2)
     else:
         candidates = candidates[:top_k]
 
     if expand_context > 0:
+        t = perf_counter()
         candidates = _attach_neighbors(es, candidates, window=expand_context)
+        timings["expand_ms"] = round((perf_counter() - t) * 1000, 2)
+
+    timings["total_ms"] = round((perf_counter() - t_total) * 1000, 2)
 
     if log:
         try:
@@ -91,6 +107,7 @@ def hybrid_search(
                 fusion=fusion,
                 reranked=rerank,
                 results=candidates,
+                latency_ms=timings,
             )
         except Exception:
             pass  # 로깅 실패는 검색을 막지 않음
