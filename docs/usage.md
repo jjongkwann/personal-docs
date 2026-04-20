@@ -237,10 +237,62 @@ GRAPH_DEDUP_THRESHOLD=0.88
 ## 청킹 전략
 
 - 비마크다운 파일(PDF/docx/pptx/xlsx/html)은 `markitdown`으로 마크다운 변환
-- YAML frontmatter(있으면) 파싱하여 `title`/`tags` 추출
+- YAML frontmatter(있으면) 파싱하여 `title`/`tags`/`expires_at` 추출
 - H1~H3 헤딩 경계로 계층 분할 (각 청크에 `section_path` 기록: `대주제 > 소주제 > 세부`)
 - 섹션 내부에서 고정 크기 500토큰 + 100토큰 오버랩
 - 단락(`\n\n`) 경계 존중
+
+## 문서 생명주기 (만료 + Soft Delete)
+
+오래된 자료를 검색에서 자동으로 빼거나, 나중에 복구 가능하게 숨길 수 있습니다.
+
+### 1. 만료 예정일 지정 (frontmatter)
+
+```yaml
+---
+title: 2025 이력서
+expires_at: 2026-01-01       # ISO 날짜. 지나면 자동으로 검색에서 제외.
+tags: [resume, 2025]
+---
+```
+
+`expires_at`은 `date`/`datetime`/ISO 문자열 모두 허용. 유효하지 않은 값은 경고 로그 후 무시됩니다. 지정된 날짜가 `now` 이전이면 `hybrid_search` 결과에서 자동 제외됩니다(ES lazy filter, 배치 없음).
+
+### 2. 수동 아카이브 (soft delete)
+
+```bash
+# 개별 문서 숨기기 (검색 제외, 복구 가능)
+uv run pkb archive data/career/old_resume.md --reason "newer version exists"
+
+# 복구
+uv run pkb restore data/career/old_resume.md
+
+# 아카이브된 것 물리 삭제 (비가역! 명시 요청 시만)
+uv run pkb purge-archived --before 2024-01-01
+```
+
+MCP 도구로도 동일:
+- `archive_document(doc_id, reason="")` — Claude Code 대화에서 *"이 문서 아카이브해줘"*
+- `restore_document(doc_id)` — 복구
+
+### 3. 필터 오버라이드 — 아카이브도 보기
+
+`search_knowledge(query, include_archived=True)` / `list_documents(include_archived=True)` 로 호출하면 아카이브/만료 문서도 포함됩니다. 기본값은 항상 **제외**.
+
+### 4. doctor 로 상태 확인
+
+```
+pkb_documents: 10,677개 청크
+  - obsidian: 7930
+  - career: 1139
+  - study: 1059
+  - writing: 259
+  - about: 62
+  archived: 42  expired(still-visible): 3
+```
+
+- `archived`: 수동 아카이브된 청크 수 (archived_at 존재)
+- `expired(still-visible)`: `expires_at`은 지났지만 아직 아카이브 안 된 것 — 검색엔 안 나오지만 DB엔 남아있음. `pkb purge-archived` 로 정리 가능.
 
 ## 검색 로그
 

@@ -139,6 +139,11 @@ uv run pkb query "RAG 검색 품질 개선" --category study --expand 1
 # 매핑 변경 후 전체 재인덱싱
 uv run pkb reindex
 
+# 문서 생명주기 (soft delete)
+uv run pkb archive data/career/old_resume.md --reason outdated
+uv run pkb restore data/career/old_resume.md
+uv run pkb purge-archived --before 2024-01-01   # 비가역 물리 삭제
+
 # SQLite 개념 그래프
 uv run pkb graph stats
 uv run pkb graph build --category study
@@ -159,7 +164,9 @@ Claude Code에서 사용할 수 있는 주요 도구:
 | `sync_obsidian` | Obsidian 볼트 일괄 동기화 |
 | `get_document` | 특정 문서의 청크와 `section_path` 조회 |
 | `reindex_document` | 특정 원본 문서 재인제스트 |
-| `doctor` | ES 연결, 인덱스, 설정 상태 점검 |
+| `archive_document` | 문서를 soft delete (검색에서 제외, 복구 가능) |
+| `restore_document` | 아카이브된 문서를 복구 |
+| `doctor` | ES 연결, 인덱스, 설정 상태 점검 (archived/expired 포함) |
 | `graph_list_chunks` | Graph RAG 추출용 청크 페이지 조회 |
 | `graph_store_concepts` | Claude Code가 추출한 개념/관계를 SQLite에 저장 |
 | `search_concepts` | 개념 그래프에서 유사 개념 검색 |
