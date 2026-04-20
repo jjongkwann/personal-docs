@@ -38,6 +38,11 @@ INDEX_SETTINGS = {
             "tags": {"type": "keyword"},
             "date_modified": {"type": "date"},
             "language": {"type": "keyword"},
+            # Lifecycle: 사용자 지정 만료일(expires_at)과 실제 아카이브 시점(archived_at).
+            # 둘 다 null이면 검색에 정상 포함. 쿼리 필터는 retrieve._lifecycle_filter 참고.
+            "expires_at": {"type": "date"},
+            "archived_at": {"type": "date"},
+            "archive_reason": {"type": "keyword"},
         }
     },
 }

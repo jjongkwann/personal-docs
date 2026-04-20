@@ -8,6 +8,29 @@ from pkb.embeddings import embed
 RRF_K = 60  # Reciprocal Rank Fusion 상수 (Elastic 기본값)
 
 
+def _lifecycle_filter(include_archived: bool) -> list[dict]:
+    """아카이브/만료 문서 제외 필터. include_archived=True면 빈 리스트 반환.
+
+    기본 조건:
+      - archived_at 필드가 없어야 함 (아카이브되지 않음)
+      - expires_at이 없거나 현재 시점보다 미래여야 함
+    """
+    if include_archived:
+        return []
+    return [
+        {"bool": {"must_not": {"exists": {"field": "archived_at"}}}},
+        {
+            "bool": {
+                "should": [
+                    {"bool": {"must_not": {"exists": {"field": "expires_at"}}}},
+                    {"range": {"expires_at": {"gt": "now"}}},
+                ],
+                "minimum_should_match": 1,
+            }
+        },
+    ]
+
+
 def _bm25_query(query_text: str, category: str | None) -> dict:
     bm25: dict = {
         "bool": {
