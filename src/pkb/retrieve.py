@@ -31,7 +31,11 @@ def _lifecycle_filter(include_archived: bool) -> list[dict]:
     ]
 
 
-def _bm25_query(query_text: str, category: str | None) -> dict:
+def _bm25_query(
+    query_text: str,
+    category: str | None,
+    include_archived: bool = False,
+) -> dict:
     bm25: dict = {
         "bool": {
             "should": [
@@ -41,20 +45,33 @@ def _bm25_query(query_text: str, category: str | None) -> dict:
             ],
         }
     }
+    filters: list[dict] = []
     if category:
-        bm25["bool"]["filter"] = [{"term": {"category": category}}]
+        filters.append({"term": {"category": category}})
+    filters.extend(_lifecycle_filter(include_archived))
+    if filters:
+        bm25["bool"]["filter"] = filters
     return bm25
 
 
-def _knn_query(query_vector: list[float], k: int, category: str | None) -> dict:
+def _knn_query(
+    query_vector: list[float],
+    k: int,
+    category: str | None,
+    include_archived: bool = False,
+) -> dict:
     knn: dict = {
         "field": "embedding",
         "query_vector": query_vector,
         "k": k,
         "num_candidates": k * 5,
     }
+    filters: list[dict] = []
     if category:
-        knn["filter"] = [{"term": {"category": category}}]
+        filters.append({"term": {"category": category}})
+    filters.extend(_lifecycle_filter(include_archived))
+    if filters:
+        knn["filter"] = filters
     return knn
 
 
@@ -74,6 +91,7 @@ def hybrid_search(
     rerank: bool = False,
     expand_context: int = 0,
     log: bool = True,
+    include_archived: bool = False,
 ) -> list[dict]:
     """하이브리드 검색.
 
@@ -96,11 +114,13 @@ def hybrid_search(
     t = perf_counter()
     if fusion == "rrf":
         candidates = _rrf_search(
-            es, query_text, query_vector, category, fetch_k, timings=timings
+            es, query_text, query_vector, category, fetch_k,
+            timings=timings, include_archived=include_archived,
         )
     else:
         candidates = _native_search(
-            es, query_text, query_vector, category, fetch_k
+            es, query_text, query_vector, category, fetch_k,
+            include_archived=include_archived,
         )
     timings["retrieve_ms"] = round((perf_counter() - t) * 1000, 2)
 
@@ -145,12 +165,13 @@ def _native_search(
     query_vector: list[float],
     category: str | None,
     size: int,
+    include_archived: bool = False,
 ) -> list[dict]:
     """기존 방식: ES에 BM25+kNN 동시 전달, 점수 자동 합산."""
     result = es.search(
         index=settings.es_index,
-        query=_bm25_query(query_text, category),
-        knn=_knn_query(query_vector, size, category),
+        query=_bm25_query(query_text, category, include_archived=include_archived),
+        knn=_knn_query(query_vector, size, category, include_archived=include_archived),
         size=size,
         source_excludes=["embedding"],
     )
@@ -219,15 +240,17 @@ def _rrf_search(
     category: str | None,
     candidate_k: int,
     timings: dict[str, float] | None = None,
+    include_archived: bool = False,
 ) -> list[dict]:
     """BM25와 kNN을 각각 실행 → Reciprocal Rank Fusion으로 결합.
 
     timings이 주어지면 bm25_ms/knn_ms/fusion_ms/candidate_count/rrf_top_gap 기록.
+    include_archived=False(기본)면 archived/expired 문서는 검색에서 제외.
     """
     t = perf_counter()
     bm25_result = es.search(
         index=settings.es_index,
-        query=_bm25_query(query_text, category),
+        query=_bm25_query(query_text, category, include_archived=include_archived),
         size=candidate_k,
         source_excludes=["embedding"],
     )
@@ -237,7 +260,7 @@ def _rrf_search(
     t = perf_counter()
     knn_result = es.search(
         index=settings.es_index,
-        knn=_knn_query(query_vector, candidate_k, category),
+        knn=_knn_query(query_vector, candidate_k, category, include_archived=include_archived),
         size=candidate_k,
         source_excludes=["embedding"],
     )

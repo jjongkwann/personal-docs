@@ -23,14 +23,29 @@ def test_bm25_boosts_content_highest():
     assert boosts["content"] > boosts["title"] > boosts["section_path"]
 
 
-def test_bm25_category_filter_applied():
-    q = _bm25_query("q", "study")
-    assert q["bool"]["filter"] == [{"term": {"category": "study"}}]
-
-
-def test_bm25_no_filter_when_category_none():
+def test_bm25_default_includes_lifecycle_filter():
+    # include_archived=False 기본 → lifecycle filter 2개 자동 삽입
     q = _bm25_query("q", None)
+    filters = q["bool"]["filter"]
+    assert len(filters) == 2
+    assert {"bool": {"must_not": {"exists": {"field": "archived_at"}}}} in filters
+
+
+def test_bm25_category_plus_lifecycle():
+    q = _bm25_query("q", "study")
+    filters = q["bool"]["filter"]
+    assert {"term": {"category": "study"}} in filters
+    assert len(filters) == 3  # category + 2 lifecycle
+
+
+def test_bm25_include_archived_drops_filter_when_no_category():
+    q = _bm25_query("q", None, include_archived=True)
     assert "filter" not in q["bool"]
+
+
+def test_bm25_include_archived_keeps_only_category():
+    q = _bm25_query("q", "study", include_archived=True)
+    assert q["bool"]["filter"] == [{"term": {"category": "study"}}]
 
 
 # ---------- _knn_query ----------
@@ -42,11 +57,19 @@ def test_knn_shape():
     assert q["k"] == 10
     assert q["num_candidates"] == 50  # k*5
     assert q["query_vector"] is vec
+    assert len(q["filter"]) == 2  # lifecycle 기본 포함
 
 
 def test_knn_with_category_filter():
     q = _knn_query([0.0] * 4, k=5, category="obsidian")
-    assert q["filter"] == [{"term": {"category": "obsidian"}}]
+    filters = q["filter"]
+    assert {"term": {"category": "obsidian"}} in filters
+    assert len(filters) == 3
+
+
+def test_knn_include_archived_drops_filter():
+    q = _knn_query([0.0] * 4, k=5, category=None, include_archived=True)
+    assert "filter" not in q
 
 
 # ---------- RRF_K 상수 ----------
