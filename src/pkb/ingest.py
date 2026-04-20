@@ -1,12 +1,15 @@
+import logging
 import os
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import tiktoken
 import yaml
 
 from pkb.config import settings
+
+_log = logging.getLogger(__name__)
 
 # markitdown이 마크다운으로 변환 가능한 포맷 + 원본 마크다운/텍스트
 SUPPORTED_EXTENSIONS = {
@@ -79,6 +82,33 @@ def _get_encoder() -> tiktoken.Encoding:
 
 def _count_tokens(text: str) -> int:
     return len(_get_encoder().encode(text))
+
+
+def parse_expires_at(value: object) -> str | None:
+    """frontmatter의 expires_at 값을 ISO8601 문자열로 정규화.
+
+    허용 입력:
+      - date 객체 (YAML이 `2026-12-31`을 자동 date로 파싱)
+      - datetime 객체
+      - ISO 문자열 ('2026-12-31' 또는 '2026-12-31T10:00:00')
+
+    실패 시 None 반환 + 경고 로그. chunk dict에는 유효한 경우만 반영.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            _log.warning("invalid expires_at (ISO parse failed): %r", value)
+            return None
+        return parsed.isoformat()
+    _log.warning("unsupported expires_at type: %s (%r)", type(value).__name__, value)
+    return None
 
 
 def parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -312,23 +342,25 @@ def process_file(
     mtime = datetime.fromtimestamp(
         os.path.getmtime(file_path), tz=UTC
     ).strftime("%Y-%m-%d")
+    fm_expires_at = parse_expires_at(frontmatter.get("expires_at"))
 
     results = []
     for i, (section_path, chunk_text) in enumerate(chunks_with_path):
-        results.append(
-            {
-                "content": chunk_text,
-                "source_path": doc_id,
-                "category": category,
-                "doc_id": doc_id,
-                "chunk_index": i,
-                "section_path": section_path,
-                "title": title,
-                "tags": [str(t) for t in fm_tags],
-                "date_modified": mtime,
-                "language": language,
-            }
-        )
+        chunk: dict = {
+            "content": chunk_text,
+            "source_path": doc_id,
+            "category": category,
+            "doc_id": doc_id,
+            "chunk_index": i,
+            "section_path": section_path,
+            "title": title,
+            "tags": [str(t) for t in fm_tags],
+            "date_modified": mtime,
+            "language": language,
+        }
+        if fm_expires_at:
+            chunk["expires_at"] = fm_expires_at
+        results.append(chunk)
     return results
 
 
