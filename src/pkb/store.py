@@ -1,4 +1,5 @@
 import contextlib
+from datetime import UTC, datetime
 
 from elasticsearch import Elasticsearch, NotFoundError
 
@@ -88,11 +89,77 @@ def delete_document(es: Elasticsearch, doc_id: str) -> int:
     return result["deleted"]
 
 
-def list_documents(es: Elasticsearch, category: str | None = None) -> list[dict]:
-    """저장된 고유 문서 목록 반환."""
-    query: dict = {"match_all": {}}
+def archive_document(
+    es: Elasticsearch, doc_id: str, reason: str | None = None
+) -> int:
+    """doc_id에 해당하는 청크들에 archived_at=now(UTC) 설정 (soft delete).
+    reason이 주어지면 archive_reason도 함께 저장. 수정된 청크 수 반환.
+    """
+    source_parts = ["ctx._source.archived_at = params.ts;"]
+    params: dict = {"ts": datetime.now(UTC).isoformat()}
+    if reason:
+        source_parts.append("ctx._source.archive_reason = params.reason;")
+        params["reason"] = reason
+    result = es.update_by_query(
+        index=settings.es_index,
+        query={"term": {"doc_id": doc_id}},
+        script={"source": " ".join(source_parts), "lang": "painless", "params": params},
+        refresh=True,
+    )
+    return result["updated"]
+
+
+def restore_document(es: Elasticsearch, doc_id: str) -> int:
+    """archived_at, archive_reason 필드를 제거해 복원. 복원된 청크 수 반환."""
+    script_source = (
+        "ctx._source.remove('archived_at'); ctx._source.remove('archive_reason');"
+    )
+    result = es.update_by_query(
+        index=settings.es_index,
+        query={
+            "bool": {
+                "must": [
+                    {"term": {"doc_id": doc_id}},
+                    {"exists": {"field": "archived_at"}},
+                ]
+            }
+        },
+        script={"source": script_source, "lang": "painless"},
+        refresh=True,
+    )
+    return result["updated"]
+
+
+def purge_archived(es: Elasticsearch, before: datetime | None = None) -> int:
+    """archived_at이 있는 청크를 물리 삭제. before 지정 시 그 시점 이전만.
+    주의: 비가역. 명시 요청 시에만 호출.
+    """
+    must: list[dict] = [{"exists": {"field": "archived_at"}}]
+    if before is not None:
+        must.append({"range": {"archived_at": {"lt": before.isoformat()}}})
+    result = es.delete_by_query(
+        index=settings.es_index,
+        query={"bool": {"must": must}},
+        refresh=True,
+    )
+    return result["deleted"]
+
+
+def list_documents(
+    es: Elasticsearch,
+    category: str | None = None,
+    include_archived: bool = False,
+) -> list[dict]:
+    """저장된 고유 문서 목록 반환. 기본적으로 archived 문서는 제외."""
+    clauses: list[dict] = []
     if category:
-        query = {"term": {"category": category}}
+        clauses.append({"term": {"category": category}})
+    if not include_archived:
+        clauses.append({"bool": {"must_not": {"exists": {"field": "archived_at"}}}})
+    if clauses:
+        query: dict = {"bool": {"must": clauses}}
+    else:
+        query = {"match_all": {}}
 
     result = es.search(
         index=settings.es_index,
