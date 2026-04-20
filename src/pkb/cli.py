@@ -308,12 +308,79 @@ def chat():
 def delete(
     doc_id: str = typer.Argument(..., help="삭제할 문서 ID"),
 ):
-    """문서 및 모든 청크 삭제."""
+    """문서 및 모든 청크 삭제 (하드 삭제, 비가역)."""
     from pkb.store import delete_document, get_client
 
     es = get_client()
     deleted = delete_document(es, doc_id)
     typer.echo(f"'{doc_id}' 삭제 완료 ({deleted}개 청크).")
+
+
+@app.command()
+def archive(
+    doc_id: str = typer.Argument(..., help="아카이브할 문서 ID"),
+    reason: str = typer.Option("", help="아카이브 사유 (선택)"),
+):
+    """문서를 soft delete(검색에서 제외, 복구 가능)로 아카이브."""
+    from pkb.store import archive_document, get_client
+
+    es = get_client()
+    n = archive_document(es, doc_id, reason=reason or None)
+    if n == 0:
+        typer.echo(f"아카이브 대상 없음 (doc_id={doc_id})")
+        raise typer.Exit(1)
+    msg = f"아카이브 완료: '{doc_id}' ({n}개 청크)"
+    if reason:
+        msg += f" | 사유: {reason}"
+    typer.echo(msg)
+
+
+@app.command()
+def restore(
+    doc_id: str = typer.Argument(..., help="복구할 문서 ID"),
+):
+    """아카이브된 문서를 복구해 검색에 다시 노출."""
+    from pkb.store import get_client, restore_document
+
+    es = get_client()
+    n = restore_document(es, doc_id)
+    if n == 0:
+        typer.echo(f"복구할 아카이브 없음 (doc_id={doc_id})")
+        raise typer.Exit(1)
+    typer.echo(f"복구 완료: '{doc_id}' ({n}개 청크)")
+
+
+@app.command("purge-archived")
+def purge_archived_cmd(
+    before: str = typer.Option(
+        "",
+        help="이 시점 이전에 아카이브된 것만 삭제 (ISO 날짜, 예: 2024-01-01). 빈 값이면 전체.",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="확인 프롬프트 생략"),
+):
+    """아카이브된 문서를 물리 삭제 (비가역!). 명시 요청 시에만 사용."""
+    from datetime import UTC, datetime
+
+    from pkb.store import get_client, purge_archived
+
+    before_dt: datetime | None = None
+    if before:
+        try:
+            before_dt = datetime.fromisoformat(before).replace(tzinfo=UTC)
+        except ValueError:
+            typer.echo(f"잘못된 ISO 날짜: {before}")
+            raise typer.Exit(1) from None
+
+    scope = f"archived_at < {before_dt.isoformat()}" if before_dt else "모든 아카이브"
+    if not yes:
+        typer.confirm(
+            f"PURGE: {scope} 를 영구 삭제합니다. 계속하시겠습니까?",
+            abort=True,
+        )
+
+    es = get_client()
+    n = purge_archived(es, before=before_dt)
+    typer.echo(f"Purge 완료: {n}개 청크 물리 삭제")
 
 
 @app.command()
