@@ -85,10 +85,10 @@ def write_file(file_path: str, content: str, ingest: bool = True) -> str:
 
     result = f"파일 저장 완료: {file_path} ({len(content)}자)"
     if ingest:
-        from pkb.ingest import ingest_files
+        from pkb.ingest import format_delta_stats, ingest_files
 
-        count = ingest_files([full_path], base_dir=Path.cwd())
-        result += f" | 인제스트: {count}개 청크"
+        stats = ingest_files([full_path], base_dir=Path.cwd())
+        result += f" | 인제스트: {format_delta_stats(stats)}"
     return result
 
 
@@ -171,9 +171,11 @@ def add_document(file_path: str, tags: str = "") -> str:
     """
     from pathlib import Path
 
-    from pkb.embeddings import embed
-    from pkb.ingest import SUPPORTED_EXTENSIONS, process_file
-    from pkb.store import add_chunks, delete_document, get_client
+    from pkb.ingest import (
+        SUPPORTED_EXTENSIONS,
+        format_delta_stats,
+        ingest_files,
+    )
 
     base_dir = Path.cwd()
     data_root = (base_dir / "data").resolve()
@@ -186,26 +188,11 @@ def add_document(file_path: str, tags: str = "") -> str:
     if full_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
         return f"지원하지 않는 파일 형식입니다: {file_path} (지원: {sorted(SUPPORTED_EXTENSIONS)})"
 
-    chunks = process_file(full_path, base_dir)
-    if not chunks:
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    stats = ingest_files([full_path], base_dir=base_dir, tag_override=tag_list)
+    if not stats["files"]:
         return f"빈 파일입니다: {file_path}"
-
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
-    if tag_list:
-        for chunk in chunks:
-            chunk["tags"] = tag_list
-
-    es = get_client()
-    doc_id = chunks[0]["doc_id"]
-    delete_document(es, doc_id)
-
-    texts = [c["content"] for c in chunks]
-    vectors = embed(texts)
-    for chunk, vector in zip(chunks, vectors, strict=False):
-        chunk["embedding"] = vector
-
-    count = add_chunks(es, chunks)
-    return f"인제스트 완료: {file_path} ({count}개 청크)"
+    return f"인제스트 완료: {file_path} — {format_delta_stats(stats)}"
 
 
 @mcp.tool()
@@ -235,14 +222,13 @@ def convert_and_ingest(
     """
     from pathlib import Path
 
-    from pkb.embeddings import embed
     from pkb.ingest import (
         SUPPORTED_EXTENSIONS,
         VALID_CATEGORIES,
-        process_file,
+        format_delta_stats,
+        ingest_files,
         read_file_as_text,
     )
-    from pkb.store import add_chunks, delete_document, get_client
 
     src = Path(input_path).expanduser().resolve()
     if not src.exists():
@@ -269,16 +255,9 @@ def convert_and_ingest(
     result = f"변환 완료: {output.relative_to(base_dir)} ({len(text)}자)"
 
     if ingest:
-        chunks = process_file(output, base_dir)
-        if chunks:
-            es = get_client()
-            delete_document(es, chunks[0]["doc_id"])
-            texts = [c["content"] for c in chunks]
-            vectors = embed(texts)
-            for chunk, vector in zip(chunks, vectors, strict=False):
-                chunk["embedding"] = vector
-            count = add_chunks(es, chunks)
-            result += f"\n인제스트 완료: {count}개 청크"
+        stats = ingest_files([output], base_dir=base_dir)
+        if stats["files"]:
+            result += f"\n인제스트 완료: {format_delta_stats(stats)}"
 
     return result
 
@@ -296,7 +275,7 @@ def sync_obsidian(path: str = "") -> str:
     from pathlib import Path
 
     from pkb.config import settings
-    from pkb.ingest import find_ingestable_files, ingest_files
+    from pkb.ingest import find_ingestable_files, format_delta_stats, ingest_files
 
     vault_path = path or settings.obsidian_path
     if not vault_path:
@@ -310,13 +289,16 @@ def sync_obsidian(path: str = "") -> str:
     if not files:
         return f"인제스트할 파일이 없습니다: {vault}"
 
-    total = ingest_files(
+    stats = ingest_files(
         files,
         base_dir=vault,
         doc_id_prefix="obsidian/",
         category_override="obsidian",
     )
-    return f"Obsidian 동기화 완료: {len(files)}개 파일, {total}개 청크\n경로: {vault}"
+    return (
+        f"Obsidian 동기화 완료: {len(files)}개 파일 — {format_delta_stats(stats)}"
+        f"\n경로: {vault}"
+    )
 
 
 @mcp.tool()
@@ -361,7 +343,7 @@ def reindex_document(doc_id: str) -> str:
     from pathlib import Path
 
     from pkb.config import settings as _settings
-    from pkb.ingest import ingest_files
+    from pkb.ingest import format_delta_stats, ingest_files
 
     if doc_id.startswith("obsidian/"):
         if not _settings.obsidian_path:
@@ -381,17 +363,17 @@ def reindex_document(doc_id: str) -> str:
     if not file_path.exists():
         return f"원본 파일을 찾을 수 없습니다: {file_path}"
 
-    count = ingest_files(
+    stats = ingest_files(
         [file_path], base_dir=base_dir, doc_id_prefix=prefix, category_override=cat
     )
-    return f"재인제스트 완료: {doc_id} ({count}개 청크)"
+    return f"재인제스트 완료: {doc_id} — {format_delta_stats(stats)}"
 
 
 @mcp.tool()
 def doctor() -> str:
     """PKB 시스템 상태 점검. ES 연결, 인덱스, 문서 수, 설정 확인."""
     from pkb.config import settings as _settings
-    from pkb.store import count_documents, get_client
+    from pkb.store import count_chunks_without_hash, count_documents, get_client
 
     lines = ["=== PKB Doctor ==="]
 
@@ -438,6 +420,19 @@ def doctor() -> str:
                     },
                 )["count"]
                 lines.append(f"  archived: {archived}  expired(still-visible): {expired}")
+            except Exception:
+                pass
+
+            # 델타 임베딩 마이그레이션 진행도
+            try:
+                no_hash = count_chunks_without_hash(es)
+                if no_hash:
+                    lines.append(
+                        f"  chunks without content_hash: {no_hash} / {count} "
+                        f"(touch 또는 reindex로 점진 백필)"
+                    )
+                else:
+                    lines.append("  content_hash: 모든 청크 백필 완료")
             except Exception:
                 pass
         else:

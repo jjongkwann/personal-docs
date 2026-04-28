@@ -39,6 +39,7 @@ INDEX_SETTINGS = {
             "tags": {"type": "keyword"},
             "date_modified": {"type": "date"},
             "language": {"type": "keyword"},
+            "content_hash": {"type": "keyword"},
             # Lifecycle: 사용자 지정 만료일(expires_at)과 실제 아카이브 시점(archived_at).
             # 둘 다 null이면 검색에 정상 포함. 쿼리 필터는 retrieve._lifecycle_filter 참고.
             "expires_at": {"type": "date"},
@@ -77,6 +78,82 @@ def add_chunks(
     if actions:
         es.bulk(operations=actions, refresh=True)
     return len(chunks)
+
+
+def get_existing_chunks(es: Elasticsearch, doc_id: str) -> dict[int, dict]:
+    """{chunk_index: source dict (excluding embedding+content)} 반환.
+    빈 dict면 신규 문서 또는 인덱스 미존재.
+    """
+    try:
+        res = es.search(
+            index=settings.es_index,
+            query={"term": {"doc_id": doc_id}},
+            size=10000,
+            source_excludes=["embedding", "content"],
+        )
+    except NotFoundError:
+        return {}
+    return {h["_source"]["chunk_index"]: h["_source"] for h in res["hits"]["hits"]}
+
+
+def apply_chunk_delta(
+    es: Elasticsearch,
+    doc_id: str,
+    new_chunks: list[dict],
+    metadata_updates: list[tuple[int, dict]],
+    delete_indices: list[int],
+) -> dict:
+    """index/update/delete 혼합 bulk 1회. 카운트 반환.
+
+    new_chunks: 새로 또는 다시 임베딩된 청크 (embedding 포함, content_hash 필수).
+    metadata_updates: (chunk_index, partial doc) — 메타데이터-only 변경.
+    delete_indices: 사라진 청크 슬롯의 chunk_index 목록.
+    """
+    for c in new_chunks:
+        assert "content_hash" in c, f"missing content_hash in chunk {c.get('chunk_index')}"
+
+    ops: list[dict] = []
+    for c in new_chunks:
+        _id = f"{doc_id}_{c['chunk_index']}"
+        ops.append({"index": {"_index": settings.es_index, "_id": _id}})
+        ops.append(c)
+    for idx, partial in metadata_updates:
+        ops.append({"update": {"_index": settings.es_index, "_id": f"{doc_id}_{idx}"}})
+        ops.append({"doc": partial})
+    for idx in delete_indices:
+        ops.append({"delete": {"_index": settings.es_index, "_id": f"{doc_id}_{idx}"}})
+
+    if ops:
+        resp = es.bulk(operations=ops, refresh=True)
+        if resp.get("errors"):
+            first_err = next(
+                (
+                    item[op]["error"]
+                    for item in resp.get("items", [])
+                    for op in item
+                    if "error" in item[op]
+                ),
+                None,
+            )
+            raise RuntimeError(f"bulk delta failed: {first_err}")
+
+    return {
+        "indexed": len(new_chunks),
+        "updated": len(metadata_updates),
+        "deleted": len(delete_indices),
+    }
+
+
+def count_chunks_without_hash(es: Elasticsearch) -> int:
+    """content_hash 필드가 없는 청크 수. 마이그레이션 진행도 추적용."""
+    try:
+        result = es.count(
+            index=settings.es_index,
+            query={"bool": {"must_not": {"exists": {"field": "content_hash"}}}},
+        )
+        return result["count"]
+    except NotFoundError:
+        return 0
 
 
 def delete_document(es: Elasticsearch, doc_id: str) -> int:

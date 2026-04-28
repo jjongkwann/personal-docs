@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 import re
@@ -71,6 +72,43 @@ def classify_category(text: str) -> str:
     content = response.content if isinstance(response.content, str) else str(response.content)
     category = content.strip().lower()
     return category if category in VALID_CATEGORIES else "misc"
+
+
+def _content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+_META_DIFF_FIELDS = (
+    "tags",
+    "title",
+    "expires_at",
+    "date_modified",
+    "category",
+    "section_path",
+    "language",
+    "source_path",
+)
+
+
+def _diff_metadata(old: dict, new: dict) -> dict:
+    """content 외 필드 비교. 다른 필드만 dict로 반환. tags는 정렬 후 비교."""
+    diff: dict = {}
+    for f in _META_DIFF_FIELDS:
+        ov, nv = old.get(f), new.get(f)
+        if f == "tags":
+            ov = sorted(ov or [])
+            nv = sorted(nv or [])
+        if ov != nv:
+            diff[f] = new.get(f)
+    return diff
+
+
+def format_delta_stats(stats: dict) -> str:
+    return (
+        f"files={stats['files']} reused={stats['reused']} "
+        f"embedded={stats['embedded']} added={stats['added']} "
+        f"metadata_updated={stats['metadata_updated']} deleted={stats['deleted']}"
+    )
 
 
 def _get_encoder() -> tiktoken.Encoding:
@@ -348,6 +386,7 @@ def process_file(
     for i, (section_path, chunk_text) in enumerate(chunks_with_path):
         chunk: dict = {
             "content": chunk_text,
+            "content_hash": _content_hash(chunk_text),
             "source_path": doc_id,
             "category": category,
             "doc_id": doc_id,
@@ -364,33 +403,107 @@ def process_file(
     return results
 
 
+def _empty_stats() -> dict:
+    return {
+        "files": 0,
+        "reused": 0,
+        "embedded": 0,
+        "added": 0,
+        "metadata_updated": 0,
+        "deleted": 0,
+    }
+
+
 def ingest_files(
     file_paths: list[Path],
     base_dir: Path,
     doc_id_prefix: str = "",
     category_override: str | None = None,
-) -> int:
-    """파일 리스트를 처리 → 임베딩 → ES에 저장. 처리된 청크 수 반환."""
+    tag_override: list[str] | None = None,
+) -> dict:
+    """파일 리스트를 델타 인제스트.
+
+    각 청크 슬롯을 chunk_index 단위로 비교 (`_id = f"{doc_id}_{chunk_index}"`):
+      - 신규 또는 content_hash 불일치 → 재임베딩 + index
+      - hash 일치하나 메타데이터 차이 → partial update (임베딩 유지)
+      - 새 청크에서 사라진 슬롯 → delete
+
+    문서 맨 앞에 단락 삽입 등으로 chunk_index가 시프트되면 모든 슬롯 hash가
+    달라져 사실상 풀 재임베딩이 된다 — 알려진 한계.
+    """
     from pkb.embeddings import embed
-    from pkb.store import add_chunks, delete_document, get_client
+    from pkb.store import apply_chunk_delta, get_client, get_existing_chunks
 
     es = get_client()
-    total = 0
+    stats = _empty_stats()
+
     for file_path in file_paths:
-        chunks = process_file(
+        new_chunks = process_file(
             file_path, base_dir,
             doc_id_prefix=doc_id_prefix,
             category_override=category_override,
         )
-        if not chunks:
+        if not new_chunks:
             continue
-        delete_document(es, chunks[0]["doc_id"])
-        texts = [c["content"] for c in chunks]
-        vectors = embed(texts)
-        for chunk, vector in zip(chunks, vectors, strict=False):
-            chunk["embedding"] = vector
-        total += add_chunks(es, chunks)
-    return total
+        if tag_override is not None:
+            for c in new_chunks:
+                c["tags"] = tag_override
+
+        doc_id = new_chunks[0]["doc_id"]
+        existing = get_existing_chunks(es, doc_id)
+        new_by_idx = {c["chunk_index"]: c for c in new_chunks}
+
+        to_embed_indices: list[int] = []
+        metadata_updates: list[tuple[int, dict]] = []
+        delete_indices: list[int] = []
+        reused = 0
+
+        for idx, new in new_by_idx.items():
+            old = existing.get(idx)
+            if old is None or old.get("content_hash") != new["content_hash"]:
+                # 신규 슬롯 / hash 변경 / 마이그레이션 (old hash None)
+                to_embed_indices.append(idx)
+                continue
+            meta_diff = _diff_metadata(old, new)
+            if meta_diff:
+                metadata_updates.append((idx, meta_diff))
+            else:
+                reused += 1
+
+        for idx in existing:
+            if idx not in new_by_idx:
+                delete_indices.append(idx)
+
+        if to_embed_indices:
+            texts = [new_by_idx[i]["content"] for i in to_embed_indices]
+            for idx, vec in zip(to_embed_indices, embed(texts), strict=False):
+                new_by_idx[idx]["embedding"] = vec
+
+        added = sum(1 for i in to_embed_indices if existing.get(i) is None)
+        re_embedded = len(to_embed_indices) - added
+
+        apply_chunk_delta(
+            es,
+            doc_id,
+            new_chunks=[new_by_idx[i] for i in to_embed_indices],
+            metadata_updates=metadata_updates,
+            delete_indices=delete_indices,
+        )
+
+        _log.info(
+            "[delta] %s reused=%d re-embedded=%d added=%d "
+            "metadata_updated=%d deleted=%d",
+            doc_id, reused, re_embedded, added,
+            len(metadata_updates), len(delete_indices),
+        )
+        stats["files"] += 1
+        stats["reused"] += reused
+        stats["embedded"] += re_embedded
+        stats["added"] += added
+        stats["metadata_updated"] += len(metadata_updates)
+        stats["deleted"] += len(delete_indices)
+
+    return stats
 
 
 def find_ingestable_files(path: Path) -> list[Path]:

@@ -66,10 +66,10 @@ def write_file(file_path: str, content: str, ingest: bool = True) -> str:
 
     result = f"파일 저장 완료: {file_path} ({len(content)}자)"
     if ingest:
-        from pkb.ingest import ingest_files
+        from pkb.ingest import format_delta_stats, ingest_files
 
-        count = ingest_files([full_path], base_dir=Path.cwd())
-        result += f" | 인제스트: {count}개 청크"
+        stats = ingest_files([full_path], base_dir=Path.cwd())
+        result += f" | 인제스트: {format_delta_stats(stats)}"
     return result
 
 

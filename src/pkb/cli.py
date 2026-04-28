@@ -29,13 +29,14 @@ def init(
 
         files = find_ingestable_files(vault)
         typer.echo(f"Obsidian 초기 인제스트: {len(files)}개 파일 감지 ({vault})")
-        total = ingest_files(
+        from pkb.ingest import format_delta_stats
+        stats = ingest_files(
             files,
             base_dir=vault,
             doc_id_prefix="obsidian/",
             category_override="obsidian",
         )
-        typer.echo(f"Obsidian 인제스트 완료: {total}개 청크")
+        typer.echo(f"Obsidian 인제스트 완료: {format_delta_stats(stats)}")
 
 
 @app.command()
@@ -46,7 +47,7 @@ def reindex(
 
     매핑 스키마가 바뀌었거나 (예: section_path 추가) 인덱스 상태가 꼬였을 때 사용.
     """
-    from pkb.ingest import find_ingestable_files, ingest_files
+    from pkb.ingest import find_ingestable_files, format_delta_stats, ingest_files
     from pkb.store import create_index, delete_index, get_client
 
     if not confirm:
@@ -68,8 +69,8 @@ def reindex(
     if data_root.is_dir():
         data_files = find_ingestable_files(data_root)
         typer.echo(f"3. data/ 재인제스트: {len(data_files)}개 파일")
-        data_total = ingest_files(data_files, base_dir=Path.cwd())
-        typer.echo(f"   → {data_total}개 청크")
+        data_stats = ingest_files(data_files, base_dir=Path.cwd())
+        typer.echo(f"   → {format_delta_stats(data_stats)}")
 
     # Obsidian 재인제스트
     if settings.obsidian_path:
@@ -77,13 +78,13 @@ def reindex(
         if vault.is_dir():
             vault_files = find_ingestable_files(vault)
             typer.echo(f"4. Obsidian 재인제스트: {len(vault_files)}개 파일")
-            vault_total = ingest_files(
+            vault_stats = ingest_files(
                 vault_files,
                 base_dir=vault,
                 doc_id_prefix="obsidian/",
                 category_override="obsidian",
             )
-            typer.echo(f"   → {vault_total}개 청크")
+            typer.echo(f"   → {format_delta_stats(vault_stats)}")
 
     typer.echo("\n완료.")
 
@@ -166,9 +167,7 @@ def add(
     tags: str = typer.Option("", help="쉼표 구분 태그 (예: python,backend)"),
 ):
     """문서를 인제스트하여 ES에 저장."""
-    from pkb.embeddings import embed
-    from pkb.ingest import find_ingestable_files, process_file
-    from pkb.store import add_chunks, delete_document, get_client
+    from pkb.ingest import find_ingestable_files, format_delta_stats, ingest_files
 
     base_dir = Path.cwd()
     path = path.resolve()
@@ -177,34 +176,10 @@ def add(
         typer.echo(f"인제스트 가능한 파일을 찾을 수 없습니다: {path}")
         raise typer.Exit(1)
 
-    es = get_client()
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
 
-    total_chunks = 0
-    for file_path in files:
-        chunks = process_file(file_path, base_dir)
-        if not chunks:
-            continue
-
-        if tag_list:
-            for chunk in chunks:
-                chunk["tags"] = tag_list
-
-        # 기존 문서 삭제 후 재인덱싱
-        doc_id = chunks[0]["doc_id"]
-        delete_document(es, doc_id)
-
-        # 임베딩 생성
-        texts = [c["content"] for c in chunks]
-        vectors = embed(texts)
-        for chunk, vector in zip(chunks, vectors, strict=False):
-            chunk["embedding"] = vector
-
-        count = add_chunks(es, chunks)
-        total_chunks += count
-        typer.echo(f"  {file_path.name}: {count}개 청크")
-
-    typer.echo(f"\n총 {len(files)}개 파일, {total_chunks}개 청크 인제스트 완료.")
+    stats = ingest_files(files, base_dir=base_dir, tag_override=tag_list)
+    typer.echo(f"\n총 {len(files)}개 파일 처리 — {format_delta_stats(stats)}")
 
 
 @app.command()
@@ -447,19 +422,20 @@ def watch():
                 self._reingest(event.dest_path)
 
         def _reingest(self, path: str):
+            from pkb.ingest import format_delta_stats
             file_path = Path(path).resolve()
             if not file_path.exists():
                 return
             try:
-                total = ingest_files(
+                stats = ingest_files(
                     [file_path],
                     base_dir=self.base_dir,
                     doc_id_prefix=self.doc_id_prefix,
                     category_override=self.category_override,
                 )
-                if total:
+                if stats["files"]:
                     doc_id = self._rel_doc_id(path)
-                    typer.echo(f"[인제스트] {doc_id} ({total}개 청크)")
+                    typer.echo(f"[인제스트] {doc_id} — {format_delta_stats(stats)}")
             except Exception as e:
                 typer.echo(f"[오류] {path}: {e}")
 
