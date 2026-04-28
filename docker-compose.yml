@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile.es
     container_name: pkb-es
+    restart: unless-stopped
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
