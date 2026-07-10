@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+
+# Personal data (전부 제외 — eval 자산도 개인 볼트 경로 노출로 추적 안 함)
+data/*
+
+# Environment
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Claude Code 로컬 설정
+.claude/
