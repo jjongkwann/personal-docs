@@ -580,6 +580,7 @@ def ingest_files(
 
     es = get_client()
     stats = _empty_stats()
+    relayouts: list[tuple[str, dict[int, str], dict[int, str]]] = []
 
     for file_path in file_paths:
         new_chunks = process_file(
@@ -662,6 +663,14 @@ def ingest_files(
             delete_indices=delete_indices,
         )
 
+        old_hashes = {
+            i: o["content_hash"] for i, o in existing.items() if o.get("content_hash")
+        }
+        new_hashes = {i: c["content_hash"] for i, c in new_by_idx.items()}
+        if old_hashes and old_hashes != new_hashes:
+            # 청크 레이아웃이 바뀐 문서 — 개념 멘션도 새 슬롯을 따라가야 한다 (루프 뒤 일괄 처리)
+            relayouts.append((doc_id, old_hashes, new_hashes))
+
         delta = {
             "new": added,
             "updated": re_embedded + len(metadata_updates),
@@ -685,7 +694,38 @@ def ingest_files(
         stats["metadata_updated"] += len(metadata_updates)
         stats["deleted"] += len(delete_indices)
 
+    if relayouts:
+        _realign_graph(relayouts)
     return stats
+
+
+def _realign_graph(relayouts: list[tuple[str, dict[int, str], dict[int, str]]]) -> None:
+    """청크 레이아웃이 바뀐 문서들의 개념 멘션 위치를 새 슬롯에 맞춘다.
+
+    그래프 DB는 선택 기능이라 실패해도 인제스트를 막지 않는다 (색인은 이미 끝난 상태).
+    """
+    from pkb.graph.schema import get_connection, init_schema
+    from pkb.graph.store import realign_doc_chunks
+
+    try:
+        init_schema(settings.graph_db_path)
+        conn = get_connection(settings.graph_db_path)
+        try:
+            moved = dropped = 0
+            for doc_id, old_hashes, new_hashes in relayouts:
+                r = realign_doc_chunks(conn, doc_id, old_hashes, new_hashes)
+                moved += r["moved"]
+                dropped += r["dropped"]
+            conn.commit()
+        finally:
+            conn.close()
+        if moved or dropped:
+            _log.info(
+                "[graph] 멘션 재정렬: %d개 문서, 이동=%d 삭제=%d",
+                len(relayouts), moved, dropped,
+            )
+    except Exception:
+        _log.warning("[graph] 멘션 재정렬 실패 — 그래프 위치가 낡았을 수 있다", exc_info=True)
 
 
 # 검토 큐 디렉터리. 승인 전 대기 노트가 전량 색인에 끌려가지 않도록 탐색에서 제외한다.

@@ -96,6 +96,53 @@ def test_front_insert_moves_shifted_chunks_without_reembedding(monkeypatch):
     assert indexed[0]["embedding"] == [3.0]  # "new" 신규 임베딩
 
 
+def test_front_insert_realigns_concept_mentions(monkeypatch, tmp_path):
+    """시프트된 청크의 개념 멘션이 새 슬롯을 따라가는지 (인제스트→그래프 배선).
+
+    보정이 없으면 멘션이 옛 인덱스에 남아 검색 결과에 엉뚱한 청크의 개념이 붙는다.
+    """
+    from pkb.config import settings
+    from pkb.graph.schema import get_connection, init_schema
+
+    db = str(tmp_path / "g.sqlite")
+    init_schema(db)
+    monkeypatch.setattr(settings, "graph_db_path", db)
+    with get_connection(db) as c:
+        c.execute(
+            "INSERT INTO concepts (id, name, slug, created_at, updated_at) "
+            "VALUES (1, 'A', 'a', 'now', 'now')"
+        )
+        c.execute(
+            "INSERT INTO concept_mentions (concept_id, doc_id, chunk_index, section_path) "
+            "VALUES (1, ?, 2, '')",  # "ccc" 청크(슬롯 2)에 붙은 멘션
+            (DOC_ID,),
+        )
+
+    old = [_chunk(0, "aaa"), _chunk(1, "bbb"), _chunk(2, "ccc")]
+    new = [_chunk(0, "new"), _chunk(1, "aaa"), _chunk(2, "bbb"), _chunk(3, "ccc")]
+    es = MagicMock()
+    es.search.return_value = {"hits": {"hits": [_existing_hit(c) for c in old]}}
+    es.mget.return_value = {
+        "docs": [
+            {"found": True, "_source": {"chunk_index": i, "embedding": [float(i)]}}
+            for i in (0, 1, 2)
+        ]
+    }
+    es.bulk.return_value = {"errors": False}
+    _setup(monkeypatch, es, new, [])
+
+    ingest_files([Path("dummy.md")], Path("."))
+
+    with get_connection(db) as c:
+        rows = [
+            r["chunk_index"]
+            for r in c.execute(
+                "SELECT chunk_index FROM concept_mentions WHERE doc_id = ?", (DOC_ID,)
+            )
+        ]
+    assert rows == [3]  # "ccc"가 2→3으로 이동했으므로 멘션도 3
+
+
 def test_missing_source_embedding_falls_back_to_reembed(monkeypatch):
     old = [_chunk(0, "aaa")]
     new = [_chunk(0, "new"), _chunk(1, "aaa")]

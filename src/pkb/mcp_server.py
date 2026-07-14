@@ -2,6 +2,8 @@
 
 from mcp.server.fastmcp import FastMCP
 
+_PENDING_SCAN_PAGE = 2000  # pending 스캔 페이지 크기 (search_after로 전량 순회)
+
 mcp = FastMCP("pkb", instructions="""개인 지식 관리 시스템(PKB)의 기본 인터페이스입니다.
 사용자의 개인 데이터(경력, 공부 노트, 자기소개, Obsidian 등)가 Elasticsearch에 저장되어 있습니다.
 질문에 답하려면 search_knowledge로 검색하고, 파일 작성은 write_file을 사용하세요.
@@ -872,25 +874,32 @@ def graph_list_chunks(
         from pkb.graph import store as gstore
         from pkb.graph.schema import get_connection, init_schema
 
-        # ponytail: 개인 규모라 스코프 전량 스캔(10k 상한) — 초과 시 search_after로 업그레이드
-        scan = es.search(
-            index=_settings.es_index,
-            query=query,
-            size=10000,
-            source_includes=["doc_id", "chunk_index", "content_hash"],
-            sort=[{"doc_id": "asc"}, {"chunk_index": "asc"}],
-        )
+        # search_after로 스코프 전량 스캔 — size 상한을 쓰면 코퍼스가 그 수를 넘는 순간
+        # 꼬리 청크가 조용히 pending에서 누락된다 (10k 상한 시절 실제로 발생)
         init_schema(_settings.graph_db_path)
         conn = get_connection(_settings.graph_db_path)
         try:
             by_idx, legacy = gstore.extracted_markers(conn)
         finally:
             conn.close()
-        pending = [
-            s
-            for s in (h["_source"] for h in scan["hits"]["hits"])
-            if gstore.is_pending(s, by_idx, legacy)
-        ]
+        pending = []
+        search_after = None
+        while True:
+            scan = es.search(
+                index=_settings.es_index,
+                query=query,
+                size=_PENDING_SCAN_PAGE,
+                source_includes=["doc_id", "chunk_index", "content_hash"],
+                sort=[{"doc_id": "asc"}, {"chunk_index": "asc"}],
+                **({"search_after": search_after} if search_after else {}),
+            )
+            hits = scan["hits"]["hits"]
+            if not hits:
+                break
+            pending.extend(
+                s for s in (h["_source"] for h in hits) if gstore.is_pending(s, by_idx, legacy)
+            )
+            search_after = hits[-1]["sort"]
         # offset 페이징 없음 — graph_store_concepts 저장이 pending을 앞에서 줄이므로
         # offset을 쓰면 매 페이지 offset만큼 건너뛴다. 항상 앞에서 limit개 반환.
         page = pending[:limit]

@@ -82,13 +82,20 @@ class _FakeES:
                 },
             }
         if kwargs.get("source_includes") == ["doc_id", "chunk_index", "content_hash"]:
-            hashes = self._chunk_hashes or []
+            rows = sorted(self._chunk_hashes or [], key=lambda r: (r[0], r[1]))
+            after = kwargs.get("search_after")
+            if after:
+                rows = [r for r in rows if [r[0], r[1]] > list(after)]
+            rows = rows[: kwargs.get("size") or len(rows)]
             return {
                 "hits": {
-                    "total": {"value": len(hashes)},
+                    "total": {"value": len(rows)},
                     "hits": [
-                        {"_source": {"doc_id": d, "chunk_index": i, "content_hash": h}}
-                        for d, i, h in hashes
+                        {
+                            "_source": {"doc_id": d, "chunk_index": i, "content_hash": h},
+                            "sort": [d, i],
+                        }
+                        for d, i, h in rows
                     ],
                 }
             }
@@ -199,12 +206,14 @@ def test_pending_chunks_query_shape_and_count(doctor_env, monkeypatch, tmp_path)
     ])
     report = build_health_report(es)
 
-    call = next(
+    # size 상한이 아니라 search_after로 전량 순회해야 한다 — 상한을 쓰면 코퍼스가 그 수를
+    # 넘는 순간 꼬리 청크가 집계에서 빠져 미추출 수가 과소보고된다 (실측 10,123 > 10,000)
+    scans = [
         c
         for c in es.search_calls
         if c.get("source_includes") == ["doc_id", "chunk_index", "content_hash"]
-    )
-    assert call["size"] == 10000
-    assert call["track_total_hits"] is True
+    ]
+    assert scans[0]["sort"] == [{"doc_id": "asc"}, {"chunk_index": "asc"}]
+    assert scans[-1].get("search_after")  # 첫 페이지 이후 커서로 이어 읽는다
 
     assert "그래프 미추출 청크: 2 / 4" in report

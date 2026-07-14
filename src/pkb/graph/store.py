@@ -315,6 +315,85 @@ def clear_mentions_for_chunk(
     return ids
 
 
+def realign_doc_chunks(
+    conn: sqlite3.Connection,
+    doc_id: str,
+    old_hashes: dict[int, str],
+    new_hashes: dict[int, str],
+) -> dict:
+    """재청킹으로 슬롯이 바뀐 문서의 멘션·마커를 새 레이아웃에 맞춘다.
+
+    인제스트가 청크를 교체할 때 호출하지 않으면 멘션이 옛 인덱스에 그대로 남아
+    검색 결과에 엉뚱한 개념이 붙는다. is_pending은 이동한 청크를 재추출 대상으로
+    보지만, 내용이 그대로면 해시가 같아 레거시 마커에 걸려 pending에서 빠진다 —
+    그래서 위치 보정은 인제스트가 직접 해야 한다(옛 레이아웃을 아는 유일한 지점).
+
+      - 같은 내용이 다른 슬롯으로 이동 → 멘션·마커를 새 인덱스로 이설(재추출 불필요)
+      - 내용이 사라짐 → 멘션·마커 삭제. 그 자리의 새 내용은 해시가 달라 pending이 된다.
+    """
+    dst_by_hash: dict[str, int] = {}
+    for idx in sorted(new_hashes):
+        dst_by_hash.setdefault(new_hashes[idx], idx)
+
+    moved: dict[int, int] = {}
+    gone: list[int] = []
+    for idx, h in old_hashes.items():
+        if new_hashes.get(idx) == h:
+            continue  # 같은 자리에 같은 내용 — 멘션 유효
+        dst = dst_by_hash.get(h)
+        if dst is None:
+            gone.append(idx)
+        else:
+            moved[idx] = dst
+    if not moved and not gone:
+        return {"moved": 0, "dropped": 0}
+
+    rows = conn.execute(
+        "SELECT concept_id, chunk_index, section_path FROM concept_mentions WHERE doc_id = ?",
+        (doc_id,),
+    ).fetchall()
+    touched = {r["concept_id"] for r in rows if r["chunk_index"] in moved or r["chunk_index"] in gone}
+    # 이동 슬롯끼리 목적지가 겹칠 수 있어(같은 내용의 청크) set으로 중복 제거 후 재삽입
+    kept = {
+        (r["concept_id"], moved.get(r["chunk_index"], r["chunk_index"]), r["section_path"])
+        for r in rows
+        if r["chunk_index"] not in gone
+    }
+    dropped = len(rows) - len({(c, i) for c, i, _ in kept})
+    conn.execute("DELETE FROM concept_mentions WHERE doc_id = ?", (doc_id,))
+    conn.executemany(
+        "INSERT OR IGNORE INTO concept_mentions "
+        "(concept_id, doc_id, chunk_index, section_path) VALUES (?, ?, ?, ?)",
+        [(cid, doc_id, idx, sp) for cid, idx, sp in kept],
+    )
+
+    # 마커도 전량 재작성 — 제자리 UPDATE는 슬롯이 밀릴 때 서로 덮어쓴다(0→1이 기존 1을 밀어냄)
+    gone_hashes = {old_hashes[i] for i in gone}
+    marks = conn.execute(
+        "SELECT chunk_index, content_hash, extracted_at FROM extracted_chunks WHERE doc_id = ?",
+        (doc_id,),
+    ).fetchall()
+    keep: dict[int, tuple[str, str]] = {}
+    legacy: dict[str, str] = {}
+    for r in marks:
+        idx = r["chunk_index"]
+        if idx is None:
+            # 해시-only 레거시 마커 — 사라진 내용의 것은 버린다. 남으면 '추출 완료'로 보여 재추출을 막는다
+            if r["content_hash"] not in gone_hashes:
+                legacy[r["content_hash"]] = r["extracted_at"]
+        elif idx not in gone:
+            keep[moved.get(idx, idx)] = (r["content_hash"], r["extracted_at"])
+    conn.execute("DELETE FROM extracted_chunks WHERE doc_id = ?", (doc_id,))
+    conn.executemany(
+        "INSERT INTO extracted_chunks (doc_id, chunk_index, content_hash, extracted_at) "
+        "VALUES (?, ?, ?, ?)",
+        [(doc_id, idx, h, at) for idx, (h, at) in keep.items()]
+        + [(doc_id, None, h, at) for h, at in legacy.items()],
+    )
+    recompute_mention_counts(conn, touched)
+    return {"moved": len(moved), "dropped": dropped}
+
+
 def recompute_mention_counts(conn: sqlite3.Connection, concept_ids: set[int]) -> None:
     """concepts.mention_count를 concept_mentions 실측치로 재계산 (표시·큐레이션 정렬용)."""
     for cid in concept_ids:

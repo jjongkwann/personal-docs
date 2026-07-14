@@ -173,19 +173,27 @@ def build_health_report(es) -> str:
             # 그래프 미추출 청크 — ES 청크 전량을 SQLite 추출 마커와 대조 (graph_list_chunks의
             # pending_only와 같은 판정). ES 조회 실패는 조용히 생략.
             try:
-                # ponytail: 개인 규모 상한(10000) — 초과 시 search_after로 업그레이드
-                scan = es.search(
-                    index=_settings.es_index,
-                    size=10000,
-                    track_total_hits=True,
-                    source_includes=["doc_id", "chunk_index", "content_hash"],
-                )
-                total_chunks = scan["hits"]["total"]["value"]
-                pending = sum(
-                    1
-                    for h in scan["hits"]["hits"]
-                    if gstore.is_pending(h["_source"], by_idx, legacy)
-                )
+                # search_after로 전량 순회 — size 상한을 쓰면 코퍼스가 그 수를 넘는 순간
+                # 꼬리 청크가 집계에서 빠져 미추출 수가 조용히 과소보고된다
+                total_chunks = 0
+                pending = 0
+                search_after = None
+                while True:
+                    scan = es.search(
+                        index=_settings.es_index,
+                        size=2000,
+                        source_includes=["doc_id", "chunk_index", "content_hash"],
+                        sort=[{"doc_id": "asc"}, {"chunk_index": "asc"}],
+                        **({"search_after": search_after} if search_after else {}),
+                    )
+                    hits = scan["hits"]["hits"]
+                    if not hits:
+                        break
+                    total_chunks += len(hits)
+                    pending += sum(
+                        1 for h in hits if gstore.is_pending(h["_source"], by_idx, legacy)
+                    )
+                    search_after = hits[-1]["sort"]
                 lines.append(f"그래프 미추출 청크: {pending} / {total_chunks}")
             except Exception:
                 pass

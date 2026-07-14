@@ -26,8 +26,16 @@ class FakeES:
         return {"count": len(self.chunks)}
 
     def search(self, index=None, query=None, size=None, from_=0, sort=None,
-               source_excludes=None, source_includes=None):
-        hits = [{"_source": dict(c)} for c in self.chunks]
+               source_excludes=None, source_includes=None, search_after=None):
+        rows = sorted(self.chunks, key=lambda c: (c["doc_id"], c["chunk_index"]))
+        if search_after:
+            rows = [
+                c for c in rows
+                if [c["doc_id"], c["chunk_index"]] > list(search_after)
+            ]
+        hits = [
+            {"_source": dict(c), "sort": [c["doc_id"], c["chunk_index"]]} for c in rows
+        ]
         return {"hits": {"hits": hits[from_: from_ + (size or len(hits))]}}
 
     def mget(self, index=None, ids=None, source_excludes=None, source_includes=None):
@@ -91,6 +99,27 @@ def test_pending_only_new_chunks_all_pending(graph_db, fake_es):
     assert [c["chunk_index"] for c in result["chunks"]] == [0, 1]
     assert result["chunks"][0]["content"] == "본문0"  # pending 청크는 content 포함
     assert "next_offset" not in result  # pending_only는 offset 페이징 없음 — pending==0이 종료 신호
+
+
+def test_pending_scan_pages_past_the_page_size(graph_db, monkeypatch):
+    """스캔 페이지 크기를 넘는 코퍼스에서도 꼬리 청크가 pending에 잡히는지.
+
+    단일 size 상한으로 스캔하던 시절, 코퍼스가 상한을 넘자 꼬리 청크가 조용히
+    pending에서 빠져 영원히 재추출되지 않았다 (실측 10,123 > 10,000).
+    """
+    monkeypatch.setattr("pkb.mcp_server._PENDING_SCAN_PAGE", 2)
+    es = FakeES(
+        [
+            {"doc_id": "data/study/x.md", "chunk_index": i, "content_hash": f"h{i}",
+             "category": "study", "title": "X", "section_path": "", "content": f"본문{i}"}
+            for i in range(5)
+        ]
+    )
+    monkeypatch.setattr("pkb.store.get_client", lambda: es)
+
+    result = json.loads(graph_list_chunks(category="study", pending_only=True, limit=10))
+    assert result["pending"] == 5  # 페이지(2) 이후의 꼬리 3개도 포함
+    assert [c["chunk_index"] for c in result["chunks"]] == [0, 1, 2, 3, 4]
 
 
 def test_store_marks_extracted_including_empty_concepts(graph_db, fake_es):
