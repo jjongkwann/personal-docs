@@ -39,7 +39,6 @@ def init(
             files,
             base_dir=vault,
             doc_id_prefix="obsidian/",
-            category_override="obsidian",
         )
         typer.echo(f"Obsidian 인제스트 완료: {format_delta_stats(stats)}")
 
@@ -87,7 +86,6 @@ def reindex(
                 vault_files,
                 base_dir=vault,
                 doc_id_prefix="obsidian/",
-                category_override="obsidian",
             )
             typer.echo(f"   → {format_delta_stats(vault_stats)}")
 
@@ -144,7 +142,7 @@ def sync(
         vault = Path(settings.obsidian_path).expanduser().resolve()
         if vault.is_dir():
             stats, stale = reconcile(
-                es, vault, "obsidian/", category_override="obsidian", exclude=root
+                es, vault, "obsidian/", exclude=root
             )
             typer.echo(f"2. Obsidian 동기화: {stats['files']}개 파일 ({vault})")
             typer.echo(f"   → {format_delta_stats(stats)}")
@@ -175,7 +173,7 @@ def convert(
     ingest: bool = typer.Option(True, help="변환 후 자동 인제스트"),
 ):
     """PDF/DOCX/PPTX/XLSX/HTML을 마크다운으로 변환하여 data/에 저장."""
-    from pkb.ingest import SUPPORTED_EXTENSIONS, read_file_as_text
+    from pkb.ingest import SUPPORTED_EXTENSIONS, conversion_frontmatter, read_file_as_text
 
     input_path = input_path.resolve()
     if not input_path.exists():
@@ -185,7 +183,14 @@ def convert(
         typer.echo(f"지원하지 않는 형식입니다: {input_path.suffix}")
         raise typer.Exit(1)
 
-    text = read_file_as_text(input_path)
+    try:
+        text = read_file_as_text(input_path)
+    except Exception as e:
+        typer.echo(f"변환 실패: {input_path} — {e}")
+        raise typer.Exit(1) from e
+    if not text.strip():
+        typer.echo(f"텍스트를 추출할 수 없습니다 (스캔 PDF 등 — 직접 전사 필요): {input_path}")
+        raise typer.Exit(1)
 
     # 출력 경로 결정
     data_root = data_dir()
@@ -201,9 +206,8 @@ def convert(
         raise typer.Exit(1)
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    # 원본 파일 정보를 주석 헤더로 추가
-    header = f"<!-- source: {input_path.name} | converted: {input_path.suffix} → .md -->\n\n"
-    output.write_text(header + text, encoding="utf-8")
+    # 원본 파일 정보를 provenance frontmatter로 추가
+    output.write_text(conversion_frontmatter(input_path) + text, encoding="utf-8")
     typer.echo(f"변환 완료: {output} ({len(text)}자)")
 
     if ingest:
@@ -329,7 +333,7 @@ def reindex_doc(
         file_path = (vault / rel).resolve()
         base_dir = vault
         prefix = "obsidian/"
-        cat = "obsidian"
+        cat = None
     else:
         base_dir = data_dir()
         file_path = _resolve_data_path(doc_id)
@@ -398,7 +402,7 @@ def query(
         candidate_k=settings.candidate_k,
         rerank=rerank if rerank is not None else settings.rerank_enabled,
         expand_context=expand if expand is not None else settings.expand_context,
-        exclude_categories=["obsidian"] if not include_obsidian else None,
+        exclude_doc_prefix="obsidian/" if not include_obsidian else None,
     )
 
     if not results:
@@ -420,31 +424,35 @@ def query(
         typer.echo(preview)
 
 
+def _graph_purge(doc_id: str) -> dict | None:
+    """그래프 DB가 있으면 doc_id 관련 mentions/documents 정리. 없으면 None."""
+    if not Path(settings.graph_db_path).exists():
+        return None
+    from pkb.graph import store as gstore
+    from pkb.graph.schema import get_connection, init_schema
+
+    init_schema(settings.graph_db_path)
+    with get_connection(settings.graph_db_path) as conn:
+        return gstore.purge_document(conn, doc_id)
+
+
 @app.command()
 def delete(
     doc_id: str = typer.Argument(..., help="삭제할 문서 ID"),
 ):
     """문서 및 모든 청크 삭제 (하드 삭제, 비가역)."""
-    from pathlib import Path
-
     from pkb.store import delete_document, get_client
 
     es = get_client()
     deleted = delete_document(es, doc_id)
     typer.echo(f"'{doc_id}' 삭제 완료 ({deleted}개 청크).")
 
-    if Path(settings.graph_db_path).exists():
-        from pkb.graph import store as gstore
-        from pkb.graph.schema import get_connection, init_schema
-
-        init_schema(settings.graph_db_path)
-        with get_connection(settings.graph_db_path) as conn:
-            result = gstore.purge_document(conn, doc_id)
-        if result["mentions_pruned"] or result["documents_pruned"]:
-            typer.echo(
-                f"그래프 정리: mentions {result['mentions_pruned']}·"
-                f"documents {result['documents_pruned']}"
-            )
+    result = _graph_purge(doc_id)
+    if result and (result["mentions_pruned"] or result["documents_pruned"]):
+        typer.echo(
+            f"그래프 정리: mentions {result['mentions_pruned']}·"
+            f"documents {result['documents_pruned']}"
+        )
 
 
 @app.command()
@@ -490,6 +498,32 @@ def doctor():
     typer.echo(build_health_report(get_client()))
 
 
+@app.command("eval")
+def eval_cmd(
+    gold: Path = typer.Option(
+        None, help="골드셋 JSONL 경로 (기본: <DATA_ROOT>/.eval/gold.jsonl)"
+    ),
+):
+    """검색 품질 평가 — 골드셋을 4개 모드(bm25/knn/rrf/rrf+rerank)로 돌려 recall@k/MRR 비교."""
+    from pkb.eval import MODES, TOP_K, evaluate, load_gold
+    from pkb.store import get_client
+
+    gold_path = gold.resolve() if gold is not None else data_dir() / ".eval" / "gold.jsonl"
+    if not gold_path.is_file():
+        typer.echo(f"골드셋 파일이 없습니다: {gold_path}")
+        typer.echo('라인당 {"query": "...", "doc_id": "data/..."} JSONL로 작성하세요 (docs/usage.md 참고).')
+        raise typer.Exit(1)
+
+    rows = load_gold(gold_path)
+    if not rows:
+        typer.echo(f"골드셋이 비어 있습니다: {gold_path}")
+        raise typer.Exit(1)
+
+    es = get_client()
+    typer.echo(f"골드셋 {len(rows)}개 쿼리 × {len(MODES)}개 모드 평가 (top_k={TOP_K})\n")
+    typer.echo(evaluate(es, rows))
+
+
 @app.command("purge-archived")
 def purge_archived_cmd(
     before: str = typer.Option(
@@ -523,6 +557,143 @@ def purge_archived_cmd(
     typer.echo(f"Purge 완료: {n}개 청크 물리 삭제")
 
 
+def count_stale(files: list[Path], last_sync_epoch: float) -> int:
+    """last_sync 이후 수정된(mtime 비교) 파일 수.
+
+    mtime 스캔은 삭제를 감지하지 못한다 — 삭제 정리는 sync의 prune이 처리.
+    """
+    return sum(1 for f in files if f.stat().st_mtime > last_sync_epoch)
+
+
+@app.command()
+def stale(
+    quiet: bool = typer.Option(False, "--quiet", help="stale일 때만 출력 (SessionStart 훅용)"),
+):
+    """마지막 sync 이후 수정된 원본 파일 수 보고. 훅 안전을 위해 항상 exit 0 (fail-open)."""
+    try:
+        import json
+        from datetime import datetime
+
+        from pkb.ingest import find_ingestable_files
+        from pkb.search_log import LAST_SYNC_FILE
+
+        if not LAST_SYNC_FILE.is_file():
+            typer.echo("PKB: sync 기록 없음 (미동기화) — `uv run pkb sync` 권장")
+            return
+        ts = datetime.fromisoformat(
+            json.loads(LAST_SYNC_FILE.read_text(encoding="utf-8"))["ts"]
+        ).timestamp()
+
+        files = find_ingestable_files(data_dir())
+        if settings.obsidian_path:
+            vault = Path(settings.obsidian_path).expanduser().resolve()
+            files += find_ingestable_files(vault, exclude=data_dir())
+
+        n = count_stale(files, ts)
+        if n:
+            typer.echo(f"PKB: 마지막 sync 이후 수정된 파일 {n}개 — `uv run pkb sync` 권장")
+        elif not quiet:
+            typer.echo("PKB: 원본 변경 없음 (fresh)")
+    except Exception:
+        pass  # fail-open — 훅에서 세션을 깨면 안 됨
+
+
+def snapshot(root: Path, exclude: Path | None = None) -> dict[Path, tuple[float, int]]:
+    """인제스트 대상 파일들의 {path: (mtime, size)} 스냅샷. watch의 변경 감지 기준."""
+    from pkb.ingest import find_ingestable_files
+
+    out: dict[Path, tuple[float, int]] = {}
+    for f in find_ingestable_files(root, exclude=exclude):
+        try:
+            st = f.stat()
+        except OSError:
+            continue  # 스캔 도중 삭제됨 — 다음 폴링에서 삭제로 잡힘
+        out[f] = (st.st_mtime, st.st_size)
+    return out
+
+
+def snapshot_diff(
+    old: dict[Path, tuple[float, int]], new: dict[Path, tuple[float, int]]
+) -> tuple[list[Path], list[Path]]:
+    """(추가·수정된 파일, 삭제된 파일) 반환. mtime 또는 size가 다르면 수정으로 판정."""
+    changed = sorted(p for p, sig in new.items() if old.get(p) != sig)
+    deleted = sorted(p for p in old if p not in new)
+    return changed, deleted
+
+
+@app.command()
+def watch(
+    interval: int = typer.Option(10, help="폴링 간격 (초)"),
+):
+    """원본 파일 변경을 폴링해 자동 반영 (mtime+size 스냅샷 비교). Ctrl+C로 종료.
+
+    시작 시 sync와 같은 reconcile 1회로 기준선을 잡고, 이후엔 변경 파일만 델타 인제스트한다.
+    """
+    import time
+    from datetime import UTC, datetime
+
+    from pkb.ingest import format_delta_stats, ingest_files, reconcile, write_sync_marker
+    from pkb.store import PRUNE_CONFIRM_THRESHOLD, delete_document, get_client
+
+    es = get_client()
+    data_root = data_dir()
+
+    trees: list[tuple[Path, str, Path | None]] = []  # (root, doc_id prefix, exclude)
+    if data_root.is_dir():
+        trees.append((data_root, "data/", None))
+    if settings.obsidian_path:
+        vault = Path(settings.obsidian_path).expanduser().resolve()
+        if vault.is_dir():
+            trees.append((vault, "obsidian/", data_root))
+    if not trees:
+        typer.echo(f"감시할 원본 트리가 없습니다: {data_root} / OBSIDIAN_PATH")
+        raise typer.Exit(1)
+
+    for root, prefix, exclude in trees:
+        stats, stale_docs = reconcile(es, root, prefix, exclude=exclude)
+        typer.echo(f"기준선 {prefix}: {format_delta_stats(stats)}")
+        if stale_docs:
+            typer.echo(f"   원본에 없는 문서 {len(stale_docs)}개 — `pkb sync`로 정리하세요.")
+
+    snaps = {prefix: snapshot(root, exclude) for root, prefix, exclude in trees}
+    typer.echo(f"감시 시작 (interval={interval}s, Ctrl+C로 종료)")
+
+    # ponytail: 별도 디바운스 없음 — 폴링 간격이 곧 디바운스이고 슬롯 델타가 중복 인제스트를
+    # 무해화한다. 편집기 저장 폭주가 문제되면 mtime 안정화 대기 추가.
+    try:
+        while True:
+            time.sleep(interval)
+            poll_ts = datetime.now(UTC).isoformat()  # 마커 ts는 스냅샷 직전 캡처 (reconcile과 동일 이유)
+            applied = False
+            for root, prefix, exclude in trees:
+                new_snap = snapshot(root, exclude)
+                changed, removed = snapshot_diff(snaps[prefix], new_snap)
+                if changed:
+                    stats = ingest_files(changed, base_dir=root, doc_id_prefix=prefix)
+                    applied = True
+                    typer.echo(
+                        f"[{prefix}] 변경 {len(changed)}개 — {format_delta_stats(stats)}"
+                    )
+                if len(removed) > PRUNE_CONFIRM_THRESHOLD:
+                    typer.echo(
+                        f"[{prefix}] 삭제 {len(removed)}개 감지 — "
+                        f"임계({PRUNE_CONFIRM_THRESHOLD}) 초과라 자동 삭제 안 함. "
+                        "`pkb sync`로 확인 후 정리하세요."
+                    )
+                else:
+                    for p in removed:
+                        doc_id = f"{prefix}{p.relative_to(root)}"
+                        n = delete_document(es, doc_id)
+                        _graph_purge(doc_id)
+                        applied = True
+                        typer.echo(f"[{prefix}] 삭제: {doc_id} ({n}개 청크)")
+                snaps[prefix] = new_snap
+            if applied:
+                write_sync_marker(poll_ts)  # 델타 반영 성공 — pkb stale 오탐 방지
+    except KeyboardInterrupt:
+        typer.echo("\nwatch 종료.")
+
+
 graph_app = typer.Typer(help="개념 그래프 빌드/조회 (SQLite 기반 Graph RAG 보조)")
 app.add_typer(graph_app, name="graph")
 
@@ -545,7 +716,7 @@ def graph_stats():
 def graph_sync_notes(
     yes: bool = typer.Option(False, "--yes", "-y", help="대량 정리 확인 생략"),
 ):
-    """SQLite 개념그래프를 data/concepts/<slug>.md 볼트 노트로 동기화 (단방향, ES 미색인).
+    """SQLite 개념그래프를 data/_concepts/<slug>.md 볼트 노트로 동기화 (단방향, ES 미색인).
     mcp sync_concept_notes과 동일.
     """
     from pkb.graph.notes import sync_concept_notes

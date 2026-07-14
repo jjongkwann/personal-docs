@@ -1,4 +1,4 @@
-"""SQLite 개념그래프 → data/concepts/<slug>.md 볼트 노트 렌더러/동기화.
+"""SQLite 개념그래프 → data/_concepts/<slug>.md 볼트 노트 렌더러/동기화.
 
 단방향(SQLite→노트), 결정적·멱등. 개념 엣지를 [[위키링크]]로 되써서
 Obsidian 그래프뷰가 개념그래프를 그리게 한다. 노트→SQLite 역승격은 v1 범위 밖.
@@ -24,7 +24,7 @@ _PROSE_PLACEHOLDER_RE = re.compile(r"\[\[c:([^|\]]+)(?:\|([^\]]+))?\]\]")
 def _vault_prefixes() -> tuple[str | None, str | None]:
     """(concepts_prefix, data_prefix) — 볼트 루트 기준 물리 경로 접두어.
 
-    예: DATA_ROOT=<vault>/PKB → ("PKB/concepts", "PKB").
+    예: DATA_ROOT=<vault>/PKB → ("PKB/_concepts", "PKB").
     OBSIDIAN_PATH 미설정이거나 DATA_ROOT가 볼트 밖이면 (None, None).
     """
     from pkb.config import data_dir, settings
@@ -112,6 +112,11 @@ def render_concept_note(
             return _concept_link(e["dst_slug"], e["dst_name"], concepts_prefix)
         return e["dst_name"]
 
+    def _src_label(e: sqlite3.Row) -> str:
+        if projected is None or e["src_slug"] in projected:
+            return _concept_link(e["src_slug"], e["src_name"], concepts_prefix)
+        return e["src_name"]
+
     # 콜론 포함 name("LLM01: ...")·쉼표 포함 alias·따옴표 시작 name 등은 f-string 조립 시
     # invalid YAML이 되므로 safe_dump로 인용 처리를 맡긴다 (결정적: 같은 입력 → 같은 바이트).
     meta = {
@@ -157,6 +162,15 @@ def render_concept_note(
         lines.append("## 기타 관계")
         lines.extend(f"- [{e['relation']}] {_dst_label(e)}" for e in other)
 
+    # 역참조: 이 개념을 dst로 가리키는 inbound 엣지 — 관계 타입 라벨과 함께 나열.
+    in_edges = sorted(
+        gstore.list_edges_inbound(conn, row["id"]),
+        key=lambda e: (e["src_slug"], e["relation"]),
+    )
+    if in_edges:
+        lines.append("## 역참조")
+        lines.extend(f"- [{e['relation']}] {_src_label(e)}" for e in in_edges)
+
     # 출처는 문서 단위 — 청크 위치는 기계용 근거(SQLite concept_mentions)일 뿐
     # 독자가 이동할 수 없는 정보라 표시하지 않고, 같은 문서 다중 언급은 1줄로 dedup.
     mention_docs = sorted(
@@ -186,6 +200,41 @@ def merge_concept_note(existing_text: str, rendered_text: str) -> str:
     return rendered_text[: new_idx + len(AUTO_END)] + preserved
 
 
+def render_concept_index(
+    conn: sqlite3.Connection, projected: set[str] | None = None
+) -> str:
+    """_concepts/index.md MOC를 결정적으로 렌더링 — 투영 대상만, category별 그룹.
+
+    빈 카테고리는 "기타". 정렬은 category→slug (list_concepts가 slug 순 정렬).
+    """
+    from pkb.graph import store as gstore
+
+    concepts_prefix, _ = _vault_prefixes()
+    groups: dict[str, list[str]] = {}
+    for c in gstore.list_concepts(conn):
+        slug = c["slug"]
+        if not slug or not slug.strip():
+            continue  # 빈 slug 방어 — sync와 동일
+        if projected is not None and slug not in projected:
+            continue
+        desc = (c["description"] or "").strip()
+        # ponytail: 첫 문장 = 첫 문장부호+공백 기준 naive 분리, 약어 포함 설명이 생기면 개선
+        first = re.split(r"(?<=[.!?])\s", desc, maxsplit=1)[0] if desc else ""
+        first = " ".join(first.split())  # 개행·연속 공백 접기 — 단일 라인 불릿 보장
+        link = _concept_link(slug, c["name"], concepts_prefix)
+        desc_part = f" — {first}" if first else ""
+        groups.setdefault(c["category"] or "기타", []).append(
+            f"- {link}{desc_part} (멘션 {c['mention_count']})"
+        )
+
+    lines = ["---", "pkb_generated: true", "---", ""]
+    for category in sorted(groups):
+        lines.append(f"## {category}")
+        lines.extend(groups[category])
+        lines.append("")
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
 def _frontmatter_slug(path: Path) -> str | None:
     """노트 파일의 frontmatter에서 slug 필드를 읽는다 (없으면 None)."""
     from pkb.ingest import parse_frontmatter
@@ -196,7 +245,7 @@ def _frontmatter_slug(path: Path) -> str | None:
 
 
 def sync_concept_notes(conn: sqlite3.Connection, confirm_prune: bool = False) -> dict:
-    """SQLite 개념그래프를 data/concepts/<slug>.md 노트로 동기화 (전역, 카테고리 스코프 없음).
+    """SQLite 개념그래프를 data/_concepts/<slug>.md 노트로 동기화 (전역, 카테고리 스코프 없음).
 
     반환: {"created": n, "updated": n, "skipped": n, "pruned": n, "pending_prune": [...]}
     """
@@ -216,11 +265,11 @@ def sync_concept_notes(conn: sqlite3.Connection, confirm_prune: bool = False) ->
     created = updated = skipped = failed = 0
     for c in concepts:
         slug = c["slug"]
-        if not slug or not slug.strip():
-            failed += 1  # 빈 slug 방어 — concepts/.md 방지
-            continue
         if projected is not None and slug not in projected:
             continue  # vocab(비실개념) — 노트 미생성
+        if not slug or not slug.strip() or slug == "index":
+            failed += 1  # 빈 slug·예약어 "index"(MOC 파일명) 방어 — _concepts/.md·index.md 덮어쓰기 방지
+            continue
         try:
             rendered = render_concept_note(conn, slug, projected=projected)
         except Exception:
@@ -242,7 +291,7 @@ def sync_concept_notes(conn: sqlite3.Connection, confirm_prune: bool = False) ->
 
     prune_candidates = [
         p for p in sorted(target_dir.glob("*.md"))
-        if (_frontmatter_slug(p) or p.stem) not in keep_slugs
+        if p.name != "index.md" and (_frontmatter_slug(p) or p.stem) not in keep_slugs
     ]
 
     pruned = 0
@@ -254,6 +303,12 @@ def sync_concept_notes(conn: sqlite3.Connection, confirm_prune: bool = False) ->
             for p in prune_candidates:
                 p.unlink()
                 pruned += 1
+
+    # MOC(index.md) 렌더 — 기존과 동일 바이트면 미기록 (불필요 mtime 변경 방지)
+    index_path = target_dir / "index.md"
+    index_text = render_concept_index(conn, projected)
+    if not index_path.exists() or index_path.read_text(encoding="utf-8") != index_text:
+        index_path.write_text(index_text, encoding="utf-8")
 
     return {
         "created": created,

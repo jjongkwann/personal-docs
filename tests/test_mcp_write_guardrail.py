@@ -59,6 +59,24 @@ def test_write_file_creates_parents(in_tmp_data_root):
     assert (in_tmp_data_root / "data" / "new_cat" / "sub" / "nested.md").exists()
 
 
+def test_write_file_ingest_appends_graph_nudge(in_tmp_data_root, monkeypatch):
+    monkeypatch.setattr(
+        "pkb.ingest.ingest_files",
+        lambda files, base_dir, **kwargs: {
+            "files": 1, "reused": 0, "moved": 0, "embedded": 0,
+            "added": 1, "metadata_updated": 0, "deleted": 0,
+        },
+    )
+    result = _call("data/writing/foo.md", "hello world", ingest=True)
+    assert 'graph_list_chunks(doc_id="data/writing/foo.md", pending_only=True)' in result
+    assert "graph_store_concepts" in result
+
+
+def test_write_file_no_ingest_omits_graph_nudge(in_tmp_data_root):
+    result = _call("data/writing/foo.md", "hello world", ingest=False)
+    assert "그래프 미추출" not in result
+
+
 def test_convert_rejects_hidden_category(in_tmp_data_root):
     src = in_tmp_data_root / "src.md"
     src.write_text("hello")
@@ -95,3 +113,30 @@ def test_convert_accepts_new_category_with_subfolder(in_tmp_data_root):
     result = _call_convert(str(src), category="study/payments", ingest=False)
     assert "변환 완료" in result
     assert (in_tmp_data_root / "data" / "study" / "payments" / "src.md").exists()
+
+
+def test_convert_empty_text_returns_self_transcription_guide(in_tmp_data_root, monkeypatch):
+    # 스캔 PDF 등 텍스트 추출 결과가 빈 파일 — frontmatter-only 파일을 만들지 않고 셀프 전사 안내
+    monkeypatch.setattr("pkb.ingest.read_file_as_text", lambda _p: "")
+    src = in_tmp_data_root / "scan.pdf"
+    src.write_bytes(b"%PDF-1.4")
+    result = _call_convert(str(src), category="study", ingest=False)
+    assert "Read 도구" in result
+    assert "write_file" in result
+    assert "source: scan.pdf" in result
+    # 파일은 생성되지 않음 — 안내만 반환
+    assert not (in_tmp_data_root / "data" / "study" / "scan.md").exists()
+
+
+def test_convert_image_returns_self_transcription_guide(in_tmp_data_root):
+    # 이미지는 에러 대신 셀프 전사 안내 (Read로 보고 write_file로 작성)
+    src = in_tmp_data_root / "diagram.png"
+    src.write_bytes(b"\x89PNG")
+    result = _call_convert(str(src), category="study", ingest=False)
+    assert "Read 도구" in result
+    assert "write_file" in result
+    # 변환물과 동일한 provenance frontmatter 템플릿 안내
+    assert "source: diagram.png" in result
+    assert "converted_from: .png" in result
+    # 파일은 생성되지 않음 — 안내만 반환
+    assert not (in_tmp_data_root / "data" / "study" / "diagram.md").exists()

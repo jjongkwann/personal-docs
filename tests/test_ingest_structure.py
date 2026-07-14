@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from pkb.ingest import (
     MIN_CHUNK_CHARS,
+    _chunk_text,
+    _count_tokens,
     _merge_tiny_chunks,
+    _split_oversized_paragraph,
     chunk_markdown_hierarchical,
     parse_frontmatter,
 )
@@ -116,6 +119,23 @@ def test_chunk_sibling_h2_resets_h3():
     assert "Root > B > a1" not in paths
 
 
+def test_chunk_code_fence_comment_not_treated_as_heading():
+    # 코드펜스 내부 '# 주석'은 헤딩이 아님 — 섹션 오분할·section_path 오염 방지
+    text = (
+        "# Guide\n"
+        "guide body with enough characters to clear the tiny-chunk merge threshold ok\n"
+        "```python\n"
+        "# this is a comment, not a heading\n"
+        "print('hello')\n"
+        "```\n"
+        "tail paragraph with enough characters to clear the tiny-chunk merge threshold\n"
+    )
+    chunks = chunk_markdown_hierarchical(text)
+    assert len(chunks) == 1
+    assert chunks[0][0] == "Guide"
+    assert "# this is a comment, not a heading" in chunks[0][1]
+
+
 def test_chunk_h4_not_in_path_stack():
     # _split_by_headings_hierarchical은 H1~H3까지만 스택에 쌓음
     text = "# Top\n## Mid\n#### Deep\nbody\n"
@@ -159,3 +179,48 @@ def test_merge_chained_tiny_chunks_collapse_left_to_right():
     normal = ("D", _LONG)
     merged = _merge_tiny_chunks([a, b, c, normal])
     assert merged == [("D", "a\n\nb\n\nc\n\n" + _LONG)]
+
+
+# ---------- _chunk_text (초과 단락 분할) ----------
+
+
+def test_chunk_oversized_single_paragraph_split_under_max():
+    # 단락 구분("\n\n") 없는 초과 단락 — 라인 재누적 + 초과 라인 토큰 하드 분할 모두 거쳐
+    # 모든 청크가 max_tokens 이하여야 함 (리랭커 max_length 512 잘림 방지)
+    max_tokens = 100
+    normal_lines = ["alpha beta gamma delta epsilon zeta eta theta"] * 20
+    giant_line = ("omega " * 150).strip()  # 단일 라인 > max_tokens → 토큰 id 하드 분할
+    text = "\n".join([*normal_lines, giant_line])
+    assert "\n\n" not in text
+    assert _count_tokens(text) > max_tokens
+    chunks = _chunk_text(text, max_tokens=max_tokens, overlap_tokens=10)
+    assert len(chunks) > 1
+    assert all(_count_tokens(c) <= max_tokens for c in chunks)
+
+
+def test_split_oversized_korean_line_no_replacement_chars():
+    # 토큰 경계가 멀티바이트 문자를 가르면 decode()가 U+FFFD를 만든다 —
+    # 이월 디코딩으로 원문 무손실 + max_tokens 이하 유지 검증
+    max_tokens = 50
+    line = ("지식 그래프와 하이브리드 검색을 결합한 개인 지식 베이스 구조 " * 40).strip()
+    assert "\n" not in line
+    assert _count_tokens(line) > max_tokens
+    pieces = _split_oversized_paragraph(line, max_tokens)
+    assert len(pieces) > 1
+    assert all("�" not in p for p in pieces)
+    assert "".join(pieces) == line
+    assert all(_count_tokens(p) <= max_tokens for p in pieces)
+
+
+def test_chunk_inline_backticks_line_not_fence_toggle():
+    # 컬럼 0에서 시작하는 한 줄 인라인 ```...``` 은 펜스 열림이 아님 —
+    # in_fence가 켜진 채 남아 이후 헤딩 분할이 무너지는 오탐 방지
+    text = (
+        "# Guide\n"
+        "```pip install pkb``` 로 설치한다, 초소형 청크 병합 임계(MIN_CHUNK_CHARS)를 "
+        "확실히 넘기기 위한 충분히 길고 긴 본문 라인입니다\n"
+        "# Second\n"
+        "second section body with enough characters to clear the tiny-chunk merge ok\n"
+    )
+    chunks = chunk_markdown_hierarchical(text)
+    assert [c[0] for c in chunks] == ["Guide", "Second"]

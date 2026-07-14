@@ -1,4 +1,6 @@
+import codecs
 import hashlib
+import json
 import logging
 import os
 import re
@@ -12,7 +14,7 @@ from pkb.config import settings
 
 _log = logging.getLogger(__name__)
 
-# markitdown이 마크다운으로 변환 가능한 포맷 + 원본 마크다운/텍스트
+# 인제스트 가능한 포맷 — 원본 마크다운/텍스트 + 변환 대상(pdf는 pdfminer, 나머지는 markitdown)
 SUPPORTED_EXTENSIONS = {
     ".md", ".markdown", ".txt",
     ".pdf", ".docx", ".pptx", ".xlsx",
@@ -33,11 +35,43 @@ def _get_markitdown():
     return _markitdown
 
 
+def _pdf_to_markdown(file_path: Path) -> str:
+    """PDF를 페이지 마커("## p.N") 붙은 마크다운으로 변환.
+
+    extract_pages 단일 패스로 페이지별 텍스트를 모은다 — 페이지별 extract_text
+    반복 호출은 매번 전체 재파싱(O(n²))이라 금지. 마커는 기존 헤딩 청커가
+    section_path="p.N"으로 자동 승격한다. 텍스트 없는 페이지(이미지 전용 등)는 건너뛴다.
+    """
+    from pdfminer.high_level import extract_pages
+    from pdfminer.layout import LTTextContainer
+
+    pages: list[str] = []
+    for layout in extract_pages(str(file_path)):
+        pages.append(
+            "".join(el.get_text() for el in layout if isinstance(el, LTTextContainer)).strip()
+        )
+    return _join_pdf_pages(pages)
+
+
+def _join_pdf_pages(pages: list[str]) -> str:
+    """페이지 텍스트 리스트를 "## p.N" 마커로 연결하는 순수 함수. 빈 페이지는 번호만 소비."""
+    return "\n\n".join(
+        f"## p.{n}\n\n{text}" for n, text in enumerate(pages, 1) if text
+    )
+
+
 def read_file_as_text(file_path: Path) -> str:
-    """파일을 텍스트로 변환. md/txt는 그대로, 나머지는 markitdown 사용."""
+    """파일을 텍스트로 변환. md/txt는 그대로, pdf는 pdfminer 페이지 보존 추출,
+    docx/pptx/xlsx/html은 markitdown 사용.
+
+    PDF에 markitdown을 쓰지 않는 이유: markitdown의 PDF 변환도 결국 pdfminer 텍스트
+    추출이라 품질은 동일한데 페이지 경계가 소실된다 — 분기 하나로 페이지 정보를 지킨다.
+    """
     ext = file_path.suffix.lower()
     if ext in TEXT_EXTENSIONS:
         return file_path.read_text(encoding="utf-8")
+    if ext == ".pdf":
+        return _pdf_to_markdown(file_path)
     result = _get_markitdown().convert(str(file_path))
     return result.text_content
 
@@ -50,6 +84,8 @@ _META_DIFF_FIELDS = (
     "tags",
     "title",
     "expires_at",
+    "archived_at",
+    "archive_reason",
     "date_modified",
     "category",
     "section_path",
@@ -66,6 +102,11 @@ def _diff_metadata(old: dict, new: dict) -> dict:
         if f == "tags":
             ov = sorted(ov or [])
             nv = sorted(nv or [])
+        # 특수 케이스: 아카이브 필드는 None을 전파하지 않는다 — frontmatter 마커 없는
+        # 파일(볼트 노트·비-md·ES-only 아카이브 md)의 재인제스트가 ES 아카이브 상태를
+        # 지우면 안 됨. 마커 제거 복구는 restore_document가 ES 필드를 명시 해제한다.
+        if f in ("archived_at", "archive_reason") and nv is None:
+            continue
         if ov != nv:
             diff[f] = new.get(f)
     return diff
@@ -134,6 +175,21 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
         return {}, text
 
 
+def conversion_frontmatter(src: Path) -> str:
+    """변환 산출물(.md) 상단에 붙일 provenance frontmatter 블록 생성.
+
+    title은 의도적으로 넣지 않는다 — 본문 H1 추출(_extract_title)이 원본 파일명보다
+    나은 제목을 주는데, frontmatter title이 있으면 그게 우선돼 퇴행한다.
+    """
+    meta = {
+        "source": src.name,
+        "converted_from": src.suffix,
+        "converted_at": date.today().isoformat(),
+    }
+    block = yaml.safe_dump(meta, allow_unicode=True, sort_keys=False)
+    return f"---\n{block}---\n\n"
+
+
 def _split_by_headings_hierarchical(text: str) -> list[tuple[str, str]]:
     """H1~H3 헤딩 경계로 분할하되 section_path 동반.
     반환: [(section_path, section_text), ...]
@@ -148,8 +204,13 @@ def _split_by_headings_hierarchical(text: str) -> list[tuple[str, str]]:
         if current:
             sections.append((current_path, "\n".join(current)))
 
+    in_fence = False
     for line in text.split("\n"):
-        m = re.match(r"^(#{1,3})\s+(.+)$", line)
+        # ponytail: ``` 펜스만 인식 — ~~~ 펜스는 코퍼스에 없어 생략, 필요해지면 ~~~ 분기 추가.
+        # 열림(```lang)/닫힘(```)만 매치 — 한 줄 인라인 ```...``` 은 [^`]* 가 걸러 텍스트 취급
+        if re.match(r"^\s*```[^`]*$", line):
+            in_fence = not in_fence
+        m = None if in_fence else re.match(r"^(#{1,3})\s+(.+)$", line)
         if m:
             level = len(m.group(1))
             heading = m.group(2).strip()
@@ -168,12 +229,53 @@ def _split_by_headings_hierarchical(text: str) -> list[tuple[str, str]]:
     return sections
 
 
+def _split_oversized_paragraph(para: str, max_tokens: int) -> list[str]:
+    """max_tokens 초과 단락을 라인 단위로 재누적 분할.
+
+    단일 라인이 여전히 초과하면 토큰 id 슬라이스로 하드 분할.
+    """
+    enc = _get_encoder()
+    pieces: list[str] = []
+    buf: list[str] = []
+    for line in para.split("\n"):
+        if _count_tokens(line) > max_tokens:
+            if buf:
+                pieces.append("\n".join(buf))
+                buf = []
+            ids = enc.encode(line)
+            # 토큰 경계가 멀티바이트 문자를 가르면 decode()가 U+FFFD로 원문을 파괴한다 —
+            # decode_bytes + 증분 UTF-8 디코더로 잘린 바이트를 다음 조각에 이월.
+            # 이월 바이트가 조각을 최대 1토큰 늘릴 수 있어 슬라이스 폭은 max_tokens - 1
+            dec = codecs.getincrementaldecoder("utf-8")()
+            width = max(1, max_tokens - 1)
+            for i in range(0, len(ids), width):
+                piece = dec.decode(enc.decode_bytes(ids[i:i + width]), i + width >= len(ids))
+                if piece:
+                    pieces.append(piece)
+        # ponytail: 누적 후보 전체를 재인코딩(O(n²)) — 단락 규모에선 무시 가능,
+        # 병목이면 라인별 토큰 수 합산 + 개행 여유분으로 교체
+        elif buf and _count_tokens("\n".join([*buf, line])) > max_tokens:
+            pieces.append("\n".join(buf))
+            buf = [line]
+        else:
+            buf.append(line)
+    if buf:
+        pieces.append("\n".join(buf))
+    return pieces
+
+
 def _chunk_text(text: str, max_tokens: int, overlap_tokens: int) -> list[str]:
     """고정 크기 청킹 + 오버랩. 단락/문장 경계 존중."""
     if _count_tokens(text) <= max_tokens:
         return [text.strip()] if text.strip() else []
 
-    paragraphs = text.split("\n\n")
+    # max_tokens 초과 단락이 단독 청크로 통과하면 리랭커 max_length(512)에서 뒷부분이 잘린다.
+    paragraphs: list[str] = []
+    for para in text.split("\n\n"):
+        if _count_tokens(para) > max_tokens:
+            paragraphs.extend(_split_oversized_paragraph(para, max_tokens))
+        else:
+            paragraphs.append(para)
     chunks: list[str] = []
     current_parts: list[str] = []
     current_tokens = 0
@@ -325,13 +427,14 @@ def _extract_title(text: str, file_path: Path) -> str:
 
 
 # 개념 원자노트 디렉터리. SQLite 개념그래프의 투영본이므로 ES 중복색인을 막는다.
-CONCEPTS_DIR_NAME = "concepts"
+# "_" 접두로 일반 노트 사이에서 사람 눈에 덜 띄게 강등(자동 생성물 표시).
+CONCEPTS_DIR_NAME = "_concepts"
 
 
 def is_concept_path(rel_or_path: str | Path) -> bool:
-    """경로(또는 doc_id)가 개념노트 디렉터리(data/concepts/) 하위인지 판정.
+    """경로(또는 doc_id)가 개념노트 디렉터리(data/_concepts/) 하위인지 판정.
 
-    doc_id 형식("data/concepts/x.md")과 절대경로 양쪽을 처리한다.
+    doc_id 형식("data/_concepts/x.md")과 절대경로 양쪽을 처리한다.
     """
     from pkb.config import data_dir
 
@@ -354,7 +457,7 @@ def process_file(
     category_override: str | None = None,
 ) -> list[dict]:
     """파일을 읽고 청크 + 메타데이터 리스트 반환.
-    md/txt는 그대로, pdf/docx/pptx/xlsx/html은 markitdown으로 변환.
+    md/txt는 그대로, pdf는 페이지 보존 추출, docx/pptx/xlsx/html은 markitdown으로 변환.
 
     Args:
         file_path: 처리할 파일의 절대경로
@@ -362,8 +465,9 @@ def process_file(
         doc_id_prefix: doc_id 앞에 붙일 접두사 (예: "obsidian/"). 외부 경로 인제스트 시 사용.
         category_override: None이 아니면 경로 기반 카테고리 대신 이 값 사용.
     """
-    if is_concept_path(file_path):
-        # 개념노트는 SQLite→노트 단방향 투영본 — ES 중복색인 금지.
+    if is_excluded_path(file_path):
+        # 개념노트·예약 디렉터리·숨김 경로는 색인 금지. 탐색(find_ingestable_files)뿐 아니라
+        # 여기서도 막는다 — write_file/add_document는 파일을 직접 ingest_files에 넘긴다.
         return []
     if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
         return []
@@ -405,6 +509,11 @@ def process_file(
         os.path.getmtime(file_path), tz=UTC
     ).strftime("%Y-%m-%d")
     fm_expires_at = parse_expires_at(frontmatter.get("expires_at"))
+    # 아카이브 상태도 frontmatter가 SSOT — reindex/재인제스트 시 유실되지 않게 청크에 반영.
+    fm_archived_at = parse_expires_at(frontmatter.get("archived_at"))
+    fm_archive_reason = frontmatter.get("archive_reason")
+    if not isinstance(fm_archive_reason, str):
+        fm_archive_reason = None
 
     results = []
     for i, (section_path, chunk_text) in enumerate(chunks_with_path):
@@ -423,6 +532,10 @@ def process_file(
         }
         if fm_expires_at:
             chunk["expires_at"] = fm_expires_at
+        if fm_archived_at:
+            chunk["archived_at"] = fm_archived_at
+        if fm_archive_reason:
+            chunk["archive_reason"] = fm_archive_reason
         results.append(chunk)
     return results
 
@@ -457,6 +570,7 @@ def ingest_files(
       - 새 청크에서 사라진 슬롯 → delete
     """
     from pkb.embeddings import embed
+    from pkb.search_log import log_change
     from pkb.store import (
         apply_chunk_delta,
         get_chunk_embeddings,
@@ -548,6 +662,15 @@ def ingest_files(
             delete_indices=delete_indices,
         )
 
+        delta = {
+            "new": added,
+            "updated": re_embedded + len(metadata_updates),
+            "moved": len(moved_indices),
+            "deleted": len(delete_indices),
+        }
+        if any(delta.values()):
+            log_change("ingest", doc_id, chunks=delta)
+
         _log.info(
             "[delta] %s reused=%d moved=%d re-embedded=%d added=%d "
             "metadata_updated=%d deleted=%d",
@@ -568,7 +691,8 @@ def ingest_files(
 # 검토 큐 디렉터리. 승인 전 대기 노트가 전량 색인에 끌려가지 않도록 탐색에서 제외한다.
 # _materials: 강의 PDF 원본 — 같은 폴더 _extracted md가 전량(72/72) 존재해 이중 색인만
 # 유발 (2026-07-10 실측).
-EXCLUDED_DIR_NAMES = {"_review", "_trash", "_materials"}
+# _origin: 외부 원본 보관소 — 소화 노트만 색인하고 원본은 근거 확인용으로만 둔다.
+EXCLUDED_DIR_NAMES = {"_review", "_trash", "_materials", "_archive", "_origin"}
 
 
 def _has_dot_segment(path: Path) -> bool:
@@ -576,20 +700,31 @@ def _has_dot_segment(path: Path) -> bool:
     return any(part.startswith(".") for part in path.parts)
 
 
+def is_excluded_path(path: Path) -> bool:
+    """색인 제외 경로인지 — 개념노트/예약 디렉터리/숨김 성분.
+
+    탐색(find_ingestable_files)과 직접 인제스트(process_file) 양쪽이 같은 판정을 쓴다.
+    """
+    return (
+        is_concept_path(path)
+        or _has_dot_segment(path)
+        or not EXCLUDED_DIR_NAMES.isdisjoint(path.parts)
+    )
+
+
 def find_ingestable_files(path: Path, exclude: Path | None = None) -> list[Path]:
     """경로에서 인제스트 가능한 파일 찾기. md/txt/pdf/docx/pptx/xlsx/html 지원.
 
-    경로에 _review/_trash/_materials 성분이 있으면 검토 큐·중복 원본으로 보고 제외한다.
+    경로에 _review/_trash/_materials/_archive/_origin 성분이 있으면 검토 큐·중복·보관·외부
+    원본으로 보고 제외한다.
     "."으로 시작하는 경로 성분(.obsidian 등 도구 산출물)도 제외한다.
-    data/concepts/ 하위 개념노트도 제외한다 (SQLite→노트 단방향 투영본, ES 미색인).
+    data/_concepts/ 하위 개념노트도 제외한다 (SQLite→노트 단방향 투영본, ES 미색인).
     exclude가 주어지면 그 서브트리는 건너뛴다 (예: 볼트 크롤 시 data 코퍼스 중복 방지).
     """
     if path.is_file():
         if exclude is not None and path.is_relative_to(exclude):
             return []
-        if is_concept_path(path):
-            return []
-        if _has_dot_segment(path):
+        if is_excluded_path(path):
             return []
         return [path] if path.suffix.lower() in SUPPORTED_EXTENSIONS else []
     if path.is_dir():
@@ -597,9 +732,7 @@ def find_ingestable_files(path: Path, exclude: Path | None = None) -> list[Path]
             p for p in path.rglob("*")
             if p.is_file()
             and p.suffix.lower() in SUPPORTED_EXTENSIONS
-            and EXCLUDED_DIR_NAMES.isdisjoint(p.parts)
-            and not is_concept_path(p)
-            and not _has_dot_segment(p)
+            and not is_excluded_path(p)
             and (exclude is None or not p.is_relative_to(exclude))
         ]
         return sorted(files)
@@ -608,6 +741,20 @@ def find_ingestable_files(path: Path, exclude: Path | None = None) -> list[Path]
 
 # 하위 호환용 별칭
 find_markdown_files = find_ingestable_files
+
+
+def write_sync_marker(ts: str | None = None) -> None:
+    """sync 마커 기록 — pkb stale이 읽는다. .logs는 dot-segment 폴더라 인제스트 제외가 자동 보장됨.
+
+    ponytail: 단일 타임스탬프 — 트리 하나만 재조정해도 전체가 fresh로 보인다.
+    stale 넛지 용도라 허용; 정밀해지려면 prefix별 마커로 분리.
+    """
+    from pkb.search_log import LAST_SYNC_FILE
+
+    LAST_SYNC_FILE.parent.mkdir(parents=True, exist_ok=True)
+    LAST_SYNC_FILE.write_text(
+        json.dumps({"ts": ts or datetime.now(UTC).isoformat()}), encoding="utf-8"
+    )
 
 
 def reconcile(
@@ -623,8 +770,13 @@ def reconcile(
     """
     from pkb.store import list_doc_ids
 
+    # 마커 타임스탬프는 파일 스캔 시작 직전 캡처 — 완료 시점(now)으로 기록하면
+    # sync 도중 수정된 파일이 마커보다 과거 mtime이 되어 fresh로 오탐된다.
+    scan_ts = datetime.now(UTC).isoformat()
     files = find_ingestable_files(root, exclude=exclude)
     stats = ingest_files(files, base_dir=root, doc_id_prefix=prefix, category_override=category_override)
     expected = {f"{prefix}{f.relative_to(root)}" for f in files}
     stale = sorted(list_doc_ids(es, prefix) - expected)
+
+    write_sync_marker(scan_ts)
     return stats, stale

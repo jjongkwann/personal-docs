@@ -1,5 +1,6 @@
 """SQLite 스키마 정의 및 초기화."""
 
+import contextlib
 import sqlite3
 from pathlib import Path
 
@@ -36,7 +37,16 @@ CREATE TABLE IF NOT EXISTS concept_edges (
     relation        TEXT NOT NULL,
     weight          REAL DEFAULT 1.0,
     evidence_count  INTEGER DEFAULT 1,
+    confidence      REAL,               -- 이산 루브릭 0.9/0.7/0.5 (NULL=루브릭 도입 전 구데이터)
     PRIMARY KEY (src_id, dst_id, relation)
+);
+
+CREATE TABLE IF NOT EXISTS extracted_chunks (
+    doc_id          TEXT NOT NULL,
+    chunk_index     INTEGER,            -- NULL = 구마커 (doc_id, content_hash로만 기록)
+    content_hash    TEXT,
+    extracted_at    TEXT,
+    PRIMARY KEY (doc_id, chunk_index)
 );
 
 CREATE TABLE IF NOT EXISTS concept_mentions (
@@ -86,8 +96,31 @@ def get_connection(db_path: str) -> sqlite3.Connection:
     return conn
 
 
+def _migrate_extracted_chunks(conn: sqlite3.Connection) -> None:
+    """구 마커((doc_id, content_hash) PK)를 chunk_index 키 테이블로 이관.
+
+    구 행은 chunk_index=NULL로 남긴다 — 해시만 아는 레거시 마커로서 fallback 매칭에만
+    쓰이고, 해당 청크 내용이 바뀌면 자연 소멸한다. 통째로 버리면 이미 구축된 그래프
+    전량이 pending으로 돌아가 재추출(사람·LLM 루프)을 강요하게 된다.
+    """
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(extracted_chunks)")]
+    if not cols or "chunk_index" in cols:
+        return
+    conn.execute("ALTER TABLE extracted_chunks RENAME TO extracted_chunks_old")
+    conn.executescript(SCHEMA_SQL)
+    conn.execute(
+        "INSERT INTO extracted_chunks (doc_id, chunk_index, content_hash, extracted_at) "
+        "SELECT doc_id, NULL, content_hash, extracted_at FROM extracted_chunks_old"
+    )
+    conn.execute("DROP TABLE extracted_chunks_old")
+
+
 def init_schema(db_path: str) -> None:
     """스키마 초기화 (존재하지 않는 테이블만 생성)."""
     with get_connection(db_path) as conn:
+        _migrate_extracted_chunks(conn)
         conn.executescript(SCHEMA_SQL)
+        # 기존 DB 마이그레이션: 컬럼이 이미 있으면 no-op
+        with contextlib.suppress(sqlite3.OperationalError):
+            conn.execute("ALTER TABLE concept_edges ADD COLUMN confidence REAL")
         conn.commit()

@@ -48,10 +48,41 @@ def test_prune_missing_documents_noop_when_all_exist(conn):
     assert result == {"mentions_pruned": 0, "documents_pruned": 0}
 
 
+def test_prune_missing_documents_clears_extracted_chunks(conn):
+    """stale 문서의 추출 마커도 함께 정리 — 이동 문서는 자동 재추출 대상."""
+    _seed_two_docs(conn)
+    conn.execute(
+        "INSERT INTO extracted_chunks (doc_id, content_hash, extracted_at) VALUES "
+        "('data/a.md', 'ha', ''), ('data/b.md', 'hb', '')"
+    )
+    conn.commit()
+
+    gstore.prune_missing_documents(conn, existing_doc_ids={"data/a.md"})
+
+    remaining = [r["doc_id"] for r in conn.execute("SELECT doc_id FROM extracted_chunks")]
+    assert remaining == ["data/a.md"]
+
+
 def test_purge_document_removes_single_doc(conn):
     _seed_two_docs(conn)
     result = gstore.purge_document(conn, "data/b.md")
     assert result == {"mentions_pruned": 1, "documents_pruned": 1}
 
     remaining = [r["doc_id"] for r in conn.execute("SELECT doc_id FROM concept_mentions")]
+    assert remaining == ["data/a.md"]
+
+
+def test_purge_document_clears_extracted_chunks(conn):
+    """purge_document 경로(pkb delete·watch)도 추출 마커 정리 — 마커가 남으면 삭제 후
+    동일 내용 재생성 시 pending에서 빠져 멘션이 영구 결손된다."""
+    _seed_two_docs(conn)
+    conn.execute(
+        "INSERT INTO extracted_chunks (doc_id, content_hash, extracted_at) VALUES "
+        "('data/a.md', 'ha', ''), ('data/b.md', 'hb', '')"
+    )
+    conn.commit()
+
+    gstore.purge_document(conn, "data/b.md")
+
+    remaining = [r["doc_id"] for r in conn.execute("SELECT doc_id FROM extracted_chunks")]
     assert remaining == ["data/a.md"]

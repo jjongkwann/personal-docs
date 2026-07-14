@@ -94,8 +94,8 @@ def test_wikilink_format_part_of(conn, vault_env):
     slug_b = gstore.make_slug("개념 B")
     text = render_concept_note(conn, slug_a)
     assert "## 상위 개념 (part_of)" in text
-    assert f"- [[PKB/concepts/{slug_b}|개념 B]]" in text
-    assert "[[data/concepts/" not in text  # 미해소 논리 경로 금지
+    assert f"- [[PKB/_concepts/{slug_b}|개념 B]]" in text
+    assert "[[data/_concepts/" not in text  # 미해소 논리 경로 금지
 
 
 def test_wikilink_related_to_in_related_section(conn, vault_env):
@@ -110,7 +110,7 @@ def test_wikilink_related_to_in_related_section(conn, vault_env):
 
     assert "## 관련 개념 (related_to)" in text
     heading_idx = text.index("## 관련 개념 (related_to)")
-    link_idx = text.index(f"[[PKB/concepts/{slug_c}|개념 C]]")
+    link_idx = text.index(f"[[PKB/_concepts/{slug_c}|개념 C]]")
     assert link_idx > heading_idx
 
 
@@ -184,12 +184,12 @@ def test_merge_no_existing_marker_returns_rendered():
 
 
 def test_is_concept_path():
-    assert is_concept_path("data/concepts/x.md")
+    assert is_concept_path("data/_concepts/x.md")
     assert not is_concept_path("data/study/x.md")
 
 
 def test_process_file_skips_concept_path(data_root):
-    concepts_dir = data_root / "concepts"
+    concepts_dir = data_root / "_concepts"
     concepts_dir.mkdir()
     f = concepts_dir / "foo.md"
     f.write_text("---\nslug: foo\n---\n\nbody", encoding="utf-8")
@@ -205,7 +205,7 @@ def test_sync_creates_notes_then_skips_unchanged(conn, data_root):
     assert result["pruned"] == 0
     assert result["pending_prune"] == []
 
-    concepts_dir = data_root / "concepts"
+    concepts_dir = data_root / "_concepts"
     assert (concepts_dir / f"{gstore.make_slug('개념 A')}.md").exists()
     assert (concepts_dir / f"{gstore.make_slug('개념 B')}.md").exists()
 
@@ -219,7 +219,7 @@ def test_sync_orphan_prune_gated_without_confirm(conn, data_root):
     _seed_two_concepts(conn)
     sync_concept_notes(conn)
 
-    concepts_dir = data_root / "concepts"
+    concepts_dir = data_root / "_concepts"
     # concepts 집합에 없는 slug를 가진 orphan 노트 25개 생성 (임계값 20 초과)
     for i in range(25):
         (concepts_dir / f"orphan-{i}.md").write_text(
@@ -231,6 +231,71 @@ def test_sync_orphan_prune_gated_without_confirm(conn, data_root):
     assert len(result["pending_prune"]) == 25
     # 미삭제 확인
     assert (concepts_dir / "orphan-0.md").exists()
+
+
+def test_sync_index_idempotent_bytes(conn, data_root):
+    """2회 sync 후 index.md가 바이트 단위로 동일 + 미기록(mtime 불변)."""
+    _seed_two_concepts(conn)
+    sync_concept_notes(conn)
+
+    index_path = data_root / "_concepts" / "index.md"
+    first = index_path.read_bytes()
+    mtime = index_path.stat().st_mtime_ns
+
+    text = first.decode("utf-8")
+    slug_a = gstore.make_slug("개념 A")
+    assert text.startswith("---\npkb_generated: true\n---\n")
+    assert "## 기타" in text  # 빈 카테고리 → "기타" 그룹
+    assert f"- [[{slug_a}|개념 A]] — A 설명 (멘션 1)" in text  # 볼트 밖 → basename 링크
+
+    sync_concept_notes(conn)
+    assert index_path.read_bytes() == first
+    assert index_path.stat().st_mtime_ns == mtime
+
+
+def test_sync_reserved_index_slug_kept_as_moc(conn, data_root):
+    """slug 'index' 개념이 있어도 index.md는 MOC로 유지되고 failed로 집계된다."""
+    _seed_two_concepts(conn)
+    gstore.upsert_concept(conn, name="Index", description="예약어 개념")
+    conn.commit()
+    assert gstore.make_slug("Index") == "index"
+
+    result = sync_concept_notes(conn)
+    assert result["created"] == 2  # index는 개념노트 미생성
+    assert result["failed"] == 1
+
+    index_text = (data_root / "_concepts" / "index.md").read_text(encoding="utf-8")
+    assert index_text.startswith("---\npkb_generated: true\n---\n")  # MOC — 개념노트로 덮이지 않음
+
+    result2 = sync_concept_notes(conn)
+    assert result2["updated"] == 0  # 노트↔MOC 상호 덮어쓰기 반복 없음
+    assert result2["failed"] == 1
+
+
+def test_index_first_sentence_collapses_newlines(conn, data_root):
+    """문장부호 없는 다중행 description도 index 불릿이 한 줄로 렌더된다."""
+    gstore.upsert_concept(conn, name="개념 C", description="첫 줄\n둘째  줄")
+    conn.commit()
+
+    sync_concept_notes(conn)
+    text = (data_root / "_concepts" / "index.md").read_text(encoding="utf-8")
+    slug = gstore.make_slug("개념 C")
+    assert f"- [[{slug}|개념 C]] — 첫 줄 둘째 줄 (멘션 1)" in text
+
+
+def test_sync_prune_preserves_index(conn, data_root):
+    """prune이 orphan 노트는 지우되 방금 만든 index.md는 지우지 않는다."""
+    _seed_two_concepts(conn)
+    sync_concept_notes(conn)
+
+    concepts_dir = data_root / "_concepts"
+    assert (concepts_dir / "index.md").exists()
+    (concepts_dir / "orphan.md").write_text("---\nslug: orphan\n---\n\nx", encoding="utf-8")
+
+    result = sync_concept_notes(conn)
+    assert result["pruned"] == 1
+    assert not (concepts_dir / "orphan.md").exists()
+    assert (concepts_dir / "index.md").exists()
 
 
 def test_curation_empty_table_projects_all(conn, data_root):
@@ -250,9 +315,36 @@ def test_curation_sync_only_creates_real_notes(conn, data_root):
     conn.commit()
 
     sync_concept_notes(conn)
-    concepts_dir = data_root / "concepts"
+    concepts_dir = data_root / "_concepts"
     assert (concepts_dir / f"{slug_a}.md").exists()
     assert not (concepts_dir / f"{slug_b}.md").exists()
+
+
+def test_curation_real_without_edge_not_projected(conn, data_root):
+    """real이지만 엣지가 0개인 개념(고아)은 투영 제외 — sync에서 노트 미생성."""
+    gstore.upsert_concept(conn, name="개념 A", description="A 설명")
+    slug_a = gstore.make_slug("개념 A")
+    gstore.set_curation(conn, slug_a, "real")
+    conn.commit()
+
+    assert gstore.projected_slugs(conn) == set()
+    result = sync_concept_notes(conn)
+    assert result["created"] == 0
+    assert not (data_root / "_concepts" / f"{slug_a}.md").exists()
+
+
+def test_curation_real_with_edge_projected(conn, data_root):
+    """real이고 엣지가 1개 이상이면 투영 — sync에서 노트 생성."""
+    _seed_two_concepts(conn, relation="part_of")
+    slug_a = gstore.make_slug("개념 A")
+    slug_b = gstore.make_slug("개념 B")
+    gstore.set_curation(conn, slug_a, "real")
+    gstore.set_curation(conn, slug_b, "real")
+    conn.commit()
+
+    assert gstore.projected_slugs(conn) == {slug_a, slug_b}  # A는 src, B는 dst로 엣지 보유
+    result = sync_concept_notes(conn)
+    assert result["created"] == 2
 
 
 def test_curation_unprojected_dst_renders_plaintext(conn, data_root):
@@ -265,7 +357,7 @@ def test_curation_unprojected_dst_renders_plaintext(conn, data_root):
     conn.commit()
 
     sync_concept_notes(conn)
-    text = (data_root / "concepts" / f"{slug_a}.md").read_text(encoding="utf-8")
+    text = (data_root / "_concepts" / f"{slug_a}.md").read_text(encoding="utf-8")
     assert "- 개념 B" in text
     assert "[[" not in text
 
@@ -277,7 +369,7 @@ def test_curation_demoted_note_pruned_as_orphan(conn, data_root):
     slug_b = gstore.make_slug("개념 B")
 
     sync_concept_notes(conn)  # 큐레이션 전: v1 모드로 A, B 둘 다 생성
-    concepts_dir = data_root / "concepts"
+    concepts_dir = data_root / "_concepts"
     assert (concepts_dir / f"{slug_b}.md").exists()
 
     gstore.set_curation(conn, slug_a, "real")
@@ -287,6 +379,33 @@ def test_curation_demoted_note_pruned_as_orphan(conn, data_root):
     result = sync_concept_notes(conn)
     assert result["pruned"] == 1
     assert not (concepts_dir / f"{slug_b}.md").exists()
+
+
+def test_inbound_backreference_renders_typed_wikilink(conn, vault_env):
+    """dst 개념 노트에 '## 역참조' 섹션 — [relation] 라벨 + src 위키링크."""
+    _seed_two_concepts(conn, relation="part_of")  # A --part_of--> B
+    slug_a = gstore.make_slug("개념 A")
+    slug_b = gstore.make_slug("개념 B")
+
+    text = render_concept_note(conn, slug_b)
+    assert "## 역참조" in text
+    assert f"- [part_of] [[PKB/_concepts/{slug_a}|개념 A]]" in text
+    # src(A) 노트에는 역참조 없음 — inbound 엣지가 없으므로 섹션 미출력
+    assert "## 역참조" not in render_concept_note(conn, slug_a)
+
+
+def test_inbound_unprojected_src_renders_plaintext(conn, vault_env):
+    """미투영(vocab) src는 기존 _dst_label과 동일하게 평문 이름으로 폴백."""
+    _seed_two_concepts(conn, relation="part_of")
+    slug_a = gstore.make_slug("개념 A")
+    slug_b = gstore.make_slug("개념 B")
+    gstore.set_curation(conn, slug_a, "vocab")
+    gstore.set_curation(conn, slug_b, "real")
+    conn.commit()
+
+    text = render_concept_note(conn, slug_b)
+    assert "- [part_of] 개념 A" in text
+    assert f"[[PKB/_concepts/{slug_a}" not in text
 
 
 def test_prose_placeholder_vocab_dst_renders_plaintext(conn, vault_env):
@@ -307,8 +426,9 @@ def test_prose_placeholder_vocab_dst_renders_plaintext(conn, vault_env):
 
 def test_prose_placeholder_real_dst_renders_wikilink(conn, vault_env):
     """산문 속 [[c:slug|표시명]]에서 대상이 real이면 볼트 물리 경로 위키링크."""
-    gstore.upsert_concept(conn, name="개념 A", description="A 설명")
-    gstore.upsert_concept(conn, name="개념 B", description="B 설명")
+    a_id = gstore.upsert_concept(conn, name="개념 A", description="A 설명")
+    b_id = gstore.upsert_concept(conn, name="개념 B", description="B 설명")
+    gstore.add_edge(conn, a_id, b_id, "related_to")  # real 투영엔 엣지 보유가 필요
     conn.commit()
     slug_a = gstore.make_slug("개념 A")
     slug_b = gstore.make_slug("개념 B")
@@ -317,7 +437,7 @@ def test_prose_placeholder_real_dst_renders_wikilink(conn, vault_env):
     conn.commit()
 
     text = render_concept_note(conn, slug_a)
-    assert f"[[PKB/concepts/{slug_b}|개념 B]]" in text
+    assert f"[[PKB/_concepts/{slug_b}|개념 B]]" in text
 
 
 def test_set_curation_prose_none_preserves_existing(conn):

@@ -45,18 +45,28 @@ CAPABILITY: dict[str, dict[str, str]] = {
 
 # 비가역/무거운 admin·API 벌크 — CLI 전용이 의도된 것.
 # "graph stats"는 doctor의 그래프 통계 섹션이 MCP 쪽을 이미 커버하므로 CLI 전용으로 남긴다.
+# "eval"은 골드셋 전체를 4개 모드로 도는 벤치마크 하니스라 CLI 전용.
+# "stale"은 SessionStart 훅용 신선도 점검(fail-open)이라 CLI 전용.
+# "watch"는 폴링 데몬(포그라운드 상주 프로세스)이라 CLI 전용.
 ALLOWLIST_CLI_ONLY = {
     "init",
     "reindex",
     "delete",
     "purge-archived",
+    "eval",
     "graph stats",
+    "stale",
+    "watch",
 }
 
-# Claude 루프 셀프추출(graph_list_chunks/graph_store_concepts) + obsidian 전용 재조정.
+# Claude 루프 셀프추출·큐레이션·병합(graph_*) + obsidian 전용 재조정.
+# "graph_list_concepts"는 추출 전 기존 어휘 재사용 유도용 — graph_list_chunks와 같은 Claude 루프 전용.
 ALLOWLIST_MCP_ONLY = {
+    "graph_list_concepts",
     "graph_list_chunks",
     "graph_store_concepts",
+    "graph_curate",
+    "graph_merge",
     "sync_obsidian",
 }
 

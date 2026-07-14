@@ -20,5 +20,6 @@ data/*
 # OS
 .DS_Store
 
-# Claude Code 로컬 설정
-.claude/
+# Claude Code 로컬 설정 (commands/ 절차문만 추적)
+.claude/*
+!.claude/commands/

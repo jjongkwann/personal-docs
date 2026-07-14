@@ -4,13 +4,13 @@
 
 **목적**: *"내 자료 전체의 개념이 어떻게 연결돼 있나"* 수준의 질문에 답한다. 기존 RRF+리랭커 검색이 잘 못하는 영역을 **보완**한다 — 대체가 아니다.
 
-**핵심 설계**: 개념 레이어는 100% Claude Code 셀프추출이다 — API 호출도 LLM 비용도 없다. Claude Code가 `graph_list_chunks`로 청크를 읽고, 스스로 개념/관계를 추출해 `graph_store_concepts`로 SQLite에 저장한다. `sync_concept_notes`가 SQLite를 `data/concepts/<slug>.md` 볼트 노트로 투영하고, **열람은 이 노트 파일을 직접 읽는 것**이 기본 경로다 (별도 조회 도구 없음).
+**핵심 설계**: 개념 레이어는 100% Claude Code 셀프추출이다 — API 호출도 LLM 비용도 없다. Claude Code가 `graph_list_chunks`로 청크를 읽고, 스스로 개념/관계를 추출해 `graph_store_concepts`로 SQLite에 저장한다. `sync_concept_notes`가 SQLite를 `data/_concepts/<slug>.md` 볼트 노트로 투영하고, **열람은 이 노트 파일을 직접 읽는 것**이 기본 경로다 (별도 조회 도구 없음).
 
 | | 기존 (ES + RRF + 리랭커) | 그래프 RAG |
 |---|---|---|
 | 잘하는 것 | "DI란?", "BM25 공식은?" 같은 **구체 질의** | "DI·IoC·Bean·Container가 어떻게 얽혀?" 같은 **관계/전역 질의** |
 | 데이터 단위 | 청크 (500토큰) | 개념(entity) + 관계(relation) |
-| 응답 재료 | 본문 청크 | `data/concepts/` 노트 (산문 + 관계 링크 + 출처) |
+| 응답 재료 | 본문 청크 | `data/_concepts/` 노트 (산문 + 관계 링크 + 출처) |
 | 빌드 시점 | 인제스트 즉시 | MCP `graph_list_chunks`/`graph_store_concepts`로 명시 실행 |
 
 **안 하는 것**: 자동 전체 그래프 빌드(opt-in만), Neo4j 등 풀 그래프 DB, GNN 임베딩, 대화 히스토리 기반 자동 업데이트.
@@ -31,7 +31,15 @@
 | `concept_edges` | 개념 간 관계 (relation, weight, evidence_count) |
 | `concept_mentions` | 개념이 등장한 `doc_id`/`chunk_index` |
 | `concept_curation` | 개념 큐레이션(real/vocab) + 증류 산문 |
+| `extracted_chunks` | 추출 완료 마커 `(doc_id, chunk_index)` → `content_hash` |
 | `graph_runs` | 그래프 빌드 실행 기록 |
+
+증분 추출은 `extracted_chunks`가 기준이다. 청크의 현재 `content_hash`가 그 인덱스의 마커와
+다르면(= 내용 변경 또는 다른 인덱스로 이동) pending이 되어 재추출되고, 재추출은 **그 청크의
+멘션을 교체**한다 — 개정된 청크에서 사라진 개념의 멘션은 남지 않는다. `chunk_index`가 NULL인
+행은 해시로만 기록된 구마커로, 해당 청크 내용이 바뀔 때까지만 fallback으로 인정된다.
+엣지 `weight`/`evidence_count`는 청크별 provenance가 없어 재추출 시 누적된다(표시 정렬용,
+정확한 집계가 필요하면 `store.add_edge`의 ponytail 주석 참조).
 
 스키마 정의는 `src/pkb/graph/schema.py`, CRUD는 `src/pkb/graph/store.py`.
 
@@ -39,7 +47,20 @@
 1. **Slug 일치**: `dependency injection` == `Dependency Injection`
 2. **Alias 일치**: "DI" → 기존 "Dependency Injection" concept에 매핑
 3. **임베딩 유사도** (≥ `GRAPH_DEDUP_THRESHOLD`, 기본 0.88): 기존 개념과 의미 매칭 → merge
-4. 새 개념이면 insert, 기존이면 `mention_count += 1`, alias 추가
+4. 새 개념이면 insert, 기존이면 alias 추가 (`mention_count`는 `concept_mentions` 실측치로
+   재계산 — 같은 청크를 재추출해도 부풀지 않는다)
+
+dedup을 통과해 이미 별도 노드로 쪼개진 중복(표기 변형 등)은 `store.merge_concepts(conn,
+winner_slug, loser_slugs)`로 사후 병합한다 — 엣지·mention·별칭·산문을 승자로 승계하고
+loser 노트는 다음 `sync_concept_notes`에서 orphan으로 정리된다. 주의: "MCP Server"처럼
+상위 개념의 **구성요소**는 표기 변형이 아니므로 병합 금지.
+
+### 노트 투영 기준
+`sync_concept_notes`는 전 개념이 아니라 **`concept_curation.label='real'`(실개념 분류)
+이면서 관계(엣지)를 1개 이상 가진 개념**만 노트로 투영한다 — 고아(관계 0) 개념은 연결
+가치가 없어 제외하되 SQLite에는 남는다(`store.projected_slugs`). 큐레이션 테이블이
+비어 있으면 전량 투영으로 폴백. 미투영 개념을 가리키는 관계·산문 링크는 평문으로
+렌더되어 깨진 위키링크가 생기지 않는다.
 
 ### 관계 엣지 누적
 - 같은 (src, dst, relation) 조합 재등장 → `weight += 1`, `evidence_count += 1`
@@ -49,8 +70,10 @@
 
 ## 파이프라인: 셀프추출 → 저장 → 노트 투영
 
-### 1. `graph_list_chunks(category|doc_id, offset, limit)`
-ES 청크를 페이지 단위 JSON으로 반환. Claude Code가 이 결과를 직접 읽고 아래 규칙으로 개념/관계를 추출한다.
+전 과정은 `/pkb-graph-build [category]` 슬래시 커맨드([.claude/commands/pkb-graph-build.md](../.claude/commands/pkb-graph-build.md))로 실행할 수 있다.
+
+### 1. `graph_list_chunks(category|doc_id, offset, limit, pending_only)`
+ES 청크를 페이지 단위 JSON으로 반환. `pending_only=True`면 미추출·내용 변경 청크만 반환한다(증분 추출). Claude Code가 이 결과를 직접 읽고 아래 규칙으로 개념/관계를 추출한다. 추출 전 `graph_list_concepts`로 기존 어휘를 확인해 겹치는 개념은 기존 name/slug를 재사용한다.
 
 - 개념: 구체적 명사구 (예: "Dependency Injection", "BM25"). 일반 단어/인명/지명 제외
 - 관계 타입: `related_to` | `part_of` | `prerequisite_of` | `example_of` (필요 시 자유 라벨 허용)
@@ -60,10 +83,12 @@ ES 청크를 페이지 단위 JSON으로 반환. Claude Code가 이 결과를 �
 추출한 개념/관계 JSON을 SQLite에 upsert (정규화·alias·mention·edge 포함).
 
 ### 3. `sync_concept_notes(confirm_prune)`
-SQLite → `data/concepts/<slug>.md` 노트로 단방향 투영 (결정적·멱등). 개념 엣지를 `[[위키링크]]`로 되써서 Obsidian 그래프뷰가 개념그래프를 그리게 한다. `<!-- pkb:auto:start/end -->` 마커 사이만 재생성하므로 마커 밖 사용자 산문은 보존된다. 노트→SQLite 역승격은 없음(SQLite가 항상 SSOT). 구현: `src/pkb/graph/notes.py`.
+SQLite → `data/_concepts/<slug>.md` 노트로 단방향 투영 (결정적·멱등). 개념 엣지를 `[[위키링크]]`로 되써서 Obsidian 그래프뷰가 개념그래프를 그리게 한다. 링크 타깃은 doc_id가 아니라 **볼트 물리 경로**(예: `[[PKB/_concepts/slug|이름]]`) — `DATA_ROOT`가 볼트 밖이면 파일명 링크로 폴백한다. 미투영(vocab) 개념으로의 관계는 평문으로 표시된다. `<!-- pkb:auto:start/end -->` 마커 사이만 재생성하므로 마커 밖 사용자 산문은 보존된다. 노트→SQLite 역승격은 없음(SQLite가 항상 SSOT). 투영 대상 개념을 category별로 묶은 `_concepts/index.md` MOC도 함께 렌더한다 — 개념 어휘 카탈로그 진입점. 구현: `src/pkb/graph/notes.py`.
 
 ### 4. 열람
-개념 관계 질문에는 `data/concepts/<slug>.md`를 `search_knowledge`/`get_document`로 읽는다. 노트에는 설명, 관계(`part_of`/`prerequisite_of`/`related_to`), 출처 문서 링크가 담겨 있다.
+개념 관계 질문에는 `data/_concepts/<slug>.md` 노트 파일을 **직접 Read**한다 — 전용 조회 도구는
+없다(v3에서 삭제). 개념노트는 ES에 색인되지 않으므로 `search_knowledge`로는 잡히지 않는다.
+노트에는 설명, 관계(`part_of`/`prerequisite_of`/`related_to`), 출처 문서 링크가 담겨 있다.
 
 ---
 
@@ -71,7 +96,7 @@ SQLite → `data/concepts/<slug>.md` 노트로 단방향 투영 (결정적·멱�
 
 ```bash
 uv run pkb graph stats        # 개념/엣지/멘션/문서/별칭/run 수 통계
-uv run pkb graph sync-notes   # SQLite → data/concepts/ 노트 동기화
+uv run pkb graph sync-notes   # SQLite → data/_concepts/ 노트 동기화
 uv run pkb graph sync-notes --yes   # 대량 정리(21개 이상) 확인 생략
 ```
 

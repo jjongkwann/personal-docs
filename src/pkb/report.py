@@ -1,4 +1,26 @@
-"""PKB 상태 점검(doctor) 리포트 생성. CLI/MCP 공용."""
+"""PKB 상태 점검(doctor) 리포트 생성. CLI/MCP 공용.
+
+조치 후보(만료 미아카이브·purge 대상·고아 개념)는 결정적으로 나열만 한다 —
+판단·해소는 Claude 세션 몫.
+"""
+
+# purge 후보 판정: 아카이브 후 경과일. ES date math에 박히는 리터럴 상수 (설정 아님).
+PURGE_CANDIDATE_DAYS = 30
+
+
+def _doc_id_agg(es, query: dict) -> tuple[int, list[str]]:
+    """query에 걸리는 청크 총수 + doc_id 최대 10건을 terms 집계로 반환. 조치 후보 나열용."""
+    from pkb.config import settings as _settings
+
+    result = es.search(
+        index=_settings.es_index,
+        size=0,
+        track_total_hits=True,  # 기본 10000 상한 포화 방지 — 총수는 정확히
+        query=query,
+        aggs={"by_doc": {"terms": {"field": "doc_id", "size": 10}}},
+    )
+    doc_ids = [b["key"] for b in result["aggregations"]["by_doc"]["buckets"]]
+    return result["hits"]["total"]["value"], doc_ids
 
 
 def build_health_report(es) -> str:
@@ -31,15 +53,15 @@ def build_health_report(es) -> str:
             for bucket in agg["aggregations"]["by_cat"]["buckets"]:
                 lines.append(f"  - {bucket['key']}: {bucket['doc_count']}")
 
-            # Lifecycle 집계: archived / expired 청크 수
+            # Lifecycle 집계: archived 청크 수 + 조치 후보(만료 미아카이브 / purge 대상) 나열
             try:
                 archived = es.count(
                     index=_settings.es_index,
                     query={"exists": {"field": "archived_at"}},
                 )["count"]
-                expired = es.count(
-                    index=_settings.es_index,
-                    query={
+                expired, expired_docs = _doc_id_agg(
+                    es,
+                    {
                         "bool": {
                             "must": [
                                 {"exists": {"field": "expires_at"}},
@@ -48,8 +70,20 @@ def build_health_report(es) -> str:
                             "must_not": [{"exists": {"field": "archived_at"}}],
                         }
                     },
-                )["count"]
+                )
                 lines.append(f"  archived: {archived}  expired(still-visible): {expired}")
+                lines.extend(f"    - {doc_id}" for doc_id in expired_docs)
+
+                purge_total, purge_docs = _doc_id_agg(
+                    es,
+                    {"range": {"archived_at": {"lte": f"now-{PURGE_CANDIDATE_DAYS}d/d"}}},
+                )
+                if purge_total:
+                    lines.append(
+                        f"  purge 후보(archived {PURGE_CANDIDATE_DAYS}일 경과): {purge_total}"
+                    )
+                    lines.extend(f"    - {doc_id}" for doc_id in purge_docs)
+                    lines.append("    → `pkb purge-archived`로 정리 (CLI 전용)")
             except Exception:
                 pass
 
@@ -108,19 +142,53 @@ def build_health_report(es) -> str:
         from pathlib import Path
 
         from pkb.graph import store as gstore
-        from pkb.graph.schema import get_connection
+        from pkb.graph.schema import get_connection, init_schema
 
         db_path = Path(_settings.graph_db_path)
         if not db_path.exists():
             lines.append("그래프 DB 없음 (아직 빌드되지 않음)")
         else:
+            init_schema(_settings.graph_db_path)  # extracted_chunks 등 신규 테이블 백필
             with get_connection(_settings.graph_db_path) as conn:
                 s = gstore.stats(conn)
+                orphans = gstore.orphan_concept_slugs(conn)
+                by_idx, legacy = gstore.extracted_markers(conn)
             if not s["concepts"]:
                 lines.append("그래프가 비어 있음 (개념 0개)")
             else:
                 for k, v in s.items():
                     lines.append(f"  {k}: {v}")
+                if orphans:
+                    from pkb.config import data_dir
+                    from pkb.ingest import CONCEPTS_DIR_NAME
+
+                    concepts_dir = data_dir() / CONCEPTS_DIR_NAME
+                    lines.append(f"  고아 개념(멘션 0): {len(orphans)}")
+                    for slug in orphans[:10]:  # ES 측 후보 나열과 동일한 10건 캡
+                        note = " (노트 잔존)" if (concepts_dir / f"{slug}.md").exists() else ""
+                        lines.append(f"    - {slug}{note}")
+                    if len(orphans) > 10:
+                        lines.append(f"    ... 외 {len(orphans) - 10}개")
+
+            # 그래프 미추출 청크 — ES 청크 전량을 SQLite 추출 마커와 대조 (graph_list_chunks의
+            # pending_only와 같은 판정). ES 조회 실패는 조용히 생략.
+            try:
+                # ponytail: 개인 규모 상한(10000) — 초과 시 search_after로 업그레이드
+                scan = es.search(
+                    index=_settings.es_index,
+                    size=10000,
+                    track_total_hits=True,
+                    source_includes=["doc_id", "chunk_index", "content_hash"],
+                )
+                total_chunks = scan["hits"]["total"]["value"]
+                pending = sum(
+                    1
+                    for h in scan["hits"]["hits"]
+                    if gstore.is_pending(h["_source"], by_idx, legacy)
+                )
+                lines.append(f"그래프 미추출 청크: {pending} / {total_chunks}")
+            except Exception:
+                pass
     except Exception as e:
         lines.append(f"그래프 통계 조회 실패: {e}")
 

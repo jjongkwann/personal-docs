@@ -2,11 +2,11 @@
 
 **로컬 저장소와 로컬 검색 인덱스**를 중심으로 돌아가는 개인 지식 베이스. 내가 큐레이션한 문서만을 소스로 사용해, 외부 웹 검색 없이 **통제된 데이터**에서 정보를 빠르게 꺼내 씁니다.
 
-Claude Code에 **MCP**로 연결해서 대화 중 이 데이터를 바로 검색/참조/작성하는 것이 기본 사용 방식입니다. 문서 원본과 Elasticsearch/SQLite 인덱스는 로컬에 두고, CLI는 운영·검증·대체 인터페이스로만 사용합니다.
+**두 가지 방식으로 씁니다** — ① Claude Code가 **MCP**로 대화 중 이 데이터를 바로 검색/참조/작성 ② 사람이 **Obsidian**에서 코퍼스 원본과 개념노트를 마크다운으로 직접 열람. 문서 원본과 Elasticsearch/SQLite 인덱스는 로컬에 두고, CLI는 운영·검증·대체 인터페이스로만 사용합니다. 100% 로컬 — 코드 안에 LLM API 호출이 없고 `ANTHROPIC_API_KEY`도 필요 없습니다.
 
 주요 용도:
 - "내가 예전에 정리한 X 내용이 뭐였지?" 즉시 조회
-- Obsidian 노트, 자료, 경력 문서 검색
+- 공부 자료, 경력 문서 등 코퍼스 전체 검색
 - 검색 결과를 바탕으로 새 마크다운 작성 후 자동 인제스트
 - 개념 그래프를 이용해 자료 전체의 관계/로드맵 탐색
 
@@ -25,7 +25,7 @@ Claude Code에 **MCP**로 연결해서 대화 중 이 데이터를 바로 검색
 
 [그래프]
   ES 청크 → Claude Code가 직접 개념·관계 추출 → data/.graph/pkb_graph.sqlite 저장
-    → data/concepts/<slug>.md 노트로 투영
+    → data/_concepts/<slug>.md 노트로 투영
 
 [대화 (Claude Code + MCP)]
   Claude Code 대화 메시지
@@ -36,7 +36,7 @@ Claude Code에 **MCP**로 연결해서 대화 중 이 데이터를 바로 검색
     ├─ list_documents    → 저장된 문서 목록
     ├─ add_document      → 문서 인제스트
     ├─ convert_and_ingest → PDF/DOCX → .md 변환 + 인제스트
-    ├─ sync_obsidian / reindex_document / doctor
+    ├─ sync_corpus / sync_obsidian / reindex_document / doctor
     └─ graph_list_chunks / graph_store_concepts / sync_concept_notes
 ```
 
@@ -93,32 +93,31 @@ Claude Code 재시작 후 `/mcp`로 `pkb` 서버가 연결됐는지 확인.
 
 ### 3. 데이터 추가
 
-데이터 코퍼스(`DATA_ROOT`, 기본 `data/`) 하위에 문서를 넣습니다. doc_id는 위치와 무관하게 `data/<카테고리>/...` 형식입니다:
+데이터 코퍼스(`DATA_ROOT`, 기본 `data/`) 하위에 문서를 넣습니다. **최상위 폴더명이 곧 카테고리**이며 동적입니다 — 폴더를 새로 만들면 그게 새 카테고리입니다. doc_id는 위치와 무관하게 항상 `data/<카테고리>/...` 형식입니다:
 
 ```
 <DATA_ROOT>/
-├── about/       # 자기소개, 관심사
+├── study/       # 공부 노트, 논문
 ├── career/      # 경력, 기술 스택, 프로젝트
-├── study/       # 공부 노트, 교재
-└── writing/     # 초안, 노트
+├── writing/     # 초안, 노트
+├── about/       # 자기소개, 관심사
+└── ...          # 폴더 추가 = 카테고리 추가 (예: news, journal, 운동)
 ```
+
+`DATA_ROOT`를 Obsidian 볼트 하위 폴더(예: `<vault>/PKB`)로 지정하는 것을 권장합니다 — 코퍼스 자체가 볼트 안에 있어 Obsidian으로 바로 열람·편집·백링크할 수 있고, `write_file`/`sync_concept_notes` 산출물도 볼트에 그대로 나타납니다.
 
 Claude Code 대화 중 바로 인제스트 요청 가능:
 
 > "`~/Downloads/paper.pdf`를 study 카테고리로 넣어줘"
 > → `convert_and_ingest` 도구가 자동 호출
 
-**Obsidian 볼트 연동** (선택):
-
-`.env`에 `OBSIDIAN_PATH=/path/to/vault`를 설정하면:
+**볼트 안 코퍼스 밖에 파일을 둔 경우** (선택): `.env`에 `OBSIDIAN_PATH=/path/to/vault`를 설정하면, `DATA_ROOT` 서브트리를 제외한 볼트 나머지를 `category=obsidian`으로 별도 크롤합니다.
 
 ```bash
-uv run pkb init    # ES 인덱스 생성 + Obsidian 볼트 초기 인제스트
+uv run pkb init    # ES 인덱스 생성 (+ OBSIDIAN_PATH 설정 시 초기 인제스트)
 ```
 
 이후 `uv run pkb sync`로 일괄 재조정(업서트 + 삭제된 파일 정리)할 수 있고, `OBSIDIAN_PATH`를 제거하면 같은 명령이 잔존 문서 정리를 제안합니다.
-
-나아가 `DATA_ROOT`를 볼트 하위 폴더(예: `<vault>/PKB`)로 지정하면 코퍼스 원본 자체를 Obsidian과 공유합니다 — Obsidian으로 열람·편집·백링크, PKB로 검색·작성(`write_file` 산출물이 볼트에 바로 나타남). 볼트 크롤은 이 서브트리를 자동 제외하므로 이중 인제스트는 없습니다.
 
 ### 4. 사용
 
@@ -133,10 +132,13 @@ Claude Code에서 자연스럽게 대화:
 
 ```bash
 # 검색 (RRF + 리랭커)
-uv run pkb query "DI IoC 의존성 주입" --category obsidian
+uv run pkb query "DI IoC 의존성 주입" --category study
 
 # 주변 청크를 함께 확인
 uv run pkb query "RAG 검색 품질 개선" --category study --expand 1
+
+# 코퍼스 재조정 (업서트 + 유령 문서 정리)
+uv run pkb sync
 
 # 매핑 변경 후 전체 재인덱싱
 uv run pkb reindex
@@ -153,24 +155,10 @@ uv run pkb graph sync-notes
 
 ## MCP 도구
 
-Claude Code에서 사용할 수 있는 주요 도구:
-
-| 도구 | 역할 |
-|------|------|
-| `search_knowledge` | 개인 지식 베이스 검색 (BM25 + kNN + RRF + 리랭커) |
-| `write_file` | `data/` 하위 `.md` 작성 + 기본 자동 인제스트 |
-| `list_documents` | ES에 저장된 문서 목록 조회 |
-| `add_document` | `data/` 하위 문서 인제스트 |
-| `convert_and_ingest` | 외부 PDF/DOCX/PPTX/XLSX/HTML을 `.md`로 변환 후 인제스트 |
-| `sync_obsidian` | Obsidian 볼트 재조정 (업서트 + 볼트에 없는 문서 정리) |
-| `get_document` | 특정 문서의 청크와 `section_path` 조회 |
-| `reindex_document` | 특정 원본 문서 재인제스트 |
-| `archive_document` | 문서를 soft delete (검색에서 제외, 복구 가능) |
-| `restore_document` | 아카이브된 문서를 복구 |
-| `doctor` | ES 연결, 인덱스, 설정 상태 점검 (archived/expired 포함) |
-| `graph_list_chunks` | Graph RAG 추출용 청크 페이지 조회 |
-| `graph_store_concepts` | Claude Code가 추출한 개념/관계를 SQLite에 저장 |
-| `sync_concept_notes` | SQLite 개념그래프를 `data/concepts/<slug>.md` 노트로 투영 |
+18개 도구를 제공합니다 (검색 1 · 파일/문서 8 · 생명주기 2 · 상태 1 · Graph RAG 6). 자주 쓰는 것:
+`search_knowledge`, `write_file`, `list_documents`, `add_document`, `convert_and_ingest`,
+`sync_corpus`, `get_document`, `doctor`. 전체 목록·파라미터는 [docs/mcp.md](docs/mcp.md), 구조는
+[docs/architecture.md](docs/architecture.md) 참조.
 
 ## 설정
 
@@ -179,7 +167,8 @@ Claude Code에서 사용할 수 있는 주요 도구:
 ```env
 ES_HOST=http://localhost:9200
 ES_INDEX=pkb_documents
-OBSIDIAN_PATH=/path/to/obsidian-vault
+DATA_ROOT=/path/to/obsidian-vault/PKB   # 권장: 볼트 하위 폴더
+OBSIDIAN_PATH=/path/to/obsidian-vault   # 선택: DATA_ROOT 밖 볼트 파일도 동기화
 
 RERANK_ENABLED=true
 CANDIDATE_K=20
@@ -203,7 +192,7 @@ GRAPH_DEDUP_THRESHOLD=0.88
 - **MCP** — Claude Code 직접 통합 (기본 사용 방법)
 - **Elasticsearch 8.x** — nori 한국어 형태소 분석 + dense_vector kNN
 - **sentence-transformers** — 로컬 임베딩 + CrossEncoder 리랭커
-- **markitdown** — PDF/DOCX/PPTX/XLSX/HTML → 마크다운 변환
+- **markitdown** — DOCX/PPTX/XLSX/HTML → 마크다운 변환 (PDF는 pdfminer 페이지 보존 추출)
 - **SQLite** — 개념 그래프 저장소 (`data/.graph/pkb_graph.sqlite`)
 - **typer** — CLI
 - **PyYAML** — 마크다운 frontmatter 파싱

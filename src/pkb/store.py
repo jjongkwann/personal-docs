@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from elasticsearch import Elasticsearch, NotFoundError
 
 from pkb.config import settings
+from pkb.search_log import log_change
 
 INDEX_SETTINGS = {
     "settings": {
@@ -182,6 +183,7 @@ def delete_document(es: Elasticsearch, doc_id: str) -> int:
         query={"term": {"doc_id": doc_id}},
         refresh=True,
     )
+    log_change("delete", doc_id, chunks=result["deleted"])
     return result["deleted"]
 
 
@@ -226,6 +228,7 @@ def archive_document(
         script={"source": " ".join(source_parts), "lang": "painless", "params": params},
         refresh=True,
     )
+    log_change("archive", doc_id, chunks=result["updated"], reason=reason)
     return result["updated"]
 
 
@@ -247,6 +250,7 @@ def restore_document(es: Elasticsearch, doc_id: str) -> int:
         script={"source": script_source, "lang": "painless"},
         refresh=True,
     )
+    log_change("restore", doc_id, chunks=result["updated"])
     return result["updated"]
 
 
@@ -262,6 +266,7 @@ def purge_archived(es: Elasticsearch, before: datetime | None = None) -> int:
         query={"bool": {"must": must}},
         refresh=True,
     )
+    log_change("purge", "*", chunks=result["deleted"])
     return result["deleted"]
 
 

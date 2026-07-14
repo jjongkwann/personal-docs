@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
-from pkb.retrieve import RRF_K, _bm25_query, _knn_query
+import pytest
+
+from pkb.retrieve import RRF_K, _bm25_query, _knn_query, hybrid_search
 
 # ---------- _bm25_query ----------
 
@@ -72,31 +74,31 @@ def test_knn_include_archived_drops_filter():
     assert "filter" not in q
 
 
-# ---------- exclude_categories (obsidian 배제 검색) ----------
+# ---------- exclude_doc_prefix (코퍼스 밖 볼트 문서 배제 검색) ----------
 
-def test_bm25_exclude_categories_adds_must_not_terms():
-    q = _bm25_query("q", None, exclude_categories=["obsidian"])
+def test_bm25_exclude_doc_prefix_adds_must_not_prefix():
+    q = _bm25_query("q", None, exclude_doc_prefix="obsidian/")
     filters = q["bool"]["filter"]
-    assert {"bool": {"must_not": [{"terms": {"category": ["obsidian"]}}]}} in filters
+    assert {"bool": {"must_not": [{"prefix": {"doc_id": "obsidian/"}}]}} in filters
 
 
-def test_bm25_no_exclude_categories_by_default():
+def test_bm25_no_exclude_doc_prefix_by_default():
     q = _bm25_query("q", None)
     filters = q["bool"]["filter"]
-    exclude_filter = {"bool": {"must_not": [{"terms": {"category": ["obsidian"]}}]}}
+    exclude_filter = {"bool": {"must_not": [{"prefix": {"doc_id": "obsidian/"}}]}}
     assert exclude_filter not in filters
 
 
-def test_knn_exclude_categories_adds_must_not_terms():
-    q = _knn_query([0.0] * 4, k=5, category=None, exclude_categories=["obsidian"])
+def test_knn_exclude_doc_prefix_adds_must_not_prefix():
+    q = _knn_query([0.0] * 4, k=5, category=None, exclude_doc_prefix="obsidian/")
     filters = q["filter"]
-    assert {"bool": {"must_not": [{"terms": {"category": ["obsidian"]}}]}} in filters
+    assert {"bool": {"must_not": [{"prefix": {"doc_id": "obsidian/"}}]}} in filters
 
 
-def test_knn_no_exclude_categories_by_default():
+def test_knn_no_exclude_doc_prefix_by_default():
     q = _knn_query([0.0] * 4, k=5, category=None)
     filters = q["filter"]
-    exclude_filter = {"bool": {"must_not": [{"terms": {"category": ["obsidian"]}}]}}
+    exclude_filter = {"bool": {"must_not": [{"prefix": {"doc_id": "obsidian/"}}]}}
     assert exclude_filter not in filters
 
 
@@ -105,3 +107,63 @@ def test_knn_no_exclude_categories_by_default():
 def test_rrf_k_constant():
     # Elastic 기본값 60 — 바뀌면 골든셋 재측정 필요하므로 고정 감시
     assert RRF_K == 60
+
+
+# ---------- hybrid_search 다중 쿼리 변형 융합 (RAG-Fusion) ----------
+
+def _patch_fusion(monkeypatch, hits_by_query: dict[str, list[dict]]) -> dict:
+    """embed/_rrf_search 스텁 — ES·임베딩 없이 hybrid_search의 융합 로직만 실행."""
+    calls: dict = {"embed": [], "queries": [], "vectors": []}
+
+    def fake_embed(texts):
+        calls["embed"].append(list(texts))
+        # 쿼리 인덱스별 구분 벡터 — 쿼리↔임베딩 매핑 역전 회귀 감시용
+        return [[float(i)] * 4 for i in range(len(texts))]
+
+    def fake_rrf(es, query_text, query_vector, category, candidate_k, **kwargs):
+        calls["queries"].append(query_text)
+        calls["vectors"].append(query_vector)
+        return [dict(h) for h in hits_by_query.get(query_text, [])]
+
+    monkeypatch.setattr("pkb.retrieve.embed", fake_embed)
+    monkeypatch.setattr("pkb.retrieve._rrf_search", fake_rrf)
+    return calls
+
+
+def test_hybrid_search_variants_merge_sums_scores(monkeypatch):
+    calls = _patch_fusion(monkeypatch, {
+        "원질의": [
+            {"_id": "a", "doc_id": "data/x.md", "score": 0.5},
+            {"_id": "b", "doc_id": "data/y.md", "score": 0.4},
+        ],
+        "변형1": [
+            {"_id": "b", "doc_id": "data/y.md", "score": 0.3},
+        ],
+    })
+    results = hybrid_search(None, "원질의", variants=["변형1"], log=False)
+    assert calls["embed"] == [["원질의", "변형1"]]  # 배치 인코딩 1회
+    assert calls["vectors"] == [[0.0] * 4, [1.0] * 4]  # 원 쿼리·변형이 각자 자기 벡터를 받음
+    assert [r["_id"] for r in results] == ["b", "a"]  # b: 0.4+0.3 > a: 0.5
+    assert results[0]["score"] == pytest.approx(0.7)
+
+
+def test_hybrid_search_variants_dedupes_and_strips(monkeypatch):
+    calls = _patch_fusion(monkeypatch, {})
+    # " q " → strip 후 원 쿼리와 중복, "  " → 빈 문자열, "v1" 중복 — 전부 제거
+    hybrid_search(None, "q", variants=[" q ", "v1", "v1", "  ", "v2"], log=False)
+    assert calls["queries"] == ["q", "v1", "v2"]
+
+
+def test_hybrid_search_variants_capped_at_three(monkeypatch):
+    calls = _patch_fusion(monkeypatch, {})
+    hybrid_search(None, "q", variants=["v1", "v2", "v3", "v4"], log=False)
+    assert calls["queries"] == ["q", "v1", "v2", "v3"]  # 변형은 최대 3개
+
+
+def test_hybrid_search_no_variants_single_query(monkeypatch):
+    calls = _patch_fusion(monkeypatch, {
+        "q": [{"_id": "a", "doc_id": "data/x.md", "score": 0.5}],
+    })
+    results = hybrid_search(None, "q", log=False)
+    assert calls["queries"] == ["q"]
+    assert [r["_id"] for r in results] == ["a"]

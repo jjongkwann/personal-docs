@@ -58,18 +58,18 @@ def _lifecycle_filter(include_archived: bool) -> list[dict]:
     ]
 
 
-def _exclude_categories_filter(exclude_categories: list[str] | None) -> list[dict]:
-    """제외할 카테고리(예: obsidian) must_not terms 필터. 없으면 빈 리스트."""
-    if not exclude_categories:
+def _exclude_doc_prefix_filter(exclude_doc_prefix: str | None) -> list[dict]:
+    """제외할 doc_id 접두사(예: obsidian/) must_not prefix 필터. 없으면 빈 리스트."""
+    if not exclude_doc_prefix:
         return []
-    return [{"bool": {"must_not": [{"terms": {"category": exclude_categories}}]}}]
+    return [{"bool": {"must_not": [{"prefix": {"doc_id": exclude_doc_prefix}}]}}]
 
 
 def _bm25_query(
     query_text: str,
     category: str | None,
     include_archived: bool = False,
-    exclude_categories: list[str] | None = None,
+    exclude_doc_prefix: str | None = None,
 ) -> dict:
     bm25: dict = {
         "bool": {
@@ -84,7 +84,7 @@ def _bm25_query(
     if category:
         filters.append({"term": {"category": category}})
     filters.extend(_lifecycle_filter(include_archived))
-    filters.extend(_exclude_categories_filter(exclude_categories))
+    filters.extend(_exclude_doc_prefix_filter(exclude_doc_prefix))
     if filters:
         bm25["bool"]["filter"] = filters
     return bm25
@@ -95,7 +95,7 @@ def _knn_query(
     k: int,
     category: str | None,
     include_archived: bool = False,
-    exclude_categories: list[str] | None = None,
+    exclude_doc_prefix: str | None = None,
 ) -> dict:
     knn: dict = {
         "field": "embedding",
@@ -107,7 +107,7 @@ def _knn_query(
     if category:
         filters.append({"term": {"category": category}})
     filters.extend(_lifecycle_filter(include_archived))
-    filters.extend(_exclude_categories_filter(exclude_categories))
+    filters.extend(_exclude_doc_prefix_filter(exclude_doc_prefix))
     if filters:
         knn["filter"] = filters
     return knn
@@ -129,7 +129,8 @@ def hybrid_search(
     expand_context: int = 0,
     log: bool = True,
     include_archived: bool = False,
-    exclude_categories: list[str] | None = None,
+    exclude_doc_prefix: str | None = None,
+    variants: list[str] | None = None,
 ) -> list[dict]:
     """하이브리드 검색.
 
@@ -138,23 +139,41 @@ def hybrid_search(
         candidate_k: 각 검색(BM25/kNN)에서 가져올 후보 수 (리랭크/RRF 용)
         rerank: True면 CrossEncoder 재순위 수행 후 top_k 반환
         expand_context: N>0이면 각 결과 전후 N개 청크를 neighbors 필드로 함께 반환
-        exclude_categories: 지정하면 해당 카테고리 문서를 검색에서 제외
+        exclude_doc_prefix: 지정하면 해당 doc_id 접두사 문서를 검색에서 제외 (예: "obsidian/")
+        variants: 쿼리 변형(최대 3개) — 각 변형으로 검색해 RRF 점수를 _id별 합산 병합
+            (RAG-Fusion). 리랭크는 원 query_text 기준 1회만 수행.
     """
     timings: dict[str, float] = {}
     t_total = perf_counter()
 
+    # 원 쿼리 + 공백/중복 제거한 변형 최대 3개
+    queries = [query_text]
+    for v in variants or []:
+        v = v.strip()
+        if v and v not in queries and len(queries) < 4:
+            queries.append(v)
+
     t = perf_counter()
-    query_vector = embed([query_text])[0]
+    query_vectors = embed(queries)  # 변형 포함 1회 배치 인코딩
     timings["embed_ms"] = round((perf_counter() - t) * 1000, 2)
 
     fetch_k = candidate_k
 
     t = perf_counter()
-    candidates = _rrf_search(
-        es, query_text, query_vector, category, fetch_k,
-        timings=timings, include_archived=include_archived,
-        exclude_categories=exclude_categories,
-    )
+    merged: dict[str, dict] = {}
+    for i, (q, vec) in enumerate(zip(queries, query_vectors, strict=True)):
+        hits = _rrf_search(
+            es, q, vec, category, fetch_k,
+            timings=timings if i == 0 else None,  # 세부 타이밍은 원 쿼리만 기록
+            include_archived=include_archived,
+            exclude_doc_prefix=exclude_doc_prefix,
+        )
+        for hit in hits:
+            if hit["_id"] in merged:
+                merged[hit["_id"]]["score"] += hit["score"]
+            else:
+                merged[hit["_id"]] = hit
+    candidates = sorted(merged.values(), key=lambda h: -h["score"])
     timings["retrieve_ms"] = round((perf_counter() - t) * 1000, 2)
 
     if rerank:
@@ -186,6 +205,7 @@ def hybrid_search(
                 reranked=rerank,
                 results=candidates,
                 latency_ms=timings,
+                variants=queries[1:],
             )
         except Exception:
             pass  # 로깅 실패는 검색을 막지 않음
@@ -245,20 +265,20 @@ def _rrf_search(
     candidate_k: int,
     timings: dict[str, float] | None = None,
     include_archived: bool = False,
-    exclude_categories: list[str] | None = None,
+    exclude_doc_prefix: str | None = None,
 ) -> list[dict]:
     """BM25와 kNN을 각각 실행 → Reciprocal Rank Fusion으로 결합.
 
     timings이 주어지면 bm25_ms/knn_ms/fusion_ms/candidate_count/rrf_top_gap 기록.
     include_archived=False(기본)면 archived/expired 문서는 검색에서 제외.
-    exclude_categories가 주어지면 해당 카테고리도 검색에서 제외.
+    exclude_doc_prefix가 주어지면 해당 doc_id 접두사 문서도 검색에서 제외.
     """
     t = perf_counter()
     bm25_result = es.search(
         index=settings.es_index,
         query=_bm25_query(
             query_text, category, include_archived=include_archived,
-            exclude_categories=exclude_categories,
+            exclude_doc_prefix=exclude_doc_prefix,
         ),
         size=candidate_k,
         source_excludes=["embedding"],
@@ -271,7 +291,7 @@ def _rrf_search(
         index=settings.es_index,
         knn=_knn_query(
             query_vector, candidate_k, category, include_archived=include_archived,
-            exclude_categories=exclude_categories,
+            exclude_doc_prefix=exclude_doc_prefix,
         ),
         size=candidate_k,
         source_excludes=["embedding"],
