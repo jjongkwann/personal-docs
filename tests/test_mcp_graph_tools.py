@@ -169,3 +169,44 @@ def test_graph_store_concepts_reports_unresolved_relations(graph_db, monkeypatch
     assert "관계 1건 미해소" in result
     assert "BM25→TF-IDF(related_to)" in result
     assert "재호출" in result
+
+
+def test_relations_between_existing_concepts_survive_empty_concepts(graph_db, monkeypatch):
+    """concepts: [] 인 청크의 관계도 저장돼야 한다.
+
+    relations 루프가 `if concepts:` 안에 있던 시절, 이미 그래프에 있는 개념끼리의 관계만
+    담긴 청크는 관계가 통째로 버려졌다 — 미해소 경고조차 없이 조용히.
+    """
+    monkeypatch.setattr(
+        "pkb.embeddings.embed", lambda texts: [[0.0, 0.0, 0.0] for _ in texts]
+    )
+
+    class _NoES:
+        def mget(self, **kwargs):
+            return {"docs": []}
+
+    monkeypatch.setattr("pkb.store.get_client", lambda: _NoES())
+    conn = get_connection(graph_db)
+    gstore.upsert_concept(conn, name="BM25", description="랭킹 함수", category="study")
+    gstore.upsert_concept(conn, name="TF-IDF", description="가중치", category="study")
+    conn.commit()
+    conn.close()
+
+    items = {
+        "items": [
+            {
+                "doc_id": "data/study/x.md",
+                "chunk_index": 0,
+                "category": "study",
+                "title": "X",
+                "concepts": [],  # 신규 개념 없음 — 관계만 있는 청크
+                "relations": [{"src": "BM25", "dst": "TF-IDF", "type": "related_to"}],
+            }
+        ]
+    }
+    graph_store_concepts(json.dumps(items, ensure_ascii=False))
+
+    conn = get_connection(graph_db)
+    edges = conn.execute("SELECT COUNT(*) FROM concept_edges").fetchone()[0]
+    conn.close()
+    assert edges == 1

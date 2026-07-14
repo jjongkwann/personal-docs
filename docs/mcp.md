@@ -1,8 +1,19 @@
-# Claude Code MCP 연동 (기본 사용 방법)
+# MCP 연동 (기본 사용 방법)
 
-PKB의 기본 인터페이스는 **Claude Code + MCP**입니다. Claude Code가 에이전트 역할을 하고, PKB는 검색/파일 작성/인제스트/그래프 조회 도구를 MCP로 제공합니다.
+PKB의 기본 인터페이스는 **에이전트 + MCP**입니다. Claude Code·Codex·Gemini CLI가 에이전트 역할을 하고, PKB는 검색/파일 작성/인제스트/그래프 조회 도구를 MCP로 제공합니다.
 
-CLI는 색인·검증·디버깅용 보조 인터페이스입니다. 평소 사용은 Claude Code 대화에서 처리합니다.
+CLI는 색인·검증·디버깅용 보조 인터페이스입니다. 평소 사용은 에이전트 대화에서 처리합니다.
+
+## 왜 stdio가 아니라 HTTP 공유 서버인가
+
+> **stdio로 등록하지 마세요.** MCP stdio는 **세션마다 서버 프로세스를 새로 띄웁니다.** PKB 서버는
+> 임베딩 모델과 CrossEncoder 리랭커를 올리므로 프로세스 한 개가 약 **4GB**를 씁니다. 세션을 여러 개
+> 열거나 에이전트를 팬아웃하면 세션 수 × 4GB가 되어 머신이 스왑으로 죽습니다.
+>
+> 그래서 PKB는 **127.0.0.1에 뜬 단일 HTTP 서버**를 모든 클라이언트가 공유합니다. 모델은 한 벌만
+> 상주하고, 세션을 몇 개 열든 메모리는 그대로입니다.
+
+Streamable HTTP는 여러 클라이언트가 하나의 서버 프로세스를 공유하도록 설계된 전송 방식이라, 이 구조가 명세에도 부합합니다.
 
 ## 사전 요구사항
 
@@ -10,38 +21,88 @@ CLI는 색인·검증·디버깅용 보조 인터페이스입니다. 평소 사�
 - Python 의존성 설치: `uv sync`
 - 인덱스 초기화: `uv run pkb init`
 
-API 키가 필요 없습니다 — Claude Code가 LLM 역할을 하는 100% 로컬 구성입니다.
+API 키가 필요 없습니다 — 에이전트가 LLM 역할을 하는 100% 로컬 구성입니다.
 
-## 등록
+## 1. 서버 상시 기동 (macOS / launchd)
 
-### 방법 A: `claude mcp add` CLI (권장)
+`~/Library/LaunchAgents/dev.jongkwan.pkb-mcp.plist`:
 
-프로젝트 디렉터리에서:
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.jongkwan.pkb-mcp</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/ABSOLUTE/PATH/TO/uv</string>
+        <string>--directory</string>
+        <string>/ABSOLUTE/PATH/TO/personal-docs</string>
+        <string>run</string>
+        <string>python</string>
+        <string>-m</string>
+        <string>pkb.mcp_server</string>
+    </array>
+    <!-- config.py의 env_file=".env"가 상대경로라 cwd가 레포 루트여야 한다 -->
+    <key>WorkingDirectory</key>
+    <string>/ABSOLUTE/PATH/TO/personal-docs</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/pkb-mcp.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/pkb-mcp.err.log</string>
+</dict>
+</plist>
+```
 
 ```bash
-claude mcp add pkb -s user -- uv --directory "$(pwd)" run python -m pkb.mcp_server
+launchctl load ~/Library/LaunchAgents/dev.jongkwan.pkb-mcp.plist
 ```
 
-`-s user` 플래그로 사용자 전역 설정에 등록되어, 어느 디렉터리에서든 Claude Code 실행 시 PKB 서버가 활성화됩니다.
+로그인할 때 자동으로 뜨고, 죽으면 `KeepAlive`가 되살립니다. `RunAtLoad`+`KeepAlive` 조합이라
+**`pkill`로는 멈추지 않습니다** — 멈추려면 `launchctl unload`를 쓰세요.
 
-### 방법 B: `~/.claude.json` 직접 편집
+서버를 직접 띄워도 됩니다(개발·디버깅용). 단 **두 개를 동시에 띄우지 마세요** — 포트 충돌로
+launchd가 무한 재기동 루프에 빠지고, 실패한 기동마다 모델을 올리려다 메모리를 갉습니다.
 
-```json
-{
-  "mcpServers": {
-    "pkb": {
-      "command": "uv",
-      "args": ["--directory", "/ABSOLUTE/PATH/TO/personal-docs", "run", "python", "-m", "pkb.mcp_server"]
-    }
-  }
-}
+```bash
+uv run python -m pkb.mcp_server   # 포그라운드
 ```
 
-절대경로를 실제 경로로 교체합니다.
+## 2. 클라이언트 등록
 
-## 확인
+세 클라이언트 모두 streamable HTTP를 지원합니다. **인자 문법이 서로 다릅니다.**
 
-Claude Code 재시작 후 `/mcp` 커맨드로 `pkb` 서버가 연결됐는지 확인합니다.
+```bash
+# Claude Code
+claude mcp add --transport http pkb http://127.0.0.1:8787/mcp -s user
+
+# Codex  (--url 플래그)
+codex mcp add pkb --url http://127.0.0.1:8787/mcp
+
+# Gemini CLI  (-t http, 그리고 -s user 필수 — 기본 스코프가 project라 빼면 그 폴더에서만 잡힘)
+gemini mcp add pkb http://127.0.0.1:8787/mcp -t http -s user
+```
+
+Gemini는 **신뢰하지 않는 폴더에서 MCP를 억제합니다** — user 스코프 서버까지 막힙니다.
+`~/.gemini/trustedFolders.json`에 작업 폴더가 없으면 `Disabled`로 뜹니다.
+
+포트를 바꾸려면 `.env`의 `MCP_PORT`를 고치고 위 URL도 같이 바꾸세요.
+
+## 3. 확인
+
+```bash
+uv run pkb doctor
+```
+
+`=== MCP 서버 ===` 절에 LISTEN 여부·PID·가동시간·메모리·device·launchd 누적 기동 횟수가 나옵니다.
+누적 기동이 1회를 넘으면 재기동이 반복됐다는 뜻이니 `pkb-mcp.err.log`를 확인하세요.
+
+각 클라이언트에서는 `claude` → `/mcp`, `codex mcp list`, `gemini mcp list`로 연결을 확인합니다.
 
 ## 제공 도구
 

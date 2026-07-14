@@ -7,6 +7,68 @@
 # purge 후보 판정: 아카이브 후 경과일. ES date math에 박히는 리터럴 상수 (설정 아님).
 PURGE_CANDIDATE_DAYS = 30
 
+LAUNCHD_LABEL = "dev.jongkwan.pkb-mcp"
+
+
+def _sh(cmd: list[str]) -> str:
+    import subprocess
+
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        return ""
+
+
+def _server_status() -> list[str]:
+    """공유 HTTP MCP 서버의 프로세스 상태.
+
+    doctor는 서버 안(MCP 도구)에서도 밖(CLI)에서도 불리므로, 자기 프로세스가 아니라
+    포트를 기준으로 본다. 메모리는 RSS가 아니라 footprint — 유휴 프로세스는 페이지가
+    압축·스왑돼 RSS가 수십 MB로 보이지만 실제로는 GB를 물고 있다.
+    """
+    import socket
+
+    from pkb.config import resolve_device
+    from pkb.config import settings as _settings
+
+    port = _settings.mcp_port
+    lines = [f"=== MCP 서버 (http://127.0.0.1:{port}/mcp) ==="]
+
+    with socket.socket() as s:
+        s.settimeout(0.5)
+        if s.connect_ex(("127.0.0.1", port)) != 0:
+            lines.append("⚠ LISTEN 안 함 — Claude/Codex/Gemini 모두 pkb 도구를 쓸 수 없다")
+            lines.append(f"  → launchctl load ~/Library/LaunchAgents/{LAUNCHD_LABEL}.plist")
+            return lines
+
+    pid = _sh(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"]).split("\n")[0]
+    uptime = _sh(["ps", "-o", "etime=", "-p", pid]) if pid else ""
+    footprint = ""
+    if pid:
+        # top의 MEM은 압축분을 포함한 footprint. 마지막 줄이 해당 pid의 값.
+        out = _sh(["top", "-l", "1", "-pid", pid, "-stats", "mem"]).splitlines()
+        footprint = out[-1].strip() if out else ""
+
+    lines.append(f"LISTEN  pid {pid or '?'}  가동 {uptime or '?'}  메모리 {footprint or '?'}")
+    lines.append(
+        f"device: embedding={resolve_device(_settings.embedding_device)}"
+        f" rerank={resolve_device(_settings.rerank_device)}"
+        f"  warmup_on_start={_settings.warmup_on_start}"
+    )
+
+    # launchd 재시작 횟수 — 크래시 루프(포트 충돌 등)는 여기서만 드러난다
+    import os
+
+    info = _sh(["launchctl", "print", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"])
+    runs = next((ln.split("=")[1].strip() for ln in info.splitlines() if "runs =" in ln), "")
+    if runs:
+        warn = "  ⚠ 재기동 반복 — pkb-mcp.err.log 확인" if runs.isdigit() and int(runs) > 1 else ""
+        lines.append(f"launchd: {LAUNCHD_LABEL}  누적 기동 {runs}회{warn}")
+    else:
+        lines.append(f"launchd: {LAUNCHD_LABEL} 미등록 (수동 기동 중)")
+
+    return lines
+
 
 def _doc_id_agg(es, query: dict) -> tuple[int, list[str]]:
     """query에 걸리는 청크 총수 + doc_id 최대 10건을 terms 집계로 반환. 조치 후보 나열용."""
@@ -29,6 +91,8 @@ def build_health_report(es) -> str:
     from pkb.store import count_chunks_without_hash, count_documents
 
     lines = ["=== PKB Doctor ==="]
+    lines.extend(_server_status())
+    lines.append("")
 
     # ES 연결
     try:

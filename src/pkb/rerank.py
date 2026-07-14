@@ -1,20 +1,26 @@
 """CrossEncoder 기반 다국어 리랭커."""
 
+import threading
+
 from sentence_transformers import CrossEncoder
 
 from pkb.config import resolve_device, settings
 
 _reranker: CrossEncoder | None = None
+_reranker_lock = threading.Lock()
 
 
 def get_reranker() -> CrossEncoder:
+    """공유 HTTP 서버에서 동시 첫 검색 시 2.3GB 모델이 중복 로드되지 않도록 락으로 막는다."""
     global _reranker
     if _reranker is None:
-        _reranker = CrossEncoder(
-            settings.rerank_model,
-            max_length=512,
-            device=resolve_device(settings.rerank_device),
-        )
+        with _reranker_lock:
+            if _reranker is None:
+                _reranker = CrossEncoder(
+                    settings.rerank_model,
+                    max_length=512,
+                    device=resolve_device(settings.rerank_device),
+                )
     return _reranker
 
 

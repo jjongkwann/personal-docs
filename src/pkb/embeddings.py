@@ -1,17 +1,23 @@
+import threading
+
 from sentence_transformers import SentenceTransformer
 
 from pkb.config import resolve_device, settings
 
 _model: SentenceTransformer | None = None
+_model_lock = threading.Lock()
 
 
 def get_model() -> SentenceTransformer:
+    """공유 HTTP 서버에서 여러 세션이 동시에 첫 검색을 던지면 모델이 중복 로드될 수 있어 락으로 막는다."""
     global _model
     if _model is None:
-        _model = SentenceTransformer(
-            settings.embedding_model,
-            device=resolve_device(settings.embedding_device),
-        )
+        with _model_lock:
+            if _model is None:
+                _model = SentenceTransformer(
+                    settings.embedding_model,
+                    device=resolve_device(settings.embedding_device),
+                )
     return _model
 
 

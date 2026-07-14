@@ -68,28 +68,23 @@ uv sync
 uv run pkb init
 ```
 
-### 2. MCP 서버를 Claude Code에 등록
+### 2. MCP 서버 기동 + 클라이언트 등록
 
-프로젝트 디렉터리에서:
+PKB MCP 서버는 **127.0.0.1에 뜬 단일 HTTP 서버**이고, 모든 에이전트가 그 하나를 공유합니다.
+
+> **stdio로 등록하지 마세요.** stdio는 세션마다 서버 프로세스를 새로 띄우는데, PKB 서버는 임베딩·리랭커
+> 모델 때문에 프로세스당 약 4GB를 씁니다. 세션을 여러 개 열거나 에이전트를 팬아웃하면 세션 수 × 4GB로
+> 머신이 스왑에 빠집니다. HTTP 공유 서버는 모델을 한 벌만 올립니다.
+
+서버는 launchd로 상시 띄웁니다 (plist 전문은 [docs/mcp.md](docs/mcp.md)). 그다음 클라이언트를 붙입니다:
 
 ```bash
-claude mcp add pkb -s user -- uv --directory "$(pwd)" run python -m pkb.mcp_server
+claude mcp add --transport http pkb http://127.0.0.1:8787/mcp -s user
+codex  mcp add pkb --url http://127.0.0.1:8787/mcp
+gemini mcp add pkb http://127.0.0.1:8787/mcp -t http -s user
 ```
 
-또는 `~/.claude.json`의 `mcpServers`에 직접 추가 (경로는 실제 경로로):
-
-```json
-{
-  "mcpServers": {
-    "pkb": {
-      "command": "uv",
-      "args": ["--directory", "/ABSOLUTE/PATH/TO/personal-docs", "run", "python", "-m", "pkb.mcp_server"]
-    }
-  }
-}
-```
-
-Claude Code 재시작 후 `/mcp`로 `pkb` 서버가 연결됐는지 확인.
+`uv run pkb doctor`로 서버 상태(LISTEN·PID·메모리·재기동 횟수)와 ES·그래프를 한 번에 확인합니다.
 
 ### 3. 데이터 추가
 
