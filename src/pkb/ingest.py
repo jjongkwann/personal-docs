@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -552,6 +553,18 @@ def _empty_stats() -> dict:
     }
 
 
+@dataclass
+class _PreparedDelta:
+    doc_id: str
+    new_by_idx: dict[int, dict]
+    existing: dict[int, dict]
+    to_embed_indices: list[int]
+    moved_indices: list[int]
+    metadata_updates: list[tuple[int, dict]]
+    delete_indices: list[int]
+    reused: int
+
+
 def ingest_files(
     file_paths: list[Path],
     base_dir: Path,
@@ -581,6 +594,9 @@ def ingest_files(
     es = get_client()
     stats = _empty_stats()
     relayouts: list[tuple[str, dict[int, str], dict[int, str]]] = []
+    prepared: list[_PreparedDelta] = []
+    embedding_targets: list[tuple[_PreparedDelta, int]] = []
+    embedding_texts: list[str] = []
 
     for file_path in file_paths:
         new_chunks = process_file(
@@ -644,16 +660,38 @@ def ingest_files(
                     new_by_idx[idx]["embedding"] = vec
                     moved_indices.append(idx)
 
-        if to_embed_indices:
-            texts = [new_by_idx[i]["content"] for i in to_embed_indices]
-            for idx, vec in zip(to_embed_indices, embed(texts), strict=False):
-                new_by_idx[idx]["embedding"] = vec
+        delta = _PreparedDelta(
+            doc_id=doc_id,
+            new_by_idx=new_by_idx,
+            existing=existing,
+            to_embed_indices=to_embed_indices,
+            moved_indices=moved_indices,
+            metadata_updates=metadata_updates,
+            delete_indices=delete_indices,
+            reused=reused,
+        )
+        prepared.append(delta)
+        for idx in to_embed_indices:
+            embedding_targets.append((delta, idx))
+            embedding_texts.append(new_by_idx[idx]["content"])
 
+    # 파일별 encode 호출 대신 이번 ingest_files 호출의 신규/변경 청크를 한 번에 배치한다.
+    if embedding_texts:
+        vectors = embed(embedding_texts)
+        for (delta, idx), vector in zip(embedding_targets, vectors, strict=True):
+            delta.new_by_idx[idx]["embedding"] = vector
+
+    for prepared_delta in prepared:
+        doc_id = prepared_delta.doc_id
+        new_by_idx = prepared_delta.new_by_idx
+        existing = prepared_delta.existing
+        to_embed_indices = prepared_delta.to_embed_indices
+        moved_indices = prepared_delta.moved_indices
+        metadata_updates = prepared_delta.metadata_updates
+        delete_indices = prepared_delta.delete_indices
         indexed_indices = to_embed_indices + moved_indices
         added = sum(1 for i in indexed_indices if existing.get(i) is None)
-        re_embedded = sum(
-            1 for i in to_embed_indices if existing.get(i) is not None
-        )
+        re_embedded = sum(1 for i in to_embed_indices if existing.get(i) is not None)
 
         apply_chunk_delta(
             es,
@@ -683,11 +721,16 @@ def ingest_files(
         _log.info(
             "[delta] %s reused=%d moved=%d re-embedded=%d added=%d "
             "metadata_updated=%d deleted=%d",
-            doc_id, reused, len(moved_indices), re_embedded, added,
-            len(metadata_updates), len(delete_indices),
+            doc_id,
+            prepared_delta.reused,
+            len(moved_indices),
+            re_embedded,
+            added,
+            len(metadata_updates),
+            len(delete_indices),
         )
         stats["files"] += 1
-        stats["reused"] += reused
+        stats["reused"] += prepared_delta.reused
         stats["moved"] += len(moved_indices)
         stats["embedded"] += re_embedded
         stats["added"] += added
@@ -704,21 +747,16 @@ def _realign_graph(relayouts: list[tuple[str, dict[int, str], dict[int, str]]]) 
 
     그래프 DB는 선택 기능이라 실패해도 인제스트를 막지 않는다 (색인은 이미 끝난 상태).
     """
-    from pkb.graph.schema import get_connection, init_schema
+    from pkb.graph.schema import graph_connection
     from pkb.graph.store import realign_doc_chunks
 
     try:
-        init_schema(settings.graph_db_path)
-        conn = get_connection(settings.graph_db_path)
-        try:
+        with graph_connection(settings.graph_db_path) as conn:
             moved = dropped = 0
             for doc_id, old_hashes, new_hashes in relayouts:
                 r = realign_doc_chunks(conn, doc_id, old_hashes, new_hashes)
                 moved += r["moved"]
                 dropped += r["dropped"]
-            conn.commit()
-        finally:
-            conn.close()
         if moved or dropped:
             _log.info(
                 "[graph] 멘션 재정렬: %d개 문서, 이동=%d 삭제=%d",

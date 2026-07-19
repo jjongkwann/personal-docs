@@ -10,7 +10,12 @@ import pytest
 
 from pkb.graph import store as gstore
 from pkb.graph.schema import SCHEMA_SQL, get_connection, init_schema
-from pkb.report import PURGE_CANDIDATE_DAYS, build_health_report
+from pkb.report import (
+    PURGE_CANDIDATE_DAYS,
+    _launchd_restart_warning,
+    build_health_report,
+    build_health_report_status,
+)
 
 # ---------- orphan_concept_slugs (인메모리 SQLite) ----------
 
@@ -114,6 +119,28 @@ def doctor_env(monkeypatch, tmp_path):
 
 def _by_doc_calls(es: _FakeES) -> list[dict]:
     return [c for c in es.search_calls if "by_doc" in c.get("aggs", {})]
+
+
+def test_launchd_manual_restart_is_not_crash_loop():
+    info = "state = running\nruns = 2\nlast exit code = 143"
+    assert _launchd_restart_warning(info, "00:09") is False
+
+
+def test_launchd_repeated_abnormal_short_runs_warn():
+    info = "state = running\nruns = 5\nlast exit code = 1"
+    assert _launchd_restart_warning(info, "00:09") is True
+
+
+def test_status_is_unhealthy_when_es_connection_fails(doctor_env, monkeypatch):
+    monkeypatch.setattr("pkb.report._server_status", lambda: (["MCP OK"], True))
+
+    class _DisconnectedES:
+        def info(self):
+            raise ConnectionError("down")
+
+    status = build_health_report_status(_DisconnectedES())
+    assert status.ok is False
+    assert "ES: 연결 실패" in status.text
 
 
 def test_expired_agg_query_shape(doctor_env):

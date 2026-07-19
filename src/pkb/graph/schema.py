@@ -2,6 +2,8 @@
 
 import contextlib
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 SCHEMA_SQL = """
@@ -41,6 +43,16 @@ CREATE TABLE IF NOT EXISTS concept_edges (
     PRIMARY KEY (src_id, dst_id, relation)
 );
 
+CREATE TABLE IF NOT EXISTS concept_edge_evidence (
+    doc_id          TEXT NOT NULL,
+    chunk_index     INTEGER NOT NULL,
+    src_id          INTEGER NOT NULL REFERENCES concepts(id) ON DELETE CASCADE,
+    dst_id          INTEGER NOT NULL REFERENCES concepts(id) ON DELETE CASCADE,
+    relation        TEXT NOT NULL,
+    confidence      REAL,
+    PRIMARY KEY (doc_id, chunk_index, src_id, dst_id, relation)
+);
+
 CREATE TABLE IF NOT EXISTS extracted_chunks (
     doc_id          TEXT NOT NULL,
     chunk_index     INTEGER,            -- NULL = 구마커 (doc_id, content_hash로만 기록)
@@ -57,19 +69,6 @@ CREATE TABLE IF NOT EXISTS concept_mentions (
     PRIMARY KEY (concept_id, doc_id, chunk_index)
 );
 
-CREATE TABLE IF NOT EXISTS graph_runs (
-    id               INTEGER PRIMARY KEY,
-    started_at       TEXT NOT NULL,
-    finished_at      TEXT,
-    scope_category   TEXT,
-    scope_doc_id     TEXT,
-    chunks_processed INTEGER DEFAULT 0,
-    concepts_added   INTEGER DEFAULT 0,
-    edges_added      INTEGER DEFAULT 0,
-    model            TEXT,
-    status           TEXT
-);
-
 CREATE TABLE IF NOT EXISTS concept_curation (
     slug        TEXT PRIMARY KEY,
     label       TEXT NOT NULL,       -- 'real' | 'vocab'
@@ -77,10 +76,18 @@ CREATE TABLE IF NOT EXISTS concept_curation (
     updated_at  TEXT
 );
 
+CREATE TABLE IF NOT EXISTS graph_meta (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_concepts_slug ON concepts(slug);
 CREATE INDEX IF NOT EXISTS idx_concepts_category ON concepts(category);
 CREATE INDEX IF NOT EXISTS idx_concept_edges_src ON concept_edges(src_id);
 CREATE INDEX IF NOT EXISTS idx_concept_edges_dst ON concept_edges(dst_id);
+CREATE INDEX IF NOT EXISTS idx_edge_evidence_doc ON concept_edge_evidence(doc_id, chunk_index);
+CREATE INDEX IF NOT EXISTS idx_edge_evidence_src ON concept_edge_evidence(src_id);
+CREATE INDEX IF NOT EXISTS idx_edge_evidence_dst ON concept_edge_evidence(dst_id);
 CREATE INDEX IF NOT EXISTS idx_concept_mentions_doc ON concept_mentions(doc_id);
 CREATE INDEX IF NOT EXISTS idx_aliases_slug ON concept_aliases(alias_slug);
 """
@@ -115,6 +122,16 @@ def _migrate_extracted_chunks(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE extracted_chunks_old")
 
 
+def _cleanup_invalid_slugs(conn: sqlite3.Connection) -> None:
+    """정규화 결과가 빈 레거시 개념을 외래키 cascade로 한 번만 제거."""
+    key = "invalid_slug_cleanup_v1"
+    if conn.execute("SELECT 1 FROM graph_meta WHERE key = ?", (key,)).fetchone():
+        return
+    conn.execute("DELETE FROM concept_curation WHERE trim(slug) = ''")
+    conn.execute("DELETE FROM concepts WHERE trim(slug) = ''")
+    conn.execute("INSERT INTO graph_meta (key, value) VALUES (?, 'complete')", (key,))
+
+
 def init_schema(db_path: str) -> None:
     """스키마 초기화 (존재하지 않는 테이블만 생성)."""
     with get_connection(db_path) as conn:
@@ -123,4 +140,15 @@ def init_schema(db_path: str) -> None:
         # 기존 DB 마이그레이션: 컬럼이 이미 있으면 no-op
         with contextlib.suppress(sqlite3.OperationalError):
             conn.execute("ALTER TABLE concept_edges ADD COLUMN confidence REAL")
+        # 셀프추출 마커로 대체된 미사용 run 인프라 제거. 기존 DB에도 1회 적용된다.
+        conn.execute("DROP TABLE IF EXISTS graph_runs")
+        _cleanup_invalid_slugs(conn)
         conn.commit()
+
+
+@contextmanager
+def graph_connection(db_path: str) -> Iterator[sqlite3.Connection]:
+    """스키마 초기화가 보장된 그래프 연결을 트랜잭션 컨텍스트로 제공."""
+    init_schema(db_path)
+    with get_connection(db_path) as conn:
+        yield conn

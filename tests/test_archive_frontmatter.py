@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import pytest
 
+from pkb.documents import insert_archive_frontmatter as _insert_archive_frontmatter
+from pkb.documents import strip_archive_frontmatter as _strip_archive_frontmatter
 from pkb.ingest import _diff_metadata, parse_frontmatter, process_file
-from pkb.mcp_server import _insert_archive_frontmatter, _strip_archive_frontmatter
 from pkb.mcp_server import archive_document as _archive_document
 from pkb.mcp_server import restore_document as _restore_document
 from pkb.retrieve import _lifecycle_filter

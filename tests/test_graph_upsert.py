@@ -52,3 +52,40 @@ def test_recompute_mention_counts_reflects_actual_mentions(conn):
     gstore.clear_mentions_for_chunk(conn, "data/rag/x.md", 1)
     gstore.recompute_mention_counts(conn, {cid})
     assert gstore.find_concept_by_slug(conn, "bm25")["mention_count"] == 1
+
+
+def test_upsert_can_disable_embedding_match(conn, monkeypatch):
+    first = gstore.upsert_concept(
+        conn, name="Data Parallelism", description="GPU 요청 분산", embedding=[1.0, 0.0]
+    )
+    monkeypatch.setattr(
+        gstore,
+        "find_concept_by_embedding",
+        lambda *args, **kwargs: (
+            conn.execute(
+                "SELECT * FROM concepts WHERE id = ?", (first,)
+            ).fetchone(),
+            0.99,
+        ),
+    )
+
+    second = gstore.upsert_concept(
+        conn,
+        name="DP",
+        description="동적 계획법",
+        embedding=[1.0, 0.0],
+        match_by_embedding=False,
+    )
+
+    assert second != first
+    assert gstore.find_concept_by_slug(conn, "dp")["name"] == "DP"
+
+
+def test_upsert_can_disable_alias_match(conn):
+    original = gstore.upsert_concept(conn, name="Data Parallelism")
+    gstore.add_alias(conn, original, "DP")
+
+    separate = gstore.upsert_concept(conn, name="DP", match_by_alias=False)
+
+    assert separate != original
+    assert gstore.find_concept_by_slug(conn, "dp")["name"] == "DP"

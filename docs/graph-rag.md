@@ -28,18 +28,18 @@
 | `concepts` | 정규화된 개념 노드 (name, slug, description, embedding, mention_count) |
 | `concept_aliases` | DI → Dependency Injection 같은 별칭 |
 | `documents` | ES `doc_id`와 연결되는 문서 노드 |
-| `concept_edges` | 개념 간 관계 (relation, weight, evidence_count) |
+| `concept_edges` | 개념 간 관계의 집계 투영 (relation, weight, evidence_count) |
+| `concept_edge_evidence` | 관계를 추출한 `doc_id`/`chunk_index`별 근거 |
 | `concept_mentions` | 개념이 등장한 `doc_id`/`chunk_index` |
 | `concept_curation` | 개념 큐레이션(real/vocab) + 증류 산문 |
 | `extracted_chunks` | 추출 완료 마커 `(doc_id, chunk_index)` → `content_hash` |
-| `graph_runs` | 그래프 빌드 실행 기록 |
 
 증분 추출은 `extracted_chunks`가 기준이다. 청크의 현재 `content_hash`가 그 인덱스의 마커와
 다르면(= 내용 변경 또는 다른 인덱스로 이동) pending이 되어 재추출되고, 재추출은 **그 청크의
-멘션을 교체**한다 — 개정된 청크에서 사라진 개념의 멘션은 남지 않는다. `chunk_index`가 NULL인
+멘션과 관계 evidence를 교체**한다 — 개정된 청크에서 사라진 개념·관계는 남지 않는다. `chunk_index`가 NULL인
 행은 해시로만 기록된 구마커로, 해당 청크 내용이 바뀔 때까지만 fallback으로 인정된다.
-엣지 `weight`/`evidence_count`는 청크별 provenance가 없어 재추출 시 누적된다(표시 정렬용,
-정확한 집계가 필요하면 `store.add_edge`의 ponytail 주석 참조).
+엣지 `weight`/`evidence_count`는 `concept_edge_evidence`의 실측 행 수에서 계산하므로 같은 청크를
+재호출해도 부풀지 않는다. 문서 삭제·청크 이동·내용 변경 시 해당 evidence도 함께 정리된다.
 
 스키마 정의는 `src/pkb/graph/schema.py`, CRUD는 `src/pkb/graph/store.py`.
 
@@ -62,8 +62,9 @@ loser 노트는 다음 `sync_concept_notes`에서 orphan으로 정리된다. 주
 비어 있으면 전량 투영으로 폴백. 미투영 개념을 가리키는 관계·산문 링크는 평문으로
 렌더되어 깨진 위키링크가 생기지 않는다.
 
-### 관계 엣지 누적
-- 같은 (src, dst, relation) 조합 재등장 → `weight += 1`, `evidence_count += 1`
+### 관계 엣지 집계
+- 같은 청크의 (src, dst, relation) 재호출 → evidence 멱등 upsert (count 불변)
+- 서로 다른 청크의 같은 관계 → `weight`/`evidence_count`를 evidence 수로 집계
 - 각 언급 청크 → `concept_mentions`에 기록
 
 ---
@@ -95,10 +96,24 @@ SQLite → `data/_concepts/<slug>.md` 노트로 단방향 투영 (결정적·멱
 ## CLI 보조 명령
 
 ```bash
-uv run pkb graph stats        # 개념/엣지/멘션/문서/별칭/run 수 통계
+uv run pkb graph stats        # 개념/엣지/evidence/멘션/문서/별칭 통계
+uv run pkb graph reset-evidence --yes  # 기존 그래프 유지, staging evidence·마커 초기화
+uv run pkb graph rebuild-evidence-local --yes  # Ollama 로컬 모델로 pending 전량 추출
+uv run pkb graph finalize-evidence --yes  # 전량 추출 확인 후 staging 그래프로 원자 전환
 uv run pkb graph sync-notes   # SQLite → data/_concepts/ 노트 동기화
 uv run pkb graph sync-notes --yes   # 대량 정리(21개 이상) 확인 생략
 ```
+
+구버전 append-only 엣지를 evidence 기반으로 전환할 때는 먼저 `reset-evidence --yes`를 한 번
+실행하고, `graph_list_chunks(..., pending_only=True)` → `graph_store_concepts` 루프를 전 청크에
+대해 다시 수행한다. 재구축 중에는 기존 관계·멘션을 계속 서비스하고 새 evidence만 staging에
+쌓는다. pending이 0이 된 뒤 `finalize-evidence --yes`를 실행하면 기존 관계를 evidence 집계로
+한 번에 교체한다. 개념·별칭·큐레이션 산문은 전 과정에서 보존된다.
+
+Ollama에 생성 모델이 설치돼 있으면 `rebuild-evidence-local`이 structured output으로 이 루프를
+자동화한다. 기본 모델은 `gpt-oss:20b`, 기본 배치는 8청크이며 중단해도 마커 기준으로 재개한다.
+진행 로그는 `data/.logs/graph-evidence-rebuild.jsonl`에 기록된다. 샘플 검증에는
+`--max-batches 1`, 전체 실행에는 기본값 `--max-batches 0`을 사용한다.
 
 일괄 API 빌드나 export CLI는 없다 — 구축과 열람 모두 MCP-first(Claude Code 셀프추출 + 노트 파일 읽기) 경로 하나로 통일했다.
 

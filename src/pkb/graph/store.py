@@ -108,6 +108,9 @@ def upsert_concept(
     description: str = "",
     category: str | None = None,
     embedding: list[float] | None = None,
+    *,
+    match_by_alias: bool = True,
+    match_by_embedding: bool = True,
 ) -> int:
     """개념 insert or update. 반환: concept_id.
 
@@ -115,11 +118,16 @@ def upsert_concept(
     mention_count는 여기서 올리지 않는다 — concept_mentions에서 유도(recompute_mention_counts).
     호출마다 +1 하면 같은 청크 재추출이 카운트를 부풀린다.
     """
+    name = name.strip()
     slug = make_slug(name)
+    if not slug:
+        raise ValueError("정규화 후 빈 slug가 되는 개념명은 저장할 수 없습니다.")
     now = _now()
 
     # 1. slug 일치 → 2. alias slug 일치
-    row = find_concept_by_slug(conn, slug) or find_concept_by_alias(conn, slug)
+    row = find_concept_by_slug(conn, slug)
+    if row is None and match_by_alias:
+        row = find_concept_by_alias(conn, slug)
     if row:
         # 빈 description 채움: 설명 없는 기존 개념에 비어있지 않은 새 설명이 오면
         # description·embedding을 함께 채운다 (비어있지 않은 기존 설명은 보존 — 파괴적 덮어쓰기 없음).
@@ -134,8 +142,9 @@ def upsert_concept(
         )
         return row["id"]
 
-    # 3. 임베딩 유사도
-    if embedding:
+    # 3. 임베딩 유사도. 대량 자동 추출에서는 약어·동음어 오병합을 피하려고
+    # 호출자가 끌 수 있다(DP→Data Parallelism 같은 실제 오병합 방지).
+    if embedding and match_by_embedding:
         match = find_concept_by_embedding(conn, embedding)
         if match:
             existing = match[0]
@@ -162,7 +171,10 @@ def upsert_concept(
 
 
 def add_alias(conn: sqlite3.Connection, concept_id: int, alias: str) -> None:
+    alias = alias.strip()
     alias_slug = make_slug(alias)
+    if not alias_slug:
+        return
     with contextlib.suppress(sqlite3.IntegrityError):
         conn.execute(
             "INSERT INTO concept_aliases (concept_id, alias, alias_slug) VALUES (?, ?, ?)",
@@ -209,9 +221,17 @@ def purge_document(conn: sqlite3.Connection, doc_id: str) -> dict:
     재생성됐을 때 pending에서 빠져 멘션이 영구 결손된다.
     반환: {"mentions_pruned": n, "documents_pruned": m}
     """
+    touched = {
+        row["concept_id"]
+        for row in conn.execute(
+            "SELECT DISTINCT concept_id FROM concept_mentions WHERE doc_id = ?", (doc_id,)
+        )
+    }
+    clear_edge_evidence_for_document(conn, doc_id)
     m = conn.execute("DELETE FROM concept_mentions WHERE doc_id = ?", (doc_id,)).rowcount
     d = conn.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,)).rowcount
     conn.execute("DELETE FROM extracted_chunks WHERE doc_id = ?", (doc_id,))
+    recompute_mention_counts(conn, touched)
     return {"mentions_pruned": m, "documents_pruned": d}
 
 
@@ -222,6 +242,9 @@ def prune_missing_documents(conn: sqlite3.Connection, existing_doc_ids: set[str]
     mention을 없앤다. 반환: {"mentions_pruned": n, "documents_pruned": m}
     """
     doc_ids = {r["doc_id"] for r in conn.execute("SELECT DISTINCT doc_id FROM concept_mentions")}
+    doc_ids |= {
+        r["doc_id"] for r in conn.execute("SELECT DISTINCT doc_id FROM concept_edge_evidence")
+    }
     doc_ids |= {r["doc_id"] for r in conn.execute("SELECT doc_id FROM documents")}
     stale = doc_ids - existing_doc_ids
 
@@ -241,20 +264,38 @@ def add_edge(
     dst_id: int,
     relation: str,
     confidence: float | None = None,
+    *,
+    doc_id: str | None = None,
+    chunk_index: int | None = None,
+    materialize: bool | None = None,
 ) -> None:
-    """동일 (src, dst, relation) 재호출 시 weight/evidence_count 누적.
+    """관계를 저장한다.
 
-    confidence: 이산 루브릭 값(0.9/0.7/0.5). 기존 행은 MAX(COALESCE(기존,0), 신규)로
-    누적, 신규가 None이면 기존 값 유지 (NULL=루브릭 도입 전 구데이터).
-
-    ponytail: 엣지는 append-only — 멘션과 달리 청크별 provenance가 없어 같은 청크를
-    재추출하면 weight/evidence_count가 부풀고 되돌릴 수 없다(전량 재빌드만이 리셋).
-    weight는 노트의 관계 정렬에만 쓰여 피해가 표시 수준이라 감수. 정확한 집계가
-    필요해지면 concept_edge_evidence(doc_id, chunk_index, src, dst, relation) 테이블을
-    두고 weight를 COUNT로 유도할 것.
+    doc_id/chunk_index가 있으면 청크별 evidence를 멱등 upsert하고 materialized edge 집계를
+    evidence에서 다시 계산한다. 둘 다 없으면 구데이터·테스트용 append-only 호환 경로다.
     """
     if src_id == dst_id:
         return
+    if (doc_id is None) != (chunk_index is None):
+        raise ValueError("doc_id와 chunk_index는 함께 지정해야 합니다.")
+    if doc_id is not None and chunk_index is not None:
+        conn.execute(
+            "INSERT INTO concept_edge_evidence "
+            "(doc_id, chunk_index, src_id, dst_id, relation, confidence) VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(doc_id, chunk_index, src_id, dst_id, relation) DO UPDATE SET "
+            "confidence = CASE "
+            "WHEN excluded.confidence IS NULL THEN concept_edge_evidence.confidence "
+            "WHEN concept_edge_evidence.confidence IS NULL THEN excluded.confidence "
+            "ELSE MAX(concept_edge_evidence.confidence, excluded.confidence) END",
+            (doc_id, chunk_index, src_id, dst_id, relation, confidence),
+        )
+        if materialize is None:
+            materialize = not edge_evidence_rebuild_active(conn)
+        if materialize:
+            _recompute_edge(conn, src_id, dst_id, relation)
+        return
+
+    # provenance가 없던 기존 호출의 하위호환 경로.
     row = conn.execute(
         "SELECT weight, evidence_count FROM concept_edges "
         "WHERE src_id = ? AND dst_id = ? AND relation = ?",
@@ -274,6 +315,66 @@ def add_edge(
             "VALUES (?, ?, ?, 1.0, 1, ?)",
             (src_id, dst_id, relation, confidence),
         )
+
+
+def _recompute_edge(
+    conn: sqlite3.Connection, src_id: int, dst_id: int, relation: str
+) -> None:
+    """한 materialized edge를 evidence 실측치로 갱신하거나 evidence가 없으면 삭제."""
+    aggregate = conn.execute(
+        "SELECT COUNT(*) AS n, MAX(confidence) AS confidence "
+        "FROM concept_edge_evidence WHERE src_id = ? AND dst_id = ? AND relation = ?",
+        (src_id, dst_id, relation),
+    ).fetchone()
+    count = aggregate["n"]
+    if count == 0:
+        conn.execute(
+            "DELETE FROM concept_edges WHERE src_id = ? AND dst_id = ? AND relation = ?",
+            (src_id, dst_id, relation),
+        )
+        return
+    conn.execute(
+        "INSERT INTO concept_edges (src_id, dst_id, relation, weight, evidence_count, confidence) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(src_id, dst_id, relation) DO UPDATE SET "
+        "weight = excluded.weight, evidence_count = excluded.evidence_count, "
+        "confidence = excluded.confidence",
+        (src_id, dst_id, relation, float(count), count, aggregate["confidence"]),
+    )
+
+
+def clear_edge_evidence_for_chunk(
+    conn: sqlite3.Connection, doc_id: str, chunk_index: int
+) -> int:
+    """청크의 관계 근거를 삭제하고 영향받은 materialized edge를 재계산."""
+    rows = conn.execute(
+        "SELECT src_id, dst_id, relation FROM concept_edge_evidence "
+        "WHERE doc_id = ? AND chunk_index = ?",
+        (doc_id, chunk_index),
+    ).fetchall()
+    conn.execute(
+        "DELETE FROM concept_edge_evidence WHERE doc_id = ? AND chunk_index = ?",
+        (doc_id, chunk_index),
+    )
+    if not edge_evidence_rebuild_active(conn):
+        for row in rows:
+            _recompute_edge(conn, row["src_id"], row["dst_id"], row["relation"])
+    return len(rows)
+
+
+def clear_edge_evidence_for_document(conn: sqlite3.Connection, doc_id: str) -> int:
+    """문서의 관계 근거를 삭제하고 영향받은 materialized edge를 재계산."""
+    rows = conn.execute(
+        "SELECT DISTINCT src_id, dst_id, relation FROM concept_edge_evidence WHERE doc_id = ?",
+        (doc_id,),
+    ).fetchall()
+    count = conn.execute(
+        "DELETE FROM concept_edge_evidence WHERE doc_id = ?", (doc_id,)
+    ).rowcount
+    if not edge_evidence_rebuild_active(conn):
+        for row in rows:
+            _recompute_edge(conn, row["src_id"], row["dst_id"], row["relation"])
+    return count
 
 
 # ---------- Mentions ----------
@@ -366,6 +467,41 @@ def realign_doc_chunks(
         "(concept_id, doc_id, chunk_index, section_path) VALUES (?, ?, ?, ?)",
         [(cid, doc_id, idx, sp) for cid, idx, sp in kept],
     )
+
+    # 관계 evidence도 동일한 청크 이동 규칙을 따른다. materialized edge는 이동 후 실측 재계산.
+    evidence_rows = conn.execute(
+        "SELECT chunk_index, src_id, dst_id, relation, confidence "
+        "FROM concept_edge_evidence WHERE doc_id = ?",
+        (doc_id,),
+    ).fetchall()
+    affected_edges = {
+        (row["src_id"], row["dst_id"], row["relation"]) for row in evidence_rows
+    }
+    conn.execute("DELETE FROM concept_edge_evidence WHERE doc_id = ?", (doc_id,))
+    for row in evidence_rows:
+        if row["chunk_index"] in gone:
+            continue
+        new_index = moved.get(row["chunk_index"], row["chunk_index"])
+        conn.execute(
+            "INSERT INTO concept_edge_evidence "
+            "(doc_id, chunk_index, src_id, dst_id, relation, confidence) VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(doc_id, chunk_index, src_id, dst_id, relation) DO UPDATE SET "
+            "confidence = CASE "
+            "WHEN excluded.confidence IS NULL THEN concept_edge_evidence.confidence "
+            "WHEN concept_edge_evidence.confidence IS NULL THEN excluded.confidence "
+            "ELSE MAX(concept_edge_evidence.confidence, excluded.confidence) END",
+            (
+                doc_id,
+                new_index,
+                row["src_id"],
+                row["dst_id"],
+                row["relation"],
+                row["confidence"],
+            ),
+        )
+    if not edge_evidence_rebuild_active(conn):
+        for src_id, dst_id, relation in affected_edges:
+            _recompute_edge(conn, src_id, dst_id, relation)
 
     # 마커도 전량 재작성 — 제자리 UPDATE는 슬롯이 밀릴 때 서로 덮어쓴다(0→1이 기존 1을 밀어냄)
     gone_hashes = {old_hashes[i] for i in gone}
@@ -562,11 +698,80 @@ def stats(conn: sqlite3.Connection) -> dict:
     return {
         "concepts": conn.execute("SELECT COUNT(*) AS c FROM concepts").fetchone()["c"],
         "edges": conn.execute("SELECT COUNT(*) AS c FROM concept_edges").fetchone()["c"],
+        "edge_evidence": conn.execute(
+            "SELECT COUNT(*) AS c FROM concept_edge_evidence"
+        ).fetchone()["c"],
         "mentions": conn.execute("SELECT COUNT(*) AS c FROM concept_mentions").fetchone()["c"],
         "documents": conn.execute("SELECT COUNT(*) AS c FROM documents").fetchone()["c"],
         "aliases": conn.execute("SELECT COUNT(*) AS c FROM concept_aliases").fetchone()["c"],
-        "runs": conn.execute("SELECT COUNT(*) AS c FROM graph_runs").fetchone()["c"],
     }
+
+
+def edge_evidence_coverage(conn: sqlite3.Connection) -> tuple[int, int]:
+    """(evidence가 있는 materialized edge 수, 전체 edge 수)."""
+    covered = conn.execute(
+        "SELECT COUNT(*) AS c FROM concept_edges e WHERE EXISTS ("
+        "SELECT 1 FROM concept_edge_evidence ev "
+        "WHERE ev.src_id=e.src_id AND ev.dst_id=e.dst_id AND ev.relation=e.relation)"
+    ).fetchone()["c"]
+    total = conn.execute("SELECT COUNT(*) AS c FROM concept_edges").fetchone()["c"]
+    return covered, total
+
+
+def edge_evidence_rebuild_active(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT value FROM graph_meta WHERE key = 'edge_evidence_rebuild'"
+    ).fetchone()
+    return bool(row and row["value"] == "active")
+
+
+def prepare_edge_evidence_rebuild(conn: sqlite3.Connection) -> dict:
+    """기존 그래프를 서비스한 채 staging evidence/마커를 비워 전량 재추출을 준비."""
+    before = {
+        "edges_preserved": conn.execute(
+            "SELECT COUNT(*) AS c FROM concept_edges"
+        ).fetchone()["c"],
+        "edge_evidence": conn.execute(
+            "SELECT COUNT(*) AS c FROM concept_edge_evidence"
+        ).fetchone()["c"],
+        "mentions_preserved": conn.execute(
+            "SELECT COUNT(*) AS c FROM concept_mentions"
+        ).fetchone()["c"],
+        "markers": conn.execute("SELECT COUNT(*) AS c FROM extracted_chunks").fetchone()["c"],
+    }
+    conn.execute("DELETE FROM concept_edge_evidence")
+    conn.execute("DELETE FROM extracted_chunks")
+    conn.execute("DELETE FROM concept_curation WHERE trim(slug) = ''")
+    conn.execute("DELETE FROM concepts WHERE trim(slug) = ''")
+    conn.execute(
+        "INSERT INTO graph_meta (key, value) VALUES ('edge_evidence_rebuild', 'active') "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    )
+    return before
+
+
+def finalize_edge_evidence_rebuild(conn: sqlite3.Connection) -> dict:
+    """staging evidence를 materialized edge로 원자 전환하고 rebuild 상태를 종료."""
+    if not edge_evidence_rebuild_active(conn):
+        raise ValueError("진행 중인 edge evidence 재구축이 없습니다.")
+    before = conn.execute("SELECT COUNT(*) AS c FROM concept_edges").fetchone()["c"]
+    evidence = conn.execute(
+        "SELECT COUNT(*) AS c FROM concept_edge_evidence"
+    ).fetchone()["c"]
+    conn.execute("DELETE FROM concept_edges")
+    conn.execute(
+        "INSERT INTO concept_edges "
+        "(src_id, dst_id, relation, weight, evidence_count, confidence) "
+        "SELECT src_id, dst_id, relation, CAST(COUNT(*) AS REAL), COUNT(*), MAX(confidence) "
+        "FROM concept_edge_evidence GROUP BY src_id, dst_id, relation"
+    )
+    conn.execute(
+        "UPDATE concepts SET mention_count = ("
+        "SELECT COUNT(*) FROM concept_mentions m WHERE m.concept_id = concepts.id)"
+    )
+    conn.execute("DELETE FROM graph_meta WHERE key = 'edge_evidence_rebuild'")
+    after = conn.execute("SELECT COUNT(*) AS c FROM concept_edges").fetchone()["c"]
+    return {"edges_before": before, "edges_after": after, "edge_evidence": evidence}
 
 
 # ---------- Curation ----------
@@ -634,6 +839,7 @@ def merge_concepts(
     result = {
         "merged": 0,
         "edges_repointed": 0,
+        "evidence_repointed": 0,
         "mentions_repointed": 0,
         "aliases_added": 0,
         "skipped": [],
@@ -688,6 +894,52 @@ def merge_concepts(
                     (new_src, new_dst, e["src_id"], e["dst_id"], e["relation"]),
                 )
             result["edges_repointed"] += 1
+
+        # ---- edge evidence re-point ----
+        evidence_rows = conn.execute(
+            "SELECT * FROM concept_edge_evidence WHERE src_id = ? OR dst_id = ?",
+            (loser_id, loser_id),
+        ).fetchall()
+        affected_edges: set[tuple[int, int, str]] = set()
+        for evidence in evidence_rows:
+            conn.execute(
+                "DELETE FROM concept_edge_evidence WHERE doc_id = ? AND chunk_index = ? "
+                "AND src_id = ? AND dst_id = ? AND relation = ?",
+                (
+                    evidence["doc_id"],
+                    evidence["chunk_index"],
+                    evidence["src_id"],
+                    evidence["dst_id"],
+                    evidence["relation"],
+                ),
+            )
+            new_src = winner_id if evidence["src_id"] == loser_id else evidence["src_id"]
+            new_dst = winner_id if evidence["dst_id"] == loser_id else evidence["dst_id"]
+            if new_src == new_dst:
+                result["evidence_repointed"] += 1
+                continue
+            conn.execute(
+                "INSERT INTO concept_edge_evidence "
+                "(doc_id, chunk_index, src_id, dst_id, relation, confidence) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(doc_id, chunk_index, src_id, dst_id, relation) DO UPDATE SET "
+                "confidence = CASE "
+                "WHEN excluded.confidence IS NULL THEN concept_edge_evidence.confidence "
+                "WHEN concept_edge_evidence.confidence IS NULL THEN excluded.confidence "
+                "ELSE MAX(concept_edge_evidence.confidence, excluded.confidence) END",
+                (
+                    evidence["doc_id"],
+                    evidence["chunk_index"],
+                    new_src,
+                    new_dst,
+                    evidence["relation"],
+                    evidence["confidence"],
+                ),
+            )
+            affected_edges.add((new_src, new_dst, evidence["relation"]))
+            result["evidence_repointed"] += 1
+        for src_id, dst_id, relation in affected_edges:
+            _recompute_edge(conn, src_id, dst_id, relation)
 
         # ---- mentions re-point ----
         mention_rows = conn.execute(
@@ -748,31 +1000,3 @@ def merge_concepts(
         result["merged"] += 1
 
     return result
-
-
-# ---------- Runs ----------
-
-def start_run(
-    conn: sqlite3.Connection, scope_category: str = "", scope_doc_id: str = "", model: str = ""
-) -> int:
-    cur = conn.execute(
-        "INSERT INTO graph_runs (started_at, scope_category, scope_doc_id, model, status) "
-        "VALUES (?, ?, ?, ?, 'running')",
-        (_now(), scope_category or None, scope_doc_id or None, model),
-    )
-    return cur.lastrowid
-
-
-def finish_run(
-    conn: sqlite3.Connection,
-    run_id: int,
-    chunks_processed: int,
-    concepts_added: int,
-    edges_added: int,
-    status: str = "success",
-) -> None:
-    conn.execute(
-        "UPDATE graph_runs SET finished_at = ?, chunks_processed = ?, concepts_added = ?, "
-        "edges_added = ?, status = ? WHERE id = ?",
-        (_now(), chunks_processed, concepts_added, edges_added, status, run_id),
-    )

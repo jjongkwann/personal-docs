@@ -4,10 +4,18 @@
 판단·해소는 Claude 세션 몫.
 """
 
+from dataclasses import dataclass
+
 # purge 후보 판정: 아카이브 후 경과일. ES date math에 박히는 리터럴 상수 (설정 아님).
 PURGE_CANDIDATE_DAYS = 30
 
 LAUNCHD_LABEL = "dev.jongkwan.pkb-mcp"
+
+
+@dataclass(frozen=True)
+class HealthReport:
+    text: str
+    ok: bool
 
 
 def _sh(cmd: list[str]) -> str:
@@ -19,7 +27,42 @@ def _sh(cmd: list[str]) -> str:
         return ""
 
 
-def _server_status() -> list[str]:
+def _launchd_restart_warning(info: str, uptime: str) -> bool:
+    """현재 정상 실행 중인 수동 재시작과 짧은 간격의 비정상 재기동을 구분."""
+    fields: dict[str, str] = {}
+    for line in info.splitlines():
+        stripped = line.strip()
+        if " = " in stripped:
+            key, value = stripped.split(" = ", 1)
+            fields.setdefault(key, value)
+
+    runs = fields.get("runs", "")
+    state = fields.get("state", "")
+    last_exit = fields.get("last exit code", "")
+    if not runs.isdigit() or int(runs) < 3:
+        return False
+    if state and state != "running":
+        return True
+
+    # 실행 중이어도 비정상 종료가 짧은 시간 안에 반복됐다면 크래시 루프로 본다.
+    if last_exit in {"", "0", "143"}:  # 143=SIGTERM, launchctl kickstart의 정상 종료
+        return False
+    parts = uptime.strip().split(":")
+    try:
+        if "-" in parts[0]:
+            days, hours = (int(v) for v in parts[0].split("-", 1))
+            seconds = days * 86400 + hours * 3600
+        elif len(parts) == 3:
+            seconds = int(parts[0]) * 3600
+        else:
+            seconds = 0
+        seconds += int(parts[-2]) * 60 + int(parts[-1])
+    except (ValueError, IndexError):
+        return False
+    return seconds < 300
+
+
+def _server_status() -> tuple[list[str], bool]:
     """공유 HTTP MCP 서버의 프로세스 상태.
 
     doctor는 서버 안(MCP 도구)에서도 밖(CLI)에서도 불리므로, 자기 프로세스가 아니라
@@ -39,7 +82,7 @@ def _server_status() -> list[str]:
         if s.connect_ex(("127.0.0.1", port)) != 0:
             lines.append("⚠ LISTEN 안 함 — Claude/Codex/Gemini 모두 pkb 도구를 쓸 수 없다")
             lines.append(f"  → launchctl load ~/Library/LaunchAgents/{LAUNCHD_LABEL}.plist")
-            return lines
+            return lines, False
 
     pid = _sh(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"]).split("\n")[0]
     uptime = _sh(["ps", "-o", "etime=", "-p", pid]) if pid else ""
@@ -62,12 +105,16 @@ def _server_status() -> list[str]:
     info = _sh(["launchctl", "print", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"])
     runs = next((ln.split("=")[1].strip() for ln in info.splitlines() if "runs =" in ln), "")
     if runs:
-        warn = "  ⚠ 재기동 반복 — pkb-mcp.err.log 확인" if runs.isdigit() and int(runs) > 1 else ""
+        warn = (
+            "  ⚠ 재기동 반복 — pkb-mcp.err.log 확인"
+            if _launchd_restart_warning(info, uptime)
+            else ""
+        )
         lines.append(f"launchd: {LAUNCHD_LABEL}  누적 기동 {runs}회{warn}")
     else:
         lines.append(f"launchd: {LAUNCHD_LABEL} 미등록 (수동 기동 중)")
 
-    return lines
+    return lines, True
 
 
 def _doc_id_agg(es, query: dict) -> tuple[int, list[str]]:
@@ -85,13 +132,14 @@ def _doc_id_agg(es, query: dict) -> tuple[int, list[str]]:
     return result["hits"]["total"]["value"], doc_ids
 
 
-def build_health_report(es) -> str:
-    """PKB 시스템 상태 점검 문자열 생성: ES 연결/인덱스/설정 + 개념 그래프 통계."""
+def build_health_report_status(es) -> HealthReport:
+    """PKB 상태 문자열과 필수 구성요소(MCP·ES·인덱스)의 정상 여부를 반환."""
     from pkb.config import settings as _settings
     from pkb.store import count_chunks_without_hash, count_documents
 
     lines = ["=== PKB Doctor ==="]
-    lines.extend(_server_status())
+    server_lines, healthy = _server_status()
+    lines.extend(server_lines)
     lines.append("")
 
     # ES 연결
@@ -100,7 +148,7 @@ def build_health_report(es) -> str:
         lines.append(f"ES: {info['version']['number']} ({_settings.es_host})")
     except Exception as e:
         lines.append(f"ES: 연결 실패 — {e}")
-        return "\n".join(lines)
+        return HealthReport("\n".join(lines), ok=False)
 
     # 인덱스
     try:
@@ -179,8 +227,10 @@ def build_health_report(es) -> str:
                 pass
         else:
             lines.append(f"인덱스 '{_settings.es_index}': 없음. `pkb init` 필요")
+            healthy = False
     except Exception as e:
         lines.append(f"인덱스 조회 실패: {e}")
+        healthy = False
 
     # 설정
     lines.append("\n=== 설정 ===")
@@ -206,22 +256,32 @@ def build_health_report(es) -> str:
         from pathlib import Path
 
         from pkb.graph import store as gstore
-        from pkb.graph.schema import get_connection, init_schema
+        from pkb.graph.schema import graph_connection
 
         db_path = Path(_settings.graph_db_path)
         if not db_path.exists():
             lines.append("그래프 DB 없음 (아직 빌드되지 않음)")
         else:
-            init_schema(_settings.graph_db_path)  # extracted_chunks 등 신규 테이블 백필
-            with get_connection(_settings.graph_db_path) as conn:
+            with graph_connection(_settings.graph_db_path) as conn:
                 s = gstore.stats(conn)
+                evidence_covered, evidence_total = gstore.edge_evidence_coverage(conn)
+                evidence_rebuild_active = gstore.edge_evidence_rebuild_active(conn)
                 orphans = gstore.orphan_concept_slugs(conn)
-                by_idx, legacy = gstore.extracted_markers(conn)
             if not s["concepts"]:
                 lines.append("그래프가 비어 있음 (개념 0개)")
             else:
                 for k, v in s.items():
                     lines.append(f"  {k}: {v}")
+                if evidence_rebuild_active:
+                    lines.append(
+                        "  ⚠ edge evidence staging 재구축 중 — 기존 그래프 서비스 유지, "
+                        "전량 추출 뒤 `pkb graph finalize-evidence --yes` 필요"
+                    )
+                elif evidence_covered < evidence_total:
+                    lines.append(
+                        f"  ⚠ edge evidence coverage: {evidence_covered}/{evidence_total} "
+                        "— `pkb graph reset-evidence --yes` 후 전량 재추출 필요"
+                    )
                 if orphans:
                     from pkb.config import data_dir
                     from pkb.ingest import CONCEPTS_DIR_NAME
@@ -237,31 +297,19 @@ def build_health_report(es) -> str:
             # 그래프 미추출 청크 — ES 청크 전량을 SQLite 추출 마커와 대조 (graph_list_chunks의
             # pending_only와 같은 판정). ES 조회 실패는 조용히 생략.
             try:
-                # search_after로 전량 순회 — size 상한을 쓰면 코퍼스가 그 수를 넘는 순간
-                # 꼬리 청크가 집계에서 빠져 미추출 수가 조용히 과소보고된다
-                total_chunks = 0
-                pending = 0
-                search_after = None
-                while True:
-                    scan = es.search(
-                        index=_settings.es_index,
-                        size=2000,
-                        source_includes=["doc_id", "chunk_index", "content_hash"],
-                        sort=[{"doc_id": "asc"}, {"chunk_index": "asc"}],
-                        **({"search_after": search_after} if search_after else {}),
-                    )
-                    hits = scan["hits"]["hits"]
-                    if not hits:
-                        break
-                    total_chunks += len(hits)
-                    pending += sum(
-                        1 for h in hits if gstore.is_pending(h["_source"], by_idx, legacy)
-                    )
-                    search_after = hits[-1]["sort"]
-                lines.append(f"그래프 미추출 청크: {pending} / {total_chunks}")
+                from pkb.graph.services import scan_pending_chunks
+
+                with graph_connection(_settings.graph_db_path) as conn:
+                    pending, total_chunks = scan_pending_chunks(es, conn)
+                lines.append(f"그래프 미추출 청크: {len(pending)} / {total_chunks}")
             except Exception:
                 pass
     except Exception as e:
         lines.append(f"그래프 통계 조회 실패: {e}")
 
-    return "\n".join(lines)
+    return HealthReport("\n".join(lines), ok=healthy)
+
+
+def build_health_report(es) -> str:
+    """하위호환 문자열 API. 종료코드가 필요한 CLI는 build_health_report_status를 사용."""
+    return build_health_report_status(es).text

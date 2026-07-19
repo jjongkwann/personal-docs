@@ -107,7 +107,7 @@ def test_pending_scan_pages_past_the_page_size(graph_db, monkeypatch):
     단일 size 상한으로 스캔하던 시절, 코퍼스가 상한을 넘자 꼬리 청크가 조용히
     pending에서 빠져 영원히 재추출되지 않았다 (실측 10,123 > 10,000).
     """
-    monkeypatch.setattr("pkb.mcp_server._PENDING_SCAN_PAGE", 2)
+    monkeypatch.setattr("pkb.graph.services.SCAN_PAGE_SIZE", 2)
     es = FakeES(
         [
             {"doc_id": "data/study/x.md", "chunk_index": i, "content_hash": f"h{i}",
@@ -235,6 +235,59 @@ def test_reextraction_replaces_mentions_of_chunk(graph_db, fake_es):
         conn.close()
 
     assert json.loads(graph_list_chunks(category="study", pending_only=True))["pending"] == 0
+
+
+def test_reextraction_replaces_edge_evidence_without_inflation(graph_db, fake_es):
+    """같은 청크 재호출은 멱등이고, 내용 변경 재추출은 과거 관계를 제거한다."""
+    from pkb.graph import store as gstore
+
+    first = {
+        "items": [
+            {
+                "doc_id": "data/study/x.md",
+                "chunk_index": 0,
+                "category": "study",
+                "title": "X",
+                "concepts": [{"name": "BM25"}, {"name": "RRF"}],
+                "relations": [{"src": "BM25", "dst": "RRF", "type": "related_to"}],
+            }
+        ]
+    }
+    graph_store_concepts(json.dumps(first, ensure_ascii=False))
+    graph_store_concepts(json.dumps(first, ensure_ascii=False))
+
+    conn = get_connection(graph_db)
+    bm25 = gstore.find_concept_by_slug(conn, "bm25")
+    assert gstore.list_edges(conn, bm25["id"])[0]["evidence_count"] == 1
+    conn.close()
+
+    fake_es.chunks[0]["content_hash"] = "h0-v2"
+    second = {
+        "items": [
+            {
+                "doc_id": "data/study/x.md",
+                "chunk_index": 0,
+                "category": "study",
+                "title": "X",
+                "concepts": [{"name": "BM25"}, {"name": "Vector Search"}],
+                "relations": [
+                    {"src": "BM25", "dst": "Vector Search", "type": "prerequisite_of"}
+                ],
+            }
+        ]
+    }
+    graph_store_concepts(json.dumps(second, ensure_ascii=False))
+
+    conn = get_connection(graph_db)
+    try:
+        bm25 = gstore.find_concept_by_slug(conn, "bm25")
+        edges = gstore.list_edges(conn, bm25["id"])
+        assert [(edge["relation"], edge["evidence_count"]) for edge in edges] == [
+            ("prerequisite_of", 1)
+        ]
+        assert conn.execute("SELECT COUNT(*) FROM concept_edge_evidence").fetchone()[0] == 1
+    finally:
+        conn.close()
 
 
 def test_partial_recall_preserves_existing_mentions(graph_db, fake_es):

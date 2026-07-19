@@ -55,6 +55,9 @@ ALLOWLIST_CLI_ONLY = {
     "purge-archived",
     "eval",
     "graph stats",
+    "graph reset-evidence",
+    "graph finalize-evidence",
+    "graph rebuild-evidence-local",
     "stale",
     "watch",
 }

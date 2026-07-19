@@ -131,6 +131,7 @@ def hybrid_search(
     include_archived: bool = False,
     exclude_doc_prefix: str | None = None,
     variants: list[str] | None = None,
+    query_vector_out: list[list[float]] | None = None,
 ) -> list[dict]:
     """하이브리드 검색.
 
@@ -142,6 +143,8 @@ def hybrid_search(
         exclude_doc_prefix: 지정하면 해당 doc_id 접두사 문서를 검색에서 제외 (예: "obsidian/")
         variants: 쿼리 변형(최대 3개) — 각 변형으로 검색해 RRF 점수를 _id별 합산 병합
             (RAG-Fusion). 리랭크는 원 query_text 기준 1회만 수행.
+        query_vector_out: 지정하면 원 쿼리 벡터를 1개 append. 그래프 어휘 검색 등 후속
+            단계가 같은 인코딩을 재사용하기 위한 내부 adapter hook.
     """
     timings: dict[str, float] = {}
     t_total = perf_counter()
@@ -155,6 +158,8 @@ def hybrid_search(
 
     t = perf_counter()
     query_vectors = embed(queries)  # 변형 포함 1회 배치 인코딩
+    if query_vector_out is not None:
+        query_vector_out.append(query_vectors[0])
     timings["embed_ms"] = round((perf_counter() - t) * 1000, 2)
 
     fetch_k = candidate_k
@@ -217,7 +222,9 @@ def _attach_neighbors(
     es: Elasticsearch, hits: list[dict], window: int = 1
 ) -> list[dict]:
     """각 hit의 전후 window개 청크를 neighbors 필드로 부착 (동일 doc_id 내).
-    검색 결과를 상위 맥락과 함께 반환할 때 사용."""
+    검색 결과를 상위 맥락과 함께 반환할 때 사용. msearch 한 번으로 전 히트를 조회한다."""
+    searchable: list[tuple[dict, int]] = []
+    searches: list[dict] = []
     for hit in hits:
         doc_id = hit.get("doc_id")
         ci = hit.get("chunk_index")
@@ -227,22 +234,32 @@ def _attach_neighbors(
 
         start = max(0, ci - window)
         end = ci + window
-        result = es.search(
-            index=settings.es_index,
-            query={
-                "bool": {
-                    "must": [
-                        {"term": {"doc_id": doc_id}},
-                        {"range": {"chunk_index": {"gte": start, "lte": end}}},
-                    ]
-                }
+        searchable.append((hit, ci))
+        searches.extend([
+            {},
+            {
+                "query": {
+                    "bool": {
+                        "must": [
+                            {"term": {"doc_id": doc_id}},
+                            {"range": {"chunk_index": {"gte": start, "lte": end}}},
+                        ]
+                    }
+                },
+                "size": window * 2 + 1,
+                "_source": {"excludes": ["embedding"]},
+                "sort": [{"chunk_index": {"order": "asc"}}],
             },
-            size=window * 2 + 1,
-            source_excludes=["embedding"],
-            sort=[{"chunk_index": {"order": "asc"}}],
-        )
+        ])
+
+    if not searches:
+        return hits
+
+    result = es.msearch(index=settings.es_index, searches=searches)
+    responses = result.get("responses", [])
+    for (hit, ci), response in zip(searchable, responses, strict=False):
         neighbors = []
-        for nh in result["hits"]["hits"]:
+        for nh in response.get("hits", {}).get("hits", []):
             src = nh["_source"]
             if src.get("chunk_index") == ci:
                 continue  # 자기 자신 제외
@@ -254,6 +271,8 @@ def _attach_neighbors(
                 }
             )
         hit["neighbors"] = neighbors
+    for hit, _ in searchable[len(responses):]:
+        hit["neighbors"] = []
     return hits
 
 

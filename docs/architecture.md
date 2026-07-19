@@ -25,7 +25,7 @@ PKB는 **두 가지 일**을 합니다.
 [사용자]
   ↓
 [Claude Code]
-  ↓ MCP (stdio)
+  ↓ MCP (Streamable HTTP, 127.0.0.1:8787)
 [PKB MCP 서버]  src/pkb/mcp_server.py  (도구 18개)
   ├─ search_knowledge        → ES 하이브리드 검색
   ├─ write_file / add_document / convert_and_ingest  → data/ 작성·인제스트
@@ -194,8 +194,9 @@ Docker 컨테이너 `pkb-es`로 실행되며, 기본 인덱스는 `pkb_documents
 
 Graph RAG는 검색을 대체하지 않고 개념 간 관계 질의를 보완합니다. 저장 위치는
 `data/.graph/pkb_graph.sqlite`(`GRAPH_DB_PATH`)이며, 주요 테이블은 `concepts`,
-`concept_aliases`, `documents`, `concept_edges`, `concept_mentions`, `concept_curation`,
-`graph_runs`입니다.
+`concept_aliases`, `documents`, `concept_edges`, `concept_edge_evidence`, `concept_mentions`,
+`concept_curation`, `graph_meta`입니다. `concept_edges`의 weight/evidence_count는 청크별
+`concept_edge_evidence`에서 집계되어 재추출·문서 삭제에도 정확히 정리됩니다.
 
 빌드 파이프라인(전량 Claude Code 셀프추출, API 호출 없음):
 
@@ -212,11 +213,11 @@ Graph RAG는 검색을 대체하지 않고 개념 간 관계 질의를 보완합
 
 ## 4. MCP 서버
 
-`src/pkb/mcp_server.py`가 PKB의 기본 인터페이스입니다. 전송(transport)은 `stdio`이며, 로컬
-Claude Code가 `python -m pkb.mcp_server`를 직접 기동합니다.
+`src/pkb/mcp_server.py`가 PKB의 기본 인터페이스입니다. 전송은 Streamable HTTP이며,
+launchd로 상시 기동한 단일 서버를 Claude Code·Codex·Gemini가 공유합니다.
 
 ```
-Claude Code → MCP stdio → mcp_server.py → ES / data / SQLite
+Claude Code / Codex / Gemini → HTTP :8787/mcp → mcp_server.py → ES / data / SQLite
 ```
 
 제공 도구 18개:
@@ -244,11 +245,14 @@ MCP 서버가 지키는 경계:
 
 `src/pkb/cli.py`는 운영과 검증에 사용합니다: `init`, `reindex`, `sync`, `convert`, `add`,
 `write`, `show`, `reindex-doc`, `list`, `query`, `delete`, `archive`, `restore`, `doctor`,
-`eval`, `purge-archived`, `stale`, `watch`, `graph stats`, `graph sync-notes`.
+`eval`, `purge-archived`, `stale`, `watch`, `graph stats`, `graph reset-evidence`,
+`graph rebuild-evidence-local`, `graph finalize-evidence`, `graph sync-notes`.
 
 대부분의 능력은 CLI와 MCP 양쪽에 있습니다(`sync` ↔ `sync_corpus`, `show` ↔ `get_document` 등).
-CLI 전용: `init`, `reindex`, `delete`, `purge-archived`, `eval`, `graph stats`(비가역/무거운
-작업이거나 `doctor`가 이미 커버), `stale`, `watch`(훅·데몬용). MCP 전용: `graph_list_concepts`,
+CLI 전용: `init`, `reindex`, `delete`, `purge-archived`, `eval`, `graph stats`,
+`graph reset-evidence`, `graph rebuild-evidence-local`, `graph finalize-evidence`
+(무거운 evidence 마이그레이션), `stale`,
+`watch`(훅·데몬용). MCP 전용: `graph_list_concepts`,
 `graph_list_chunks`, `graph_store_concepts`, `graph_curate`, `graph_merge`(Claude 셀프추출
 루프), `sync_obsidian`(볼트 전용 재조정). 이 매핑은 `tests/test_cli_mcp_parity.py`가 가드합니다.
 

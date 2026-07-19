@@ -91,7 +91,32 @@ gemini mcp add pkb http://127.0.0.1:8787/mcp -t http -s user
 Gemini는 **신뢰하지 않는 폴더에서 MCP를 억제합니다** — user 스코프 서버까지 막힙니다.
 `~/.gemini/trustedFolders.json`에 작업 폴더가 없으면 `Disabled`로 뜹니다.
 
-포트를 바꾸려면 `.env`의 `MCP_PORT`를 고치고 위 URL도 같이 바꾸세요.
+### Claude Desktop (브리지 필요)
+
+Claude Desktop만 HTTP를 직접 못 붙습니다. `claude_desktop_config.json`의 `mcpServers`는 **stdio 전용**이고,
+설정 > 커넥터의 커스텀 커넥터는 Anthropic 클라우드에서 서버로 접속하는 구조라 localhost에 도달하지 못합니다
+(평문 `http://`는 localhost라도 거부).
+
+> ⚠️ `claude_desktop_config.json`에 `"url"` 필드를 넣지 마세요. Desktop이 `mcpServers` 섹션 전체를
+> **에러 없이 조용히 날려버립니다.**
+
+그래서 stdio↔HTTP 브리지(`mcp-remote`)를 끼웁니다. `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "pkb": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://127.0.0.1:8787/mcp", "--allow-http"]
+    }
+  }
+}
+```
+
+브리지는 가벼운 Node 프로세스라 모델을 들지 않습니다 — 무거운 4GB는 공유 HTTP 서버 한 벌뿐입니다.
+설정 후 Desktop을 재시작하세요.
+
+포트를 바꾸려면 `.env`의 `MCP_PORT`를 고치고 위 URL들도 같이 바꾸세요.
 
 ## 3. 확인
 

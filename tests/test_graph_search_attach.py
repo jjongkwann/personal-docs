@@ -1,6 +1,6 @@
 """검색 결과 개념 부착(mentions_for_chunks/top_concepts_by_embedding + search_knowledge) 테스트.
 
-헬퍼는 in-memory SQLite로, 도구 레벨은 hybrid_search/embed monkeypatch로 ES 없이 검증.
+헬퍼는 in-memory SQLite로, 도구 레벨은 embed/_rrf_search monkeypatch로 ES 없이 검증.
 """
 
 from __future__ import annotations
@@ -105,35 +105,47 @@ def _seed_bm25(db_path: str) -> None:
     c.close()
 
 
-def _stub_search(monkeypatch, hits: list[dict]) -> None:
+def _stub_search(monkeypatch) -> list[list[str]]:
+    embed_calls: list[list[str]] = []
     monkeypatch.setattr("pkb.store.get_client", lambda: object())
-    monkeypatch.setattr("pkb.embeddings.embed", lambda texts: [[1.0, 0.0] for _ in texts])
-    monkeypatch.setattr("pkb.retrieve.hybrid_search", lambda *a, **k: hits)
+    monkeypatch.setattr("pkb.config.settings.rerank_enabled", False)
+    monkeypatch.setattr(
+        "pkb.retrieve.embed",
+        lambda texts: embed_calls.append(list(texts)) or [[1.0, 0.0] for _ in texts],
+    )
+    return embed_calls
 
 
 def test_search_knowledge_attaches_concepts_and_vocab(graph_db, monkeypatch):
     _seed_bm25(graph_db)
-    _stub_search(monkeypatch, [
-        {
-            "doc_id": "data/study/x.md",
-            "chunk_index": 0,
-            "source_path": "study/x.md",
-            "category": "study",
-            "title": "X",
-            "section_path": "",
-            "content": "본문",
-            "score": 0.5,
-        }
-    ])
+    embed_calls = _stub_search(monkeypatch)
+    monkeypatch.setattr(
+        "pkb.retrieve._rrf_search",
+        lambda *a, **k: [
+            {
+                "_id": "data/study/x.md_0",
+                "doc_id": "data/study/x.md",
+                "chunk_index": 0,
+                "source_path": "study/x.md",
+                "category": "study",
+                "title": "X",
+                "section_path": "",
+                "content": "본문",
+                "score": 0.5,
+            }
+        ],
+    )
 
     result = search_knowledge("bm25란?")
     assert result.startswith("코퍼스 개념 어휘: BM25(Best Match 25)")
     assert "관련 개념: [BM25](data/_concepts/bm25.md)" in result
+    assert embed_calls == [["bm25란?"]]  # 하이브리드 검색과 그래프 어휘가 한 벡터 공유
 
 
 def test_search_knowledge_vocab_attached_even_without_results(graph_db, monkeypatch):
     _seed_bm25(graph_db)
-    _stub_search(monkeypatch, [])
+    _stub_search(monkeypatch)
+    monkeypatch.setattr("pkb.retrieve._rrf_search", lambda *a, **k: [])
 
     result = search_knowledge("bm25란?")
     assert result.startswith("코퍼스 개념 어휘: BM25(Best Match 25)")

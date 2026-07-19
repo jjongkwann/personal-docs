@@ -13,6 +13,7 @@ dependencies = [
     "pydantic-settings>=2.0",
     "mcp>=1.0",
     "markitdown[pdf,docx,pptx,xlsx]>=0.1",
+    "pdfminer-six>=20231228",
 ]
 
 [project.scripts]
@@ -40,3 +41,8 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "A", "SIM"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/pkb/cli.py" = ["B008", "A001"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: 실제 로컬 Elasticsearch가 필요하며 PKB_ES_INTEGRATION=1일 때만 실행",
+]

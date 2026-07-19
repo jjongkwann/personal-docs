@@ -1,5 +1,6 @@
 import contextlib
 from datetime import UTC, datetime
+from functools import lru_cache
 
 from elasticsearch import Elasticsearch, NotFoundError
 
@@ -50,9 +51,18 @@ INDEX_SETTINGS = {
     },
 }
 
+_SEARCH_PAGE_SIZE = 1000
+_AGG_PAGE_SIZE = 1000
+
+
+@lru_cache(maxsize=4)
+def _client_for_host(host: str) -> Elasticsearch:
+    """프로세스 수명 동안 transport/connection pool을 재사용."""
+    return Elasticsearch(host)
+
 
 def get_client() -> Elasticsearch:
-    return Elasticsearch(settings.es_host)
+    return _client_for_host(settings.es_host)
 
 
 def create_index(es: Elasticsearch) -> None:
@@ -85,16 +95,30 @@ def get_existing_chunks(es: Elasticsearch, doc_id: str) -> dict[int, dict]:
     """{chunk_index: source dict (excluding embedding+content)} 반환.
     빈 dict면 신규 문서 또는 인덱스 미존재.
     """
+    chunks: dict[int, dict] = {}
+    search_after: list | None = None
     try:
-        res = es.search(
-            index=settings.es_index,
-            query={"term": {"doc_id": doc_id}},
-            size=10000,
-            source_excludes=["embedding", "content"],
-        )
+        while True:
+            kwargs = {
+                "index": settings.es_index,
+                "query": {"term": {"doc_id": doc_id}},
+                "size": _SEARCH_PAGE_SIZE,
+                "source_excludes": ["embedding", "content"],
+                "sort": [{"chunk_index": "asc"}],
+            }
+            if search_after is not None:
+                kwargs["search_after"] = search_after
+            res = es.search(**kwargs)
+            hits = res["hits"]["hits"]
+            for hit in hits:
+                source = hit["_source"]
+                chunks[source["chunk_index"]] = source
+            if len(hits) < _SEARCH_PAGE_SIZE or not hits or "sort" not in hits[-1]:
+                break
+            search_after = hits[-1]["sort"]
     except NotFoundError:
         return {}
-    return {h["_source"]["chunk_index"]: h["_source"] for h in res["hits"]["hits"]}
+    return chunks
 
 
 def get_chunk_embeddings(
@@ -197,18 +221,48 @@ def list_doc_ids(es: Elasticsearch, prefix: str) -> set[str]:
 
     archived 문서는 제외 — 아카이브는 의도된 보존이므로 reconcile prune 대상이 아님.
     """
-    result = es.search(
-        index=settings.es_index,
-        query={
-            "bool": {
-                "must": [{"prefix": {"doc_id": prefix}}],
-                "must_not": [{"exists": {"field": "archived_at"}}],
-            }
-        },
-        aggs={"ids": {"terms": {"field": "doc_id", "size": 10000}}},
-        size=0,
-    )
-    return {b["key"] for b in result["aggregations"]["ids"]["buckets"]}
+    query = {
+        "bool": {
+            "must": [{"prefix": {"doc_id": prefix}}],
+            "must_not": [{"exists": {"field": "archived_at"}}],
+        }
+    }
+    return {
+        bucket["key"]["doc_id"]
+        for bucket in _composite_buckets(es, "ids", query=query)
+    }
+
+
+def _composite_buckets(
+    es: Elasticsearch,
+    name: str,
+    *,
+    query: dict,
+    sub_aggs: dict | None = None,
+):
+    """doc_id composite aggregation을 after_key로 끝까지 순회."""
+    after: dict | None = None
+    while True:
+        composite: dict = {
+            "size": _AGG_PAGE_SIZE,
+            "sources": [{"doc_id": {"terms": {"field": "doc_id"}}}],
+        }
+        if after is not None:
+            composite["after"] = after
+        aggregation: dict = {"composite": composite}
+        if sub_aggs:
+            aggregation["aggs"] = sub_aggs
+        result = es.search(
+            index=settings.es_index,
+            query=query,
+            aggs={name: aggregation},
+            size=0,
+        )
+        page = result["aggregations"][name]
+        yield from page["buckets"]
+        after = page.get("after_key")
+        if not after:
+            break
 
 
 def archive_document(
@@ -286,36 +340,25 @@ def list_documents(
     else:
         query = {"match_all": {}}
 
-    result = es.search(
-        index=settings.es_index,
-        query=query,
-        aggs={
-            "docs": {
-                "terms": {"field": "doc_id", "size": 10000},
-                "aggs": {
-                    "meta": {
-                        "top_hits": {
-                            "size": 1,
-                            "_source": [
-                                "doc_id",
-                                "source_path",
-                                "category",
-                                "title",
-                                "tags",
-                                "date_modified",
-                                "expires_at",
-                            ],
-                        }
-                    },
-                    "chunk_count": {"value_count": {"field": "chunk_index"}},
-                },
+    docs = []
+    sub_aggs = {
+        "meta": {
+            "top_hits": {
+                "size": 1,
+                "_source": [
+                    "doc_id",
+                    "source_path",
+                    "category",
+                    "title",
+                    "tags",
+                    "date_modified",
+                    "expires_at",
+                ],
             }
         },
-        size=0,
-    )
-
-    docs = []
-    for bucket in result["aggregations"]["docs"]["buckets"]:
+        "chunk_count": {"value_count": {"field": "chunk_index"}},
+    }
+    for bucket in _composite_buckets(es, "docs", query=query, sub_aggs=sub_aggs):
         hit = bucket["meta"]["hits"]["hits"][0]["_source"]
         hit["chunks"] = bucket["chunk_count"]["value"]
         docs.append(hit)

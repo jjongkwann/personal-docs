@@ -162,11 +162,21 @@ Claude Code `SessionStart` 훅으로 등록하면 세션 시작 시 sync 필요 
 
 ## Graph RAG 운영 CLI
 
-개념 그래프 구축은 Claude Code가 MCP의 `graph_list_chunks`/`graph_store_concepts`로 직접 추출·저장합니다(API 호출 없음). CLI는 통계 조회와 노트 동기화만 제공합니다.
+개념 그래프 구축은 Claude Code가 MCP의 `graph_list_chunks`/`graph_store_concepts`로 직접 추출·저장합니다(API 호출 없음). CLI는 통계·evidence 재구축 준비·노트 동기화를 제공합니다.
 
 ```bash
 # 현재 그래프 통계
 uv run pkb graph stats
+
+# 구 append-only 관계를 evidence 기반으로 전량 재구축할 때만 실행
+# 기존 그래프는 유지하고 staging evidence·추출 마커만 초기화
+uv run pkb graph reset-evidence --yes
+
+# 선택: 설치된 Ollama 모델로 pending 전량 자동 추출 (중단 후 재실행 가능)
+uv run pkb graph rebuild-evidence-local --yes
+
+# 수동 graph_list_chunks → graph_store_concepts 전량 처리 후 pending=0일 때 원자 전환
+uv run pkb graph finalize-evidence --yes
 
 # SQLite 개념그래프를 data/_concepts/<slug>.md 노트로 동기화
 uv run pkb graph sync-notes
@@ -285,7 +295,7 @@ uv run pkb purge-archived --before 2024-01-01
 ```
 
 MCP 도구로도 가능:
-- `archive_document(doc_id, reason="")` — Claude Code 대화에서 *"이 문서 아카이브해줘"*. `data/` 하위 `.md` 원본은 frontmatter에 `archived_at`을 기록 후 재인제스트해 reindex에도 상태가 유지됩니다 (CLI `archive`는 ES에만 기록)
+- `archive_document(doc_id, reason="")` — Claude Code 대화에서 *"이 문서 아카이브해줘"*. `data/` 하위 `.md` 원본은 frontmatter에 `archived_at`을 기록 후 재인제스트해 reindex에도 상태가 유지됩니다. CLI `archive`도 같은 코어 경로를 사용합니다.
 - `restore_document(doc_id)` — 복구 (frontmatter 기록이 있으면 제거)
 
 ### 3. 필터 오버라이드 — 아카이브도 보기

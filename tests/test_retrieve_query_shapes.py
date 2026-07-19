@@ -167,3 +167,11 @@ def test_hybrid_search_no_variants_single_query(monkeypatch):
     results = hybrid_search(None, "q", log=False)
     assert calls["queries"] == ["q"]
     assert [r["_id"] for r in results] == ["a"]
+
+
+def test_hybrid_search_exposes_original_query_vector_without_reencoding(monkeypatch):
+    calls = _patch_fusion(monkeypatch, {})
+    captured = []
+    hybrid_search(None, "q", variants=["v1"], log=False, query_vector_out=captured)
+    assert calls["embed"] == [["q", "v1"]]
+    assert captured == [[0.0] * 4]

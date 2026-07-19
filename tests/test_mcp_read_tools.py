@@ -7,11 +7,14 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from pkb.mcp_server import _parse_chunk_range, _render_document
+from pkb.documents import parse_chunk_range as _parse_chunk_range
+from pkb.documents import render_document as _render_document
 from pkb.mcp_server import get_document as _get_document
+from pkb.mcp_server import list_documents as _list_documents
 
 # FastMCP @mcp.tool() 데코레이터 호환: 함수가 래핑돼 있으면 .fn 속성으로 접근.
 get_document = getattr(_get_document, "fn", _get_document)
+list_documents = getattr(_list_documents, "fn", _list_documents)
 
 # ---------- _parse_chunk_range ----------
 
@@ -113,3 +116,13 @@ def test_get_document_not_found(monkeypatch):
 
     result = get_document("data/study/missing.md")
     assert "찾을 수 없습니다" in result
+
+
+def test_tool_guard_converts_unexpected_es_error(monkeypatch):
+    monkeypatch.setattr(
+        "pkb.store.get_client", lambda: (_ for _ in ()).throw(ConnectionError("down"))
+    )
+
+    result = list_documents()
+
+    assert result == "오류: ConnectionError: down"

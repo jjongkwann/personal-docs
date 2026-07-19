@@ -100,10 +100,10 @@ def sync(
 
     설정이 곧 기대 상태: OBSIDIAN_PATH를 제거했다면 잔존 obsidian/* 문서를 정리한다.
     """
-    from pkb.ingest import format_delta_stats, reconcile
+    from pkb.ingest import format_delta_stats
+    from pkb.operations import graph_prune_summary, prune_documents, sync_tree
     from pkb.store import (
         PRUNE_CONFIRM_THRESHOLD,
-        delete_document,
         get_client,
         list_doc_ids,
     )
@@ -122,17 +122,18 @@ def sync(
             if not typer.confirm(f"   {len(stale)}개 삭제하시겠습니까?"):
                 typer.echo("   삭제 보류.")
                 return
-        for doc_id in stale:
-            delete_document(es, doc_id)
+        prune_documents(es, stale)
         typer.echo(f"   정리: 원본에 없는 문서 {len(stale)}개 삭제")
 
     # 1) data 코퍼스
     root = data_dir()
     if root.is_dir():
-        stats, stale = reconcile(es, root, "data/")
-        typer.echo(f"1. data 코퍼스 동기화: {stats['files']}개 파일 ({root})")
-        typer.echo(f"   → {format_delta_stats(stats)}")
-        prune(stale)
+        outcome = sync_tree(es, root, "data/")
+        typer.echo(
+            f"1. data 코퍼스 동기화: {outcome.stats['files']}개 파일 ({outcome.root})"
+        )
+        typer.echo(f"   → {format_delta_stats(outcome.stats)}")
+        prune(list(outcome.stale))
     else:
         # 루트 소실은 연동 해제가 아니라 설정 오류일 가능성이 높다 → 정리하지 않음
         typer.echo(f"1. data 코퍼스 루트 없음 — 건너뜀 (정리 안 함): {root}")
@@ -141,21 +142,19 @@ def sync(
     if settings.obsidian_path:
         vault = Path(settings.obsidian_path).expanduser().resolve()
         if vault.is_dir():
-            stats, stale = reconcile(
-                es, vault, "obsidian/", exclude=root
+            outcome = sync_tree(es, vault, "obsidian/", exclude=root)
+            typer.echo(
+                f"2. Obsidian 동기화: {outcome.stats['files']}개 파일 ({outcome.root})"
             )
-            typer.echo(f"2. Obsidian 동기화: {stats['files']}개 파일 ({vault})")
-            typer.echo(f"   → {format_delta_stats(stats)}")
-            prune(stale)
+            typer.echo(f"   → {format_delta_stats(outcome.stats)}")
+            prune(list(outcome.stale))
         else:
             typer.echo(f"2. OBSIDIAN_PATH 디렉터리 없음 — 건너뜀 (정리 안 함): {vault}")
     else:
         typer.echo("2. Obsidian 연동 꺼짐 (OBSIDIAN_PATH 미설정)")
         prune(sorted(list_doc_ids(es, "obsidian/")))
 
-    from pkb.mcp_server import _graph_prune_summary
-
-    graph_summary = _graph_prune_summary(es)
+    graph_summary = graph_prune_summary(es)
     if graph_summary:
         typer.echo(graph_summary)
 
@@ -173,48 +172,30 @@ def convert(
     ingest: bool = typer.Option(True, help="변환 후 자동 인제스트"),
 ):
     """PDF/DOCX/PPTX/XLSX/HTML을 마크다운으로 변환하여 data/에 저장."""
-    from pkb.ingest import SUPPORTED_EXTENSIONS, conversion_frontmatter, read_file_as_text
-
-    input_path = input_path.resolve()
-    if not input_path.exists():
-        typer.echo(f"파일을 찾을 수 없습니다: {input_path}")
-        raise typer.Exit(1)
-    if input_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-        typer.echo(f"지원하지 않는 형식입니다: {input_path.suffix}")
-        raise typer.Exit(1)
-
-    try:
-        text = read_file_as_text(input_path)
-    except Exception as e:
-        typer.echo(f"변환 실패: {input_path} — {e}")
-        raise typer.Exit(1) from e
-    if not text.strip():
-        typer.echo(f"텍스트를 추출할 수 없습니다 (스캔 PDF 등 — 직접 전사 필요): {input_path}")
-        raise typer.Exit(1)
-
-    # 출력 경로 결정
-    data_root = data_dir()
-    output = (
-        data_root / category / f"{input_path.stem}.md"
-        if output is None
-        else output.resolve()
+    from pkb.ingest import format_delta_stats
+    from pkb.operations import (
+        OperationError,
+        TranscriptionRequiredError,
+        convert_and_ingest,
     )
 
-    # data 코퍼스 하위인지 검증
-    if not output.is_relative_to(data_root):
-        typer.echo(f"출력 경로는 data 코퍼스({data_root}) 하위여야 합니다: {output}")
-        raise typer.Exit(1)
+    try:
+        outcome = convert_and_ingest(
+            input_path,
+            category=category,
+            output=output,
+            ingest=ingest,
+        )
+    except TranscriptionRequiredError as exc:
+        typer.echo(f"{exc} — 직접 전사 필요")
+        raise typer.Exit(1) from exc
+    except OperationError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    # 원본 파일 정보를 provenance frontmatter로 추가
-    output.write_text(conversion_frontmatter(input_path) + text, encoding="utf-8")
-    typer.echo(f"변환 완료: {output} ({len(text)}자)")
-
-    if ingest:
-        from pkb.ingest import format_delta_stats, ingest_files
-
-        stats = ingest_files([output], base_dir=data_root, doc_id_prefix="data/")
-        typer.echo(f"인제스트 완료: {format_delta_stats(stats)}")
+    typer.echo(f"변환 완료: {outcome.output_path} ({outcome.chars}자)")
+    if outcome.stats is not None:
+        typer.echo(f"인제스트 완료: {format_delta_stats(outcome.stats)}")
 
 
 @app.command()
@@ -260,28 +241,21 @@ def write(
     ingest: bool = typer.Option(True, help="저장 후 자동 인제스트"),
 ):
     """파일을 작성하고 ES에 인제스트. mcp write_file과 동일 동작(data/ 하위 .md만)."""
-    from pkb.mcp_server import _resolve_data_path
+    from pkb.ingest import format_delta_stats
+    from pkb.operations import OperationError, write_and_ingest
 
     if content is None:
         content = sys.stdin.read()
 
-    full_path = _resolve_data_path(file_path)
-    if full_path is None:
-        typer.echo(f"오류: data/ 하위 경로에만 파일을 작성할 수 있습니다. (입력: {file_path})")
-        raise typer.Exit(1)
-    if full_path.suffix != ".md":
-        typer.echo(f"오류: 마크다운(.md) 파일만 작성 가능합니다. (입력: {file_path})")
-        raise typer.Exit(1)
+    try:
+        outcome = write_and_ingest(file_path, content, ingest=ingest)
+    except OperationError as exc:
+        typer.echo(f"오류: {exc}")
+        raise typer.Exit(1) from exc
 
-    full_path.parent.mkdir(parents=True, exist_ok=True)
-    full_path.write_text(content, encoding="utf-8")
-    typer.echo(f"파일 저장 완료: {file_path} ({len(content)}자)")
-
-    if ingest:
-        from pkb.ingest import format_delta_stats, ingest_files
-
-        stats = ingest_files([full_path], base_dir=data_dir(), doc_id_prefix="data/")
-        typer.echo(f"인제스트: {format_delta_stats(stats)}")
+    typer.echo(f"파일 저장 완료: {file_path} ({outcome.chars}자)")
+    if outcome.stats is not None:
+        typer.echo(f"인제스트: {format_delta_stats(outcome.stats)}")
 
 
 @app.command()
@@ -293,24 +267,16 @@ def show(
     chunks: str = typer.Option("", "--chunks", help='특정 청크만 조회 (예: "3-7")'),
 ):
     """문서 조회 (기본: 메타+목차, section_path 포함). mcp get_document과 동일."""
-    from pkb.mcp_server import _render_document
+    from pkb.documents import fetch_document_sources, render_document
     from pkb.store import get_client
 
     es = get_client()
-    result = es.search(
-        index=settings.es_index,
-        query={"term": {"doc_id": doc_id}},
-        size=500,
-        source_excludes=["embedding"],
-        sort=[{"chunk_index": {"order": "asc"}}],
-    )
-    hits = result["hits"]["hits"]
-    if not hits:
+    sources = fetch_document_sources(es, doc_id)
+    if not sources:
         typer.echo(f"문서를 찾을 수 없습니다: {doc_id}")
         raise typer.Exit(1)
 
-    sources = [h["_source"] for h in hits]
-    typer.echo(_render_document(doc_id, sources, content, chunks))
+    typer.echo(render_document(doc_id, sources, content, chunks))
 
 
 @app.command("reindex-doc")
@@ -321,34 +287,21 @@ def reindex_doc(
 
     doc_id가 "obsidian/..."으로 시작하면 OBSIDIAN_PATH 하위 파일로 처리.
     """
+    from pkb.documents import DocumentPathError, resolve_reindex_target
     from pkb.ingest import format_delta_stats, ingest_files
-    from pkb.mcp_server import _resolve_data_path
 
-    if doc_id.startswith("obsidian/"):
-        if not settings.obsidian_path:
-            typer.echo("오류: OBSIDIAN_PATH가 설정되지 않았습니다.")
-            raise typer.Exit(1)
-        vault = Path(settings.obsidian_path).expanduser().resolve()
-        rel = doc_id[len("obsidian/"):]
-        file_path = (vault / rel).resolve()
-        base_dir = vault
-        prefix = "obsidian/"
-        cat = None
-    else:
-        base_dir = data_dir()
-        file_path = _resolve_data_path(doc_id)
-        if file_path is None:
-            typer.echo(f"오류: 알 수 없는 doc_id 형식입니다 (data/ 또는 obsidian/ 접두사 필요): {doc_id}")
-            raise typer.Exit(1)
-        prefix = "data/"
-        cat = None
+    try:
+        target = resolve_reindex_target(doc_id)
+    except DocumentPathError as e:
+        typer.echo(f"오류: {e}")
+        raise typer.Exit(1) from e
 
-    if not file_path.exists():
-        typer.echo(f"원본 파일을 찾을 수 없습니다: {file_path}")
+    if not target.file_path.exists():
+        typer.echo(f"원본 파일을 찾을 수 없습니다: {target.file_path}")
         raise typer.Exit(1)
 
     stats = ingest_files(
-        [file_path], base_dir=base_dir, doc_id_prefix=prefix, category_override=cat
+        [target.file_path], base_dir=target.base_dir, doc_id_prefix=target.doc_id_prefix
     )
     typer.echo(f"재인제스트 완료: {doc_id} — {format_delta_stats(stats)}")
 
@@ -429,10 +382,9 @@ def _graph_purge(doc_id: str) -> dict | None:
     if not Path(settings.graph_db_path).exists():
         return None
     from pkb.graph import store as gstore
-    from pkb.graph.schema import get_connection, init_schema
+    from pkb.graph.schema import graph_connection
 
-    init_schema(settings.graph_db_path)
-    with get_connection(settings.graph_db_path) as conn:
+    with graph_connection(settings.graph_db_path) as conn:
         return gstore.purge_document(conn, doc_id)
 
 
@@ -461,17 +413,16 @@ def archive(
     reason: str = typer.Option("", help="아카이브 사유 (선택)"),
 ):
     """문서를 soft delete(검색에서 제외, 복구 가능)로 아카이브."""
-    from pkb.store import archive_document, get_client
+    from pkb.documents import archive_document
 
-    es = get_client()
-    n = archive_document(es, doc_id, reason=reason or None)
-    if n == 0:
-        typer.echo(f"아카이브 대상 없음 (doc_id={doc_id})")
+    try:
+        result = archive_document(doc_id, reason)
+    except Exception as e:
+        typer.echo(f"오류: {type(e).__name__}: {e}")
+        raise typer.Exit(1) from e
+    typer.echo(result.message)
+    if not result.found:
         raise typer.Exit(1)
-    msg = f"아카이브 완료: '{doc_id}' ({n}개 청크)"
-    if reason:
-        msg += f" | 사유: {reason}"
-    typer.echo(msg)
 
 
 @app.command()
@@ -479,23 +430,28 @@ def restore(
     doc_id: str = typer.Argument(..., help="복구할 문서 ID"),
 ):
     """아카이브된 문서를 복구해 검색에 다시 노출."""
-    from pkb.store import get_client, restore_document
+    from pkb.documents import restore_document
 
-    es = get_client()
-    n = restore_document(es, doc_id)
-    if n == 0:
-        typer.echo(f"복구할 아카이브 없음 (doc_id={doc_id})")
+    try:
+        result = restore_document(doc_id)
+    except Exception as e:
+        typer.echo(f"오류: {type(e).__name__}: {e}")
+        raise typer.Exit(1) from e
+    typer.echo(result.message)
+    if not result.found:
         raise typer.Exit(1)
-    typer.echo(f"복구 완료: '{doc_id}' ({n}개 청크)")
 
 
 @app.command()
 def doctor():
     """PKB 시스템 상태 점검. ES 연결, 인덱스, 문서 수, 설정, 개념 그래프 통계 확인."""
-    from pkb.report import build_health_report
+    from pkb.report import build_health_report_status
     from pkb.store import get_client
 
-    typer.echo(build_health_report(get_client()))
+    report = build_health_report_status(get_client())
+    typer.echo(report.text)
+    if not report.ok:
+        raise typer.Exit(1)
 
 
 @app.command("eval")
@@ -702,14 +658,112 @@ app.add_typer(graph_app, name="graph")
 def graph_stats():
     """그래프 통계 출력."""
     from pkb.graph import store as gstore
-    from pkb.graph.schema import get_connection, init_schema
+    from pkb.graph.schema import graph_connection
 
-    init_schema(settings.graph_db_path)
-    with get_connection(settings.graph_db_path) as conn:
+    with graph_connection(settings.graph_db_path) as conn:
         s = gstore.stats(conn)
     typer.echo(f"DB: {settings.graph_db_path}")
     for k, v in s.items():
         typer.echo(f"  {k}: {v}")
+
+
+@graph_app.command("reset-evidence")
+def graph_reset_evidence(
+    yes: bool = typer.Option(False, "--yes", "-y", help="evidence·추출 마커 초기화 승인"),
+):
+    """기존 그래프를 유지한 채 edge evidence staging 재구축을 시작."""
+    from pkb.graph import store as gstore
+    from pkb.graph.schema import graph_connection
+
+    if not yes:
+        typer.echo("staging evidence·추출 마커를 비워 전 청크를 재추출 대상으로 만듭니다.")
+        typer.echo("기존 관계·멘션·개념·큐레이션은 전환 완료까지 유지됩니다.")
+        typer.echo("실행하려면 --yes를 지정하세요.")
+        raise typer.Exit(1)
+
+    with graph_connection(settings.graph_db_path) as conn:
+        result = gstore.prepare_edge_evidence_rebuild(conn)
+    typer.echo(
+        "그래프 evidence 재구축 준비 완료: "
+        f"기존 edges={result['edges_preserved']} mentions={result['mentions_preserved']} 유지, "
+        f"evidence={result['edge_evidence']} markers={result['markers']} 초기화"
+    )
+    typer.echo("이제 graph_list_chunks(..., pending_only=True) → graph_store_concepts를 반복하세요.")
+
+
+@graph_app.command("finalize-evidence")
+def graph_finalize_evidence(
+    yes: bool = typer.Option(False, "--yes", "-y", help="staging 그래프로 원자 전환 승인"),
+):
+    """전 청크 추출 완료 후 staging evidence를 서비스 그래프로 원자 전환."""
+    from pkb.graph import store as gstore
+    from pkb.graph.schema import graph_connection
+    from pkb.graph.services import scan_pending_chunks
+    from pkb.store import get_client
+
+    if not yes:
+        typer.echo("전량 추출 완료를 검증한 뒤 기존 관계를 staging evidence 집계로 교체합니다.")
+        typer.echo("실행하려면 --yes를 지정하세요.")
+        raise typer.Exit(1)
+
+    with graph_connection(settings.graph_db_path) as conn:
+        if not gstore.edge_evidence_rebuild_active(conn):
+            typer.echo("진행 중인 edge evidence 재구축이 없습니다.")
+            raise typer.Exit(1)
+        pending, total = scan_pending_chunks(get_client(), conn)
+        if pending:
+            typer.echo(f"전환 보류: 미추출 청크 {len(pending)} / {total}")
+            raise typer.Exit(1)
+        result = gstore.finalize_edge_evidence_rebuild(conn)
+
+    typer.echo(
+        "edge evidence 전환 완료: "
+        f"edges {result['edges_before']}→{result['edges_after']}, "
+        f"evidence={result['edge_evidence']}"
+    )
+
+
+@graph_app.command("rebuild-evidence-local")
+def graph_rebuild_evidence_local(
+    yes: bool = typer.Option(False, "--yes", "-y", help="로컬 LLM 장시간 실행 승인"),
+    model: str = typer.Option("gpt-oss:20b", help="설치된 Ollama 모델"),
+    batch_size: int = typer.Option(8, min=1, max=8, help="생성 1회당 청크 수"),
+    max_batches: int = typer.Option(0, min=0, help="0=완료까지, 양수=해당 배치만 실행"),
+    endpoint: str = typer.Option("http://127.0.0.1:11434", help="Ollama API 주소"),
+):
+    """Ollama structured output으로 pending evidence를 재시작 가능하게 전량 추출."""
+    from pkb.graph.rebuild import rebuild_with_ollama
+
+    if not yes:
+        typer.echo("설치된 로컬 생성 모델을 장시간 실행해 pending 청크를 전량 추출합니다.")
+        typer.echo("진행 상황은 data/.logs/graph-evidence-rebuild.jsonl에 기록됩니다.")
+        typer.echo("실행하려면 --yes를 지정하세요.")
+        raise typer.Exit(1)
+
+    try:
+        result = rebuild_with_ollama(
+            model=model,
+            batch_size=batch_size,
+            max_batches=max_batches,
+            endpoint=endpoint,
+            progress=typer.echo,
+        )
+    except Exception as exc:
+        typer.echo(f"재구축 중단: {type(exc).__name__}: {exc}")
+        raise typer.Exit(1) from exc
+
+    if result["complete"]:
+        typer.echo(
+            f"재구축 완료(전환 대기): batches={result['batches']} "
+            f"chunks={result['chunks']} 기존 edges={result['edges_before']} "
+            f"evidence={result['edge_evidence']}"
+        )
+        typer.echo("품질을 검토한 뒤 `pkb graph finalize-evidence --yes`를 실행하세요.")
+    else:
+        typer.echo(
+            f"지정 범위 완료: batches={result['batches']} chunks={result['chunks']} "
+            "(재실행하면 pending부터 계속)"
+        )
 
 
 @graph_app.command("sync-notes")
@@ -720,10 +774,9 @@ def graph_sync_notes(
     mcp sync_concept_notes과 동일.
     """
     from pkb.graph.notes import sync_concept_notes
-    from pkb.graph.schema import get_connection, init_schema
+    from pkb.graph.schema import graph_connection
 
-    init_schema(settings.graph_db_path)
-    with get_connection(settings.graph_db_path) as conn:
+    with graph_connection(settings.graph_db_path) as conn:
         result = sync_concept_notes(conn, confirm_prune=yes)
 
     typer.echo(

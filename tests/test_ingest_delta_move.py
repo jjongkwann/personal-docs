@@ -181,3 +181,38 @@ def test_pure_append_reuses_untouched_slots(monkeypatch):
     assert stats["added"] == 1
     assert embed_calls == [["new"]]
     es.mget.assert_not_called()
+
+
+def test_multiple_files_share_one_embedding_batch(monkeypatch):
+    chunks_by_name = {}
+    for name, content in (("a.md", "alpha"), ("b.md", "beta")):
+        chunk = _chunk(0, content)
+        chunk["doc_id"] = f"data/test/{name}"
+        chunk["source_path"] = chunk["doc_id"]
+        chunks_by_name[name] = [chunk]
+
+    es = MagicMock()
+    es.search.side_effect = [
+        {"hits": {"hits": []}},
+        {"hits": {"hits": []}},
+    ]
+    es.bulk.return_value = {"errors": False}
+    monkeypatch.setattr("pkb.store.get_client", lambda: es)
+    monkeypatch.setattr(
+        "pkb.ingest.process_file",
+        lambda path, *args, **kwargs: chunks_by_name[path.name],
+    )
+    embed_calls: list[list[str]] = []
+
+    def fake_embed(texts):
+        embed_calls.append(list(texts))
+        return [[float(len(text))] for text in texts]
+
+    monkeypatch.setattr("pkb.embeddings.embed", fake_embed)
+
+    stats = ingest_files([Path("a.md"), Path("b.md")], Path("."))
+
+    assert embed_calls == [["alpha", "beta"]]
+    assert stats["files"] == 2
+    assert stats["added"] == 2
+    assert es.bulk.call_count == 2

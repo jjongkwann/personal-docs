@@ -84,6 +84,8 @@ codex  mcp add pkb --url http://127.0.0.1:8787/mcp
 gemini mcp add pkb http://127.0.0.1:8787/mcp -t http -s user
 ```
 
+Claude Desktop만 HTTP를 직접 못 붙어서 `mcp-remote` 브리지를 끼웁니다 (자세한 건 [docs/mcp.md](docs/mcp.md)).
+
 `uv run pkb doctor`로 서버 상태(LISTEN·PID·메모리·재기동 횟수)와 ES·그래프를 한 번에 확인합니다.
 
 ### 3. 데이터 추가

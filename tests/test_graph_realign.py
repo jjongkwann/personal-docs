@@ -37,6 +37,13 @@ def markers(c):
     )
 
 
+def evidence(c):
+    return sorted(
+        (r["src_id"], r["dst_id"], r["chunk_index"])
+        for r in c.execute("SELECT src_id, dst_id, chunk_index FROM concept_edge_evidence")
+    )
+
+
 def seed(c, pairs, marks):
     c.executemany(
         "INSERT INTO concept_mentions (concept_id, doc_id, chunk_index, section_path) "
@@ -94,3 +101,21 @@ def test_unchanged_layout_is_a_noop(conn):
     r = realign_doc_chunks(conn, DOC, {0: "aa", 1: "bb"}, {0: "aa", 1: "bb"})
     assert r == {"moved": 0, "dropped": 0}
     assert mentions(conn) == [(1, 0), (2, 1)]
+
+
+def test_moved_and_vanished_chunks_realign_edge_evidence(conn):
+    seed(conn, [(1, 0), (2, 1)], [(0, "aa"), (1, "bb")])
+    conn.execute(
+        "INSERT INTO concept_edge_evidence "
+        "(doc_id, chunk_index, src_id, dst_id, relation) VALUES (?, 0, 1, 2, 'related_to')",
+        (DOC,),
+    )
+    conn.execute(
+        "INSERT INTO concept_edges (src_id, dst_id, relation) VALUES (1, 2, 'related_to')"
+    )
+
+    realign_doc_chunks(conn, DOC, {0: "aa", 1: "bb"}, {0: "new", 1: "aa"})
+
+    assert evidence(conn) == [(1, 2, 1)]
+    edge = conn.execute("SELECT evidence_count FROM concept_edges").fetchone()
+    assert edge["evidence_count"] == 1
