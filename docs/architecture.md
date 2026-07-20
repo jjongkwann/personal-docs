@@ -1,356 +1,371 @@
-# PKB 아키텍처
+# PKB Architecture
 
-PKB는 **두 가지 일**을 합니다.
+PKB does **two things**.
 
-1. **Claude Code가 MCP로 개인 지식을 검색·작성**한다 (Elasticsearch 하이브리드 검색).
-2. **사람이 Obsidian에서 마크다운을 읽는다** — 코퍼스 원본(`data/`)과, SQLite 개념 그래프에서
-   투영된 개념노트(`data/_concepts/`) 둘 다 일반 마크다운 파일이라 그대로 열람됩니다.
+1. **Claude Code searches and writes personal knowledge via MCP** (Elasticsearch hybrid search).
+2. **Humans read markdown in Obsidian** — both the corpus originals (`data/`) and the concept
+   notes projected from the SQLite concept graph (`data/_concepts/`) are plain markdown files, so
+   they can be viewed as-is.
 
-100% 로컬입니다 — 코드 안에 LLM API 호출이 없고, `ANTHROPIC_API_KEY`도 필요 없습니다. 개념
-추출·문서 작성 모두 Claude Code 세션 자체가 수행합니다.
+100% local — there are no LLM API calls in the code, and no `ANTHROPIC_API_KEY` is needed.
+Concept extraction and document writing are both performed by the Claude Code session itself.
 
-핵심 구성은 네 층입니다:
+The core architecture has four layers:
 
-1. **`data/`** — 개인 문서 원본 (Source of Truth). 위치는 `DATA_ROOT`로 지정하며, Obsidian 볼트
-   하위(예: `<vault>/PKB`)로 두는 것을 권장합니다.
-2. **Elasticsearch** — 청크 단위 검색 인덱스 (nori BM25 + dense_vector kNN)
-3. **SQLite Graph DB** — 개념/관계 그래프. `data/_concepts/`로 단방향 투영
-4. **MCP 서버** — Claude Code가 호출하는 기본 인터페이스. CLI는 운영·검증용 보조 경로
+1. **`data/`** — the personal document source of truth. Its location is set via `DATA_ROOT`, and
+   placing it under an Obsidian vault (e.g. `<vault>/PKB`) is recommended.
+2. **Elasticsearch** — chunk-level search index (nori BM25 + dense_vector kNN)
+3. **SQLite Graph DB** — concept/relationship graph, one-way projected into `data/_concepts/`
+4. **MCP server** — the primary interface Claude Code calls. The CLI is a secondary path for
+   operations and verification.
 
 ---
 
-## 전체 다이어그램
+## Overall Diagram
 
 ```
-[사용자]
+[User]
   ↓
 [Claude Code]
   ↓ MCP (Streamable HTTP, 127.0.0.1:8787)
-[PKB MCP 서버]  src/pkb/mcp_server.py  (도구 18개)
-  ├─ search_knowledge        → ES 하이브리드 검색
-  ├─ write_file / add_document / convert_and_ingest  → data/ 작성·인제스트
+[PKB MCP Server]  src/pkb/mcp_server.py  (22 tools)
+  ├─ search_knowledge        → ES hybrid search
+  ├─ write_file / add_document / convert_and_ingest  → write/ingest into data/
   ├─ list_documents / get_document / reindex_document
-  ├─ sync_corpus / sync_obsidian     → 원본↔ES 재조정(유령 문서 정리)
-  ├─ archive_document / restore_document → 소프트 삭제/복구
-  ├─ doctor                  → 상태 점검
-  └─ graph_*(어휘·청크·저장·큐레이션·병합) / sync_concept_notes → 개념 그래프
+  ├─ sync_corpus / sync_obsidian     → reconcile source↔ES (clean up ghost documents)
+  ├─ archive_document / restore_document → soft delete/restore
+  ├─ doctor                  → health check
+  └─ graph_*(vocabulary/chunks/storage/curation/merge) / sync_concept_notes → concept graph
 
-[사람]
-  ↓ Obsidian로 직접 열람
-  data/ 원본 + data/_concepts/*.md 투영 노트
+[Human]
+  ↓ view directly via Obsidian
+  data/ originals + data/_concepts/*.md projected notes
 ```
 
-### 데이터 흐름
+### Data Flow
 
 ```
-[인제스트]  src/pkb/ingest.py
-  data/의 문서(md/pdf/docx/…)
-    → frontmatter 파싱 → 헤딩 계층 청킹(+ 초소형 청크 병합)
-    → content_hash 델타 비교 → 변경분만 임베딩
-    → Elasticsearch bulk 적용(index/update/delete)
+[Ingest]  src/pkb/ingest.py
+  Documents in data/ (md/pdf/docx/…)
+    → parse frontmatter → chunk by heading hierarchy (+ merge tiny chunks)
+    → compare content_hash delta → embed only changed chunks
+    → apply to Elasticsearch via bulk (index/update/delete)
 
-[그래프]  src/pkb/graph/
-  ES 청크 → graph_list_chunks → Claude Code 셀프추출 → graph_store_concepts
-    → data/.graph/pkb_graph.sqlite 저장 → sync_concept_notes → data/_concepts/<slug>.md 투영
+[Graph]  src/pkb/graph/
+  ES chunks → graph_list_chunks → Claude Code self-extraction → graph_store_concepts
+    → store in data/.graph/pkb_graph.sqlite → sync_concept_notes → project into data/_concepts/<slug>.md
 ```
 
-보조 인터페이스: `src/pkb/cli.py` (`pkb init/reindex/sync/query/graph …`). CLI와 MCP 도구는
-`tests/test_cli_mcp_parity.py`가 introspection으로 정합을 강제합니다 — 새 명령/도구를 추가하면
-이 테스트가 매핑 누락을 잡아냅니다.
+Secondary interface: `src/pkb/cli.py` (`pkb init/reindex/sync/query/graph …`). Parity between the
+CLI and MCP tools is enforced via introspection by `tests/test_cli_mcp_parity.py` — adding a new
+command/tool without a mapping will be caught by this test.
 
 ---
 
-## 1. 원본 저장소 (`data/`)
+## 1. Source Repository (`data/`)
 
-실제 위치는 `DATA_ROOT`(기본: 프로젝트 내 `data/`)로 지정합니다. **Obsidian 볼트 하위 폴더로
-지정하는 것을 권장**합니다(예: `<vault>/PKB`) — 코퍼스 자체가 볼트 안에 있어 Obsidian으로 바로
-열람·편집·백링크할 수 있고, `write_file`/`sync_concept_notes` 산출물도 볼트에 그대로 나타납니다.
-doc_id는 위치와 무관하게 항상 `data/<상대경로>`로 고정됩니다.
+The actual location is set via `DATA_ROOT` (default: `data/` inside the project). **Placing it as
+a subfolder under an Obsidian vault is recommended** (e.g. `<vault>/PKB`) — since the corpus
+itself lives inside the vault, it can be viewed, edited, and backlinked directly in Obsidian, and
+`write_file`/`sync_concept_notes` output also shows up in the vault as-is. Regardless of location,
+doc_id is always fixed as `data/<relative-path>`.
 
-**최상위 폴더명이 곧 카테고리이며 동적입니다** — 코드가 카테고리 목록을 강제하지 않으므로,
-폴더를 새로 만들면 그게 새 카테고리가 됩니다(`ingest.py:_extract_category`).
+**The top-level folder name is the category, and it's dynamic** — the code doesn't enforce a fixed
+list of categories, so creating a new folder creates a new category (`ingest.py:_extract_category`).
 
 ```
-data/                       # = DATA_ROOT. doc_id는 위치 무관하게 항상 data/…
-├── rag/                    # 폴더=주제. 하위 계층도 자유 (예: retrieval/, rerank/, evaluation/…)
+data/                       # = DATA_ROOT. doc_id is always data/… regardless of location
+├── rag/                    # folder = topic. Subdirectory structure is free-form (e.g. retrieval/, rerank/, evaluation/…)
 ├── agent/
 ├── backend/
-├── ...                     # 폴더 추가 = 카테고리 추가
+├── ...                     # adding a folder = adding a category
 ├── news/
 ├── journal/
-├── _concepts/               # 개념노트 (SQLite→노트 단방향 투영, ES 미색인)
-├── .logs/                  # 검색 로그 JSONL (search_log.py)
-└── .graph/                 # 그래프 SQLite (GRAPH_DB_PATH)
+├── _concepts/               # concept notes (one-way SQLite→note projection, not indexed in ES)
+├── .logs/                  # search log JSONL (search_log.py)
+└── .graph/                 # graph SQLite (GRAPH_DB_PATH)
 ```
 
-개인 폴더(about·career·writing·운동)는 `data/` 코퍼스가 아니라 볼트 루트에서 `obsidian/` 크롤로
-검색됩니다 — 아래 "Obsidian" 절 참고. 청크/문서 수는 폴더 구성에 따라 달라지므로 최신 수치는
-`list_documents`로 확인합니다.
+Personal folders (about, career, writing, exercise) aren't part of the `data/` corpus — they're
+indexed via the `obsidian/` crawl from the vault root instead. See the "Obsidian" section below.
+Chunk/document counts vary with folder structure, so check `list_documents` for current numbers.
 
-색인 제외 대상(`ingest.py:EXCLUDED_DIR_NAMES`, `is_concept_path`):
+Excluded from indexing (`ingest.py:EXCLUDED_DIR_NAMES`, `is_concept_path`):
 
-| 대상 | 이유 |
+| Target | Reason |
 |---|---|
-| `_review/`, `_trash/`, `_materials/`, `_archive/` | 검토 대기·폐기·중복·보관 원본 |
-| `_origin/` | 외부 원본 보관소 — 소화 노트만 색인, 원본은 근거 확인용 |
-| `.`으로 시작하는 폴더 전체 | 도구 산출물 (`.obsidian` 등) |
-| `data/_concepts/` | 개념노트는 SQLite→노트 투영본이라 ES 중복 색인 금지 |
+| `_review/`, `_trash/`, `_materials/`, `_archive/` | pending review, discarded, duplicate, or archived originals |
+| `_origin/` | external source archive — only digested notes are indexed; originals are for evidence-checking only |
+| any folder starting with `.` | tool output (`.obsidian`, etc.) |
+| `data/_concepts/` | concept notes are a SQLite→note projection, so they must not be double-indexed in ES |
 
-지원 포맷:
+Supported formats:
 
-| 확장자 | 처리 |
+| Extension | Handling |
 |-------|------|
-| `.md`, `.markdown`, `.txt` | 직접 읽기 |
-| `.pdf` | `pdfminer`로 페이지 마커(`## p.N`) 보존 추출 |
-| `.docx`, `.pptx`, `.xlsx`, `.html` | `markitdown`으로 마크다운 변환 |
+| `.md`, `.markdown`, `.txt` | read directly |
+| `.pdf` | extracted with `pdfminer`, preserving page markers (`## p.N`) |
+| `.docx`, `.pptx`, `.xlsx`, `.html` | converted to markdown with `markitdown` |
 
-### Obsidian (`OBSIDIAN_PATH`) — 코퍼스 밖에 파일을 둔 경우의 선택 경로
+### Obsidian (`OBSIDIAN_PATH`) — Optional Path for Files Outside the Corpus
 
-기본 그림은 "전부 `data/` 코퍼스"입니다. `data/`가 이미 볼트 안에 있으므로 보통은 이 메커니즘이
-불필요합니다. 다만 볼트에 `DATA_ROOT` 밖 파일(개인 폴더 about·career·writing·운동 등, PKB로
-옮기지 않은 일반 노트 등)을 남겨두고 같이 검색하고 싶다면 `.env`의 `OBSIDIAN_PATH`를 설정합니다
-— **카테고리는 볼트 첫 폴더명에서 동적으로 파생**됩니다(`data/`와 동일 규칙,
-`ingest.py:_extract_category`), `doc_id=obsidian/<볼트 상대경로>`로 별도 크롤합니다(예:
-`obsidian/career/x.md` → `category=career`). `DATA_ROOT` 서브트리는 자동 제외되어 이중
-인제스트는 없습니다. 원본 파일은 복사·수정하지 않습니다.
+The default picture is "everything lives in the `data/` corpus." Since `data/` already sits inside
+the vault, this mechanism is usually unnecessary. However, if you want to keep files outside
+`DATA_ROOT` in the vault (personal folders like about, career, writing, exercise, or general notes
+not moved into PKB) and still have them searchable, set `OBSIDIAN_PATH` in `.env` — **the category
+is derived dynamically from the first folder name in the vault** (same rule as `data/`,
+`ingest.py:_extract_category`), and it's crawled separately with `doc_id=obsidian/<vault-relative-path>`
+(e.g. `obsidian/career/x.md` → `category=career`). The `DATA_ROOT` subtree is automatically
+excluded, so there's no double ingestion. Original files are never copied or modified.
 
 ---
 
-## 2. Elasticsearch 검색 인덱스
+## 2. Elasticsearch Search Index
 
-Docker 컨테이너 `pkb-es`로 실행되며, 기본 인덱스는 `pkb_documents`입니다.
+Runs as the Docker container `pkb-es`, with `pkb_documents` as the default index.
 
-### 저장 단위
+### Storage Unit
 
-파일 하나는 여러 청크로 분할되고, 각 청크가 ES 문서 1개(`_id = f"{doc_id}_{chunk_index}"`,
-예: `data/study/rag/example.md_0`)로 저장됩니다(`store.add_chunks`/`apply_chunk_delta`).
+A single file is split into multiple chunks, and each chunk is stored as one ES document
+(`_id = f"{doc_id}_{chunk_index}"`, e.g. `data/study/rag/example.md_0`) (`store.add_chunks`/
+`apply_chunk_delta`).
 
 ```python
 {
-    "content": "청크 텍스트...",
+    "content": "Chunk text...",
     "embedding": [0.1, 0.2, ...],
     "source_path": "data/study/rag/example.md",
     "doc_id": "data/study/rag/example.md",
     "category": "study",
     "chunk_index": 0,
-    "section_path": "대주제 > 소주제 > 세부",
-    "title": "문서 제목",
+    "section_path": "Major Topic > Subtopic > Detail",
+    "title": "Document Title",
     "tags": ["rag", "search"],
     "date_modified": "2026-04-16",
     "language": "ko",
-    "content_hash": "sha256(content)",   // 델타 임베딩 비교용
-    # 아래 lifecycle 필드는 설정된 경우에만 존재 — 기본은 null이 아니라 "필드 자체가 없음"
-    # "expires_at": "...",     frontmatter에 설정했을 때만
-    # "archived_at": "...",    archive_document 호출 시에만
-    # "archive_reason": "...", 아카이브 사유를 준 경우에만
+    "content_hash": "sha256(content)",   // for delta embedding comparison
+    # The lifecycle fields below exist only if they were set — by default they're not null,
+    # the field simply isn't present at all
+    # "expires_at": "...",     only if set in frontmatter
+    # "archived_at": "...",    only when archive_document was called
+    # "archive_reason": "...", only if an archive reason was given
 }
 ```
 
-### 청킹
+### Chunking
 
-- YAML frontmatter가 있으면 `title`, `tags`, `expires_at` 등 메타데이터를 파싱
-- H1~H3 헤딩 경로를 `section_path`로 저장 (없으면 파일 경로에서 파생)
-- 섹션 내부는 기본 500토큰, 100토큰 오버랩으로 분할 (`CHUNK_SIZE`/`CHUNK_OVERLAP`)
-- 80자 미만(`MIN_CHUNK_CHARS`) 초소형 청크는 인접 청크에 병합 — 헤딩·링크만 있는 저정보
-  청크가 리랭크 상위를 점령하는 것을 방지 (`ingest.py:_merge_tiny_chunks`)
+- If YAML frontmatter exists, parse metadata such as `title`, `tags`, `expires_at`
+- Store the H1–H3 heading path as `section_path` (derived from the file path if absent)
+- Within a section, split by 500 tokens with 100-token overlap by default (`CHUNK_SIZE`/
+  `CHUNK_OVERLAP`)
+- Chunks under 80 characters (`MIN_CHUNK_CHARS`) are merged into an adjacent chunk — prevents
+  low-information chunks containing only headings/links from dominating the top of rerank results
+  (`ingest.py:_merge_tiny_chunks`)
 
-### 델타 임베딩
+### Delta Embedding
 
-문서를 다시 인제스트할 때 변경된 청크만 재임베딩합니다. 각 청크의 `content_hash`(SHA-256)를
-`chunk_index` 단위로 기존 청크와 비교합니다(`ingest.py:ingest_files`).
+When a document is re-ingested, only changed chunks are re-embedded. Each chunk's `content_hash`
+(SHA-256) is compared against the existing chunk at the same `chunk_index` (`ingest.py:ingest_files`).
 
-| 비교 결과 | 동작 | 임베딩 비용 |
+| Comparison result | Action | Embedding cost |
 |-----------|------|------------|
-| hash 동일 | 재사용 | 0 |
-| hash 동일 + 메타데이터만 차이 | partial update | 0 |
-| 슬롯 불일치, 같은 hash가 문서 내 다른 슬롯에 존재 | 임베딩 복사(moved) | 0 |
-| 그 외 신규/변경 | 재임베딩 + index | 변경분만 |
-| 새 청크에서 사라진 슬롯 | delete | 0 |
+| hash identical | reuse | 0 |
+| hash identical + only metadata differs | partial update | 0 |
+| slot mismatch, same hash found in a different slot within the document | copy embedding (moved) | 0 |
+| otherwise new/changed | re-embed + index | only the changed portion |
+| slot no longer present in the new chunk set | delete | 0 |
 
-`store.apply_chunk_delta`가 index/update/delete를 한 번의 bulk로 적용합니다.
+`store.apply_chunk_delta` applies index/update/delete in a single bulk call.
 
-### 검색 파이프라인
+### Search Pipeline
 
-`search_knowledge`(MCP)와 `pkb query`(CLI)는 같은 파이프라인(`retrieve.hybrid_search`)을
-공유합니다.
+`search_knowledge` (MCP) and `pkb query` (CLI) share the same pipeline (`retrieve.hybrid_search`).
 
-1. BM25 검색 — nori 한국어 분석기, `content`/`title`/`section_path` 가중 매치
-2. kNN 검색 — sentence-transformers 임베딩, ES dense_vector(HNSW)
-3. RRF 결합 — 두 후보 집합을 Reciprocal Rank Fusion으로 결합(`RRF_K=60`, 고정 로직)
-4. CrossEncoder 재순위 — 기본 비활성(`RERANK_ENABLED=false`), 모델 `BAAI/bge-reranker-v2-m3`.
-   2026-07 벤치에서 BGE-M3 후보 풀 기준 무재순위(MRR 0.517)가 bge(0.388)·Qwen3-0.6B(0.492)를 앞서 기본 off.
-5. **문서당 최대 2청크 캡**(`MAX_CHUNKS_PER_DOC`) — 한 문서가 상위권을 독점하지 않도록 다양성 확보
-6. 선택: `EXPAND_CONTEXT=N` — 결과마다 전후 N청크를 `neighbors`로 부착
+1. BM25 search — nori Korean analyzer, weighted matching across `content`/`title`/`section_path`
+2. kNN search — sentence-transformers embeddings, ES dense_vector (HNSW)
+3. RRF fusion — combines both candidate sets via Reciprocal Rank Fusion (`RRF_K=60`, fixed logic)
+4. CrossEncoder reranking — disabled by default (`RERANK_ENABLED=false`), model
+   `BAAI/bge-reranker-v2-m3`. In the 2026-07 benchmark, no-rerank (MRR 0.517) beat bge (0.388) and
+   Qwen3-0.6B (0.492) on the BGE-M3 candidate pool, hence off by default.
+5. **Cap of at most 2 chunks per document** (`MAX_CHUNKS_PER_DOC`) — ensures diversity so a single
+   document can't dominate the top results
+6. Optional: `EXPAND_CONTEXT=N` — attaches N chunks before/after each result as `neighbors`
 
-생명주기 필터(`retrieve._lifecycle_filter`)가 기본적으로 `archived_at` 존재 청크와
-`expires_at`이 지난 청크를 제외합니다. `search_knowledge` 파라미터: `query`, `category`,
-`top_k`, `include_archived`, `include_obsidian`(기본 True — False면 `obsidian/` 접두 doc_id,
-즉 코퍼스 밖 볼트 직속 문서를 제외).
+The lifecycle filter (`retrieve._lifecycle_filter`) excludes chunks with an `archived_at` value
+and chunks past their `expires_at` by default. `search_knowledge` parameters: `query`, `category`,
+`top_k`, `include_archived`, `include_obsidian` (default True — if False, excludes documents with
+an `obsidian/`-prefixed doc_id, i.e. vault documents outside the corpus).
 
-검색 호출은 `data/.logs/search.jsonl`에 JSONL로 기록됩니다.
+Search calls are logged as JSONL to `data/.logs/search.jsonl`.
 
 ---
 
-## 3. SQLite 개념 그래프
+## 3. SQLite Concept Graph
 
-Graph RAG는 검색을 대체하지 않고 개념 간 관계 질의를 보완합니다. 저장 위치는
-`data/.graph/pkb_graph.sqlite`(`GRAPH_DB_PATH`)이며, 주요 테이블은 `concepts`,
+Graph RAG doesn't replace search — it complements it by answering relationship queries between
+concepts. It's stored at `data/.graph/pkb_graph.sqlite` (`GRAPH_DB_PATH`), with `concepts`,
 `concept_aliases`, `documents`, `concept_edges`, `concept_edge_evidence`, `concept_mentions`,
-`concept_curation`, `graph_meta`입니다. `concept_edges`의 weight/evidence_count는 청크별
-`concept_edge_evidence`에서 집계되어 재추출·문서 삭제에도 정확히 정리됩니다.
+`concept_curation`, and `graph_meta` as the main tables. The weight/evidence_count on
+`concept_edges` is aggregated from per-chunk `concept_edge_evidence`, so it stays accurate through
+re-extraction and document deletion.
 
-빌드 파이프라인(전량 Claude Code 셀프추출, API 호출 없음):
+Build pipeline (entirely Claude Code self-extraction, no API calls):
 
-1. `graph_list_chunks(category|doc_id, offset, limit)`로 청크를 페이지 단위로 읽음
-2. Claude Code가 청크 내용에서 개념/관계를 추출
-3. `graph_store_concepts(items_json)`로 SQLite에 저장 (정규화·alias·mention·edge 반영)
-4. `sync_concept_notes(confirm_prune)`로 `data/_concepts/<slug>.md` 노트에 단방향 투영 (+ `_concepts/index.md` MOC 렌더)
-5. 개념 관계 조회는 **노트 파일을 직접 Read** — 전용 조회 도구는 없음 (ES에는 색인되지 않으므로
-   `search_knowledge`로는 잡히지 않음)
+1. Read chunks page by page with `graph_list_chunks(category|doc_id, offset, limit)`
+2. Claude Code extracts concepts/relationships from the chunk content
+3. Store into SQLite with `graph_store_concepts(items_json)` (reflects normalization, aliases,
+   mentions, edges)
+4. One-way project into `data/_concepts/<slug>.md` notes with `sync_concept_notes(confirm_prune)`
+   (+ render the `_concepts/index.md` MOC)
+5. Query SQLite directly with `graph_explain`, `graph_path`, `graph_query`, or `graph_affected`;
+   each returned edge carries confidence and bounded source-chunk evidence
+6. Read projected notes as the human-facing Obsidian view; use `search_knowledge` for source text
 
-상세 설계·정규화 규칙·노트 렌더링 형식은 [docs/graph-rag.md](graph-rag.md) 참조.
+See [docs/graph-rag.md](graph-rag.md) for detailed design, normalization rules, and note rendering
+format.
 
 ---
 
-## 4. MCP 서버
+## 4. MCP Server
 
-`src/pkb/mcp_server.py`가 PKB의 기본 인터페이스입니다. 전송은 Streamable HTTP이며,
-launchd로 상시 기동한 단일 서버를 Claude Code·Codex·Gemini가 공유합니다.
+`src/pkb/mcp_server.py` is PKB's primary interface. It transports over Streamable HTTP, and a
+single server kept always-on via launchd is shared by Claude Code, Codex, and Gemini.
 
 ```
 Claude Code / Codex / Gemini → HTTP :8787/mcp → mcp_server.py → ES / data / SQLite
 ```
 
-제공 도구 18개:
+22 tools provided:
 
-| 범주 | 도구 |
+| Category | Tools |
 |------|------|
-| 검색 | `search_knowledge` |
-| 파일/문서 | `write_file`, `list_documents`, `add_document`, `convert_and_ingest`, `get_document`, `reindex_document`, `sync_corpus`, `sync_obsidian` |
-| 생명주기 | `archive_document`, `restore_document` |
-| 상태 | `doctor` |
-| Graph RAG | `graph_list_concepts`, `graph_list_chunks`, `graph_store_concepts`, `graph_curate`, `graph_merge`, `sync_concept_notes` |
+| Search | `search_knowledge` |
+| File/document | `write_file`, `list_documents`, `add_document`, `convert_and_ingest`, `get_document`, `reindex_document`, `sync_corpus`, `sync_obsidian` |
+| Lifecycle | `archive_document`, `restore_document` |
+| Status | `doctor` |
+| Graph RAG | `graph_explain`, `graph_path`, `graph_query`, `graph_affected`, `graph_list_concepts`, `graph_list_chunks`, `graph_store_concepts`, `graph_curate`, `graph_merge`, `sync_concept_notes` |
 
-각 도구의 파라미터와 사용 예시는 [docs/mcp.md](mcp.md) 참조.
+See [docs/mcp.md](mcp.md) for each tool's parameters and usage examples.
 
-MCP 서버가 지키는 경계:
+Boundaries the MCP server enforces:
 
-- `write_file`은 `data/` 하위 `.md`만 작성
-- `add_document`는 `data/` 하위만 인제스트
-- `convert_and_ingest`는 외부 파일을 읽을 수 있지만 결과는 항상 `data/<category>/`에 저장
-- Obsidian 동기화(`sync_obsidian`)는 원본 볼트를 수정하지 않고 ES에만 반영
+- `write_file` only writes `.md` files under `data/`
+- `add_document` only ingests under `data/`
+- `convert_and_ingest` can read external files, but the result is always saved under
+  `data/<category>/`
+- Obsidian sync (`sync_obsidian`) never modifies the original vault — it only updates ES
 
 ---
 
-## 5. 보조 인터페이스 (CLI)
+## 5. Secondary Interface (CLI)
 
-`src/pkb/cli.py`는 운영과 검증에 사용합니다: `init`, `reindex`, `sync`, `convert`, `add`,
-`write`, `show`, `reindex-doc`, `list`, `query`, `delete`, `archive`, `restore`, `doctor`,
+`src/pkb/cli.py` is used for operations and verification: `init`, `reindex`, `sync`, `convert`,
+`add`, `write`, `show`, `reindex-doc`, `list`, `query`, `delete`, `archive`, `restore`, `doctor`,
 `eval`, `purge-archived`, `stale`, `watch`, `graph stats`, `graph reset-evidence`,
 `graph rebuild-evidence-local`, `graph finalize-evidence`, `graph sync-notes`.
 
-대부분의 능력은 CLI와 MCP 양쪽에 있습니다(`sync` ↔ `sync_corpus`, `show` ↔ `get_document` 등).
-CLI 전용: `init`, `reindex`, `delete`, `purge-archived`, `eval`, `graph stats`,
-`graph reset-evidence`, `graph rebuild-evidence-local`, `graph finalize-evidence`
-(무거운 evidence 마이그레이션), `stale`,
-`watch`(훅·데몬용). MCP 전용: `graph_list_concepts`,
-`graph_list_chunks`, `graph_store_concepts`, `graph_curate`, `graph_merge`(Claude 셀프추출
-루프), `sync_obsidian`(볼트 전용 재조정). 이 매핑은 `tests/test_cli_mcp_parity.py`가 가드합니다.
+Most capabilities exist on both the CLI and MCP sides (`sync` ↔ `sync_corpus`, `show` ↔
+`get_document`, etc.). CLI-only: `init`, `reindex`, `delete`, `purge-archived`, `eval`,
+`graph stats`, `graph reset-evidence`, `graph rebuild-evidence-local`, `graph finalize-evidence`
+(heavy evidence migration), `stale`, `watch` (for hooks/daemons). MCP-only: `graph_list_concepts`,
+`graph_list_chunks`, `graph_store_concepts`, `graph_curate`, `graph_merge` (Claude self-extraction
+loop), `sync_obsidian` (vault-only reconciliation). This mapping is guarded by
+`tests/test_cli_mcp_parity.py`.
 
 ---
 
-## 6. 문서 생명주기
+## 6. Document Lifecycle
 
 ```
-신규/수정 ─ ingest_files (델타 임베딩)
-아카이브 ─ archived_at = now   → 검색 제외, 복구 가능 (archive/restore_document)
-만료    ─ expires_at < now    → 검색 자동 제외 (frontmatter로 설정)
-삭제    ─ delete_document      → 하드 삭제 (비가역) / purge-archived
+New/modified ─ ingest_files (delta embedding)
+Archived     ─ archived_at = now   → excluded from search, restorable (archive/restore_document)
+Expired      ─ expires_at < now    → automatically excluded from search (set via frontmatter)
+Deleted      ─ delete_document      → hard delete (irreversible) / purge-archived
 ```
 
-`retrieve.py`의 `_lifecycle_filter`가 기본 검색에서 `archived_at`이 있거나 `expires_at`이
-지난 청크를 걸러냅니다. `include_archived=True`면 필터를 끕니다.
+`_lifecycle_filter` in `retrieve.py` filters out chunks with an `archived_at` value or a past
+`expires_at` during default search. Setting `include_archived=True` disables the filter.
 
 ---
 
-## 7. sync 책임 매트릭스
+## 7. Sync Responsibility Matrix
 
-| 상황 | 실행 |
+| Situation | Action |
 |---|---|
-| 파일 하나를 직접 수정(에디터/Obsidian에서 편집) | `pkb reindex-doc <doc_id>` / MCP `reindex_document` |
-| 파일 다수 추가·이동·삭제(대량 변경) | `pkb sync` / MCP `sync_corpus`(+ 필요 시 `sync_obsidian`) |
-| 개념 그래프를 최신 내용으로 갱신 | Claude 셀프추출(`graph_list_chunks`→`graph_store_concepts`) 후 `pkb graph sync-notes` / MCP `sync_concept_notes` |
-| 매핑 스키마 변경·인덱스 상태가 꼬임 | `pkb reindex --yes` (전체 삭제 후 재구축) |
+| Directly editing a single file (editor/Obsidian) | `pkb reindex-doc <doc_id>` / MCP `reindex_document` |
+| Adding/moving/deleting many files (bulk changes) | `pkb sync` / MCP `sync_corpus` (+ `sync_obsidian` if needed) |
+| Updating the concept graph with the latest content | Claude self-extraction (`graph_list_chunks`→`graph_store_concepts`), then `pkb graph sync-notes` / MCP `sync_concept_notes` |
+| Mapping schema changed or index state got tangled | `pkb reindex --yes` (delete everything and rebuild) |
 
 ---
 
-## 8. 운영
+## 8. Operations
 
-`docker-compose.yml`은 `pkb-es`(Elasticsearch) 컨테이너만 띄웁니다. MCP 서버와 CLI는
-`uv run`으로 호스트에서 직접 실행하고, ES는 `localhost:9200`으로 접속합니다.
+`docker-compose.yml` only spins up the `pkb-es` (Elasticsearch) container. The MCP server and CLI
+run directly on the host via `uv run`, connecting to ES at `localhost:9200`.
 
 ```bash
 docker compose up -d          # pkb-es (localhost:9200)
-uv run pkb sync                # 일상 재조정 (델타 업서트 + 유령 문서 정리)
-uv run pkb reindex --yes      # data/ + Obsidian 전체 재색인 (매핑 변경 시)
+uv run pkb sync                # daily reconciliation (delta upsert + clean up ghost documents)
+uv run pkb reindex --yes      # full reindex of data/ + Obsidian (when mapping changes)
 ```
 
 ---
 
-## 실제 흐름 예시
+## Real-World Flow Examples
 
-### 예시 1: 자료 기반 정리 노트 생성
+### Example 1: Creating a Summary Note from Sources
 
 ```
-사용자: "저장된 BM25 관련 내용 정리해서 data/writing/bm25.md에 저장해줘"
+User: "Summarize the saved content about BM25 and save it to data/writing/bm25.md"
   ↓
 Claude Code
   ├─ search_knowledge(query="BM25", category="rag")
-  ├─ 검색 결과를 읽고 요약 작성
+  ├─ read the search results and write a summary
   └─ write_file(file_path="data/writing/bm25.md", content="...")
-       └─ 저장 후 자동 인제스트
+       └─ automatically ingested after saving
 ```
 
-### 예시 2: 외부 PDF 추가
+### Example 2: Adding an External PDF
 
 ```
-사용자: "~/Downloads/paper.pdf를 study 카테고리로 넣어줘"
+User: "Add ~/Downloads/paper.pdf under the study category"
   ↓
 Claude Code
   └─ convert_and_ingest(input_path="~/Downloads/paper.pdf", category="study")
-       ├─ pdfminer 페이지 보존 변환 (`## p.N` 마커 + provenance frontmatter)
-       ├─ data/study/paper.md 저장
-       └─ ES 인제스트
+       ├─ convert with pdfminer, preserving pages (`## p.N` markers + provenance frontmatter)
+       ├─ save to data/study/paper.md
+       └─ ingest into ES
 ```
 
-### 예시 3: 개념 관계 질의
+### Example 3: Querying Concept Relationships
 
 ```
-사용자: "DI, IoC, Bean, Container가 어떻게 연결돼 있어?"
+User: "How are DI, IoC, Bean, and Container connected?"
   ↓
 Claude Code
-  ├─ data/_concepts/dependency-injection.md 등 관련 노트를 직접 읽음
-  ├─ 노트의 [[위키링크]] 관계를 따라가며 연결 파악
-  └─ 필요한 경우 get_document로 원문 근거 청크 확인
+  ├─ graph_query(query="How are DI, IoC, Bean, and Container connected?")
+  ├─ inspects confidence plus doc_id/chunk_index evidence on returned edges
+  └─ uses search_knowledge/get_document when source text is needed
 ```
 
 ---
 
-## 왜 이 구조인가
+## Why This Design
 
-| 구성요소 | 역할 | 선택 이유 |
+| Component | Role | Why chosen |
 |---------|------|-----------|
-| MCP | 기본 인터페이스 | Claude Code가 바로 개인 지식 도구를 호출할 수 있음 |
-| `data/` (볼트 내) | 원본 저장소 | 사람이 Obsidian으로 읽고 편집 가능한 단일 원본 |
-| Elasticsearch | 검색 인덱스 | 한국어 키워드 검색과 벡터 검색을 함께 운용 |
-| RRF + 리랭커 | 검색 품질 | 키워드/의미 검색의 장점을 결합하고 최종 정밀도 보정 |
-| SQLite Graph DB | 개념 관계 저장 | 개인 규모에서 설치/운영 부담이 작고 백업 쉬움 |
-| CLI | 보조 인터페이스 | 재인덱싱, 디버깅, 검색 품질 확인에 적합 |
+| MCP | Primary interface | Lets Claude Code call personal knowledge tools directly |
+| `data/` (inside vault) | Source repository | A single source of truth a human can read and edit in Obsidian |
+| Elasticsearch | Search index | Runs Korean keyword search and vector search together |
+| RRF + reranker | Search quality | Combines the strengths of keyword/semantic search and refines final precision |
+| SQLite Graph DB | Concept relationship storage | Low install/ops overhead and easy backup at personal scale |
+| CLI | Secondary interface | Well-suited for reindexing, debugging, and checking search quality |
 
-## 교체 가능 지점
+## Swappable Components
 
-- **Elasticsearch → Qdrant/Chroma/pgvector**: `store.py`, `retrieve.py` 교체
-- **sentence-transformers → 다른 임베딩**: `embeddings.py` 교체
-- **SQLite Graph DB → Neo4j**: `src/pkb/graph/store.py` 계층 교체
-- **markitdown → docling/unstructured**: `ingest.py`의 파일 읽기 경로 교체
-- **Claude Code MCP → 다른 MCP 클라이언트**: `mcp_server.py`는 그대로 사용 가능
+- **Elasticsearch → Qdrant/Chroma/pgvector**: replace `store.py`, `retrieve.py`
+- **sentence-transformers → a different embedding model**: replace `embeddings.py`
+- **SQLite Graph DB → Neo4j**: replace the `src/pkb/graph/store.py` layer
+- **markitdown → docling/unstructured**: replace the file-reading path in `ingest.py`
+- **Claude Code MCP → a different MCP client**: `mcp_server.py` can be used as-is

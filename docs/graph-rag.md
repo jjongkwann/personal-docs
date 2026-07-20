@@ -1,130 +1,142 @@
 # SQLite Graph RAG
 
-## 목적과 경계
+## Purpose and Scope
 
-**목적**: *"내 자료 전체의 개념이 어떻게 연결돼 있나"* 수준의 질문에 답한다. 기존 RRF+리랭커 검색이 잘 못하는 영역을 **보완**한다 — 대체가 아니다.
+**Purpose**: answer questions at the level of *"how are the concepts across my whole corpus connected?"*. It **complements** the existing RRF + reranker search where that search is weak — it does not replace it.
 
-**핵심 설계**: 개념 레이어는 100% Claude Code 셀프추출이다 — API 호출도 LLM 비용도 없다. Claude Code가 `graph_list_chunks`로 청크를 읽고, 스스로 개념/관계를 추출해 `graph_store_concepts`로 SQLite에 저장한다. `sync_concept_notes`가 SQLite를 `data/_concepts/<slug>.md` 볼트 노트로 투영하고, **열람은 이 노트 파일을 직접 읽는 것**이 기본 경로다 (별도 조회 도구 없음).
+**Core design**: the concept layer is 100% self-extracted by Claude Code — no API calls, no LLM cost. Claude Code reads chunks with `graph_list_chunks`, extracts concepts/relations itself, and stores them in SQLite via `graph_store_concepts`. Native `graph_explain`, `graph_path`, `graph_query`, and `graph_affected` queries read that SQLite graph directly, while `sync_concept_notes` projects it into `data/_concepts/<slug>.md` vault notes for human browsing.
 
-| | 기존 (ES + RRF + 리랭커) | 그래프 RAG |
+| | Existing (ES + RRF + reranker) | Graph RAG |
 |---|---|---|
-| 잘하는 것 | "DI란?", "BM25 공식은?" 같은 **구체 질의** | "DI·IoC·Bean·Container가 어떻게 얽혀?" 같은 **관계/전역 질의** |
-| 데이터 단위 | 청크 (500토큰) | 개념(entity) + 관계(relation) |
-| 응답 재료 | 본문 청크 | `data/_concepts/` 노트 (산문 + 관계 링크 + 출처) |
-| 빌드 시점 | 인제스트 즉시 | MCP `graph_list_chunks`/`graph_store_concepts`로 명시 실행 |
+| Good at | **Specific queries** like "what is DI?", "what's the BM25 formula?" | **Relational/global queries** like "how are DI, IoC, Bean, and Container tangled together?" |
+| Data unit | Chunk (500 tokens) | Concept (entity) + relation |
+| Response material | Body chunks | `data/_concepts/` notes (prose + relation links + sources) |
+| Build trigger | Immediately on ingest | Explicit run via MCP `graph_list_chunks`/`graph_store_concepts` |
 
-**안 하는 것**: 자동 전체 그래프 빌드(opt-in만), Neo4j 등 풀 그래프 DB, GNN 임베딩, 대화 히스토리 기반 자동 업데이트.
+**Not doing**: automatic full-graph builds (opt-in only), a full graph DB like Neo4j, GNN embeddings, automatic updates driven by conversation history.
 
 ---
 
-## 저장 구조
+## Storage Structure
 
-**파일 위치**: `data/.graph/pkb_graph.sqlite` (gitignored)
+**File location**: `data/.graph/pkb_graph.sqlite` (gitignored)
 
-주요 테이블:
+Main tables:
 
-| 테이블 | 역할 |
+| Table | Role |
 |--------|------|
-| `concepts` | 정규화된 개념 노드 (name, slug, description, embedding, mention_count) |
-| `concept_aliases` | DI → Dependency Injection 같은 별칭 |
-| `documents` | ES `doc_id`와 연결되는 문서 노드 |
-| `concept_edges` | 개념 간 관계의 집계 투영 (relation, weight, evidence_count) |
-| `concept_edge_evidence` | 관계를 추출한 `doc_id`/`chunk_index`별 근거 |
-| `concept_mentions` | 개념이 등장한 `doc_id`/`chunk_index` |
-| `concept_curation` | 개념 큐레이션(real/vocab) + 증류 산문 |
-| `extracted_chunks` | 추출 완료 마커 `(doc_id, chunk_index)` → `content_hash` |
+| `concepts` | Normalized concept nodes (name, slug, description, embedding, mention_count) |
+| `concept_aliases` | Aliases like DI → Dependency Injection |
+| `documents` | Document nodes linked to ES `doc_id` |
+| `concept_edges` | Aggregated projection of relations between concepts (relation, weight, evidence_count) |
+| `concept_edge_evidence` | Evidence per `doc_id`/`chunk_index` that a relation was extracted from |
+| `concept_mentions` | `doc_id`/`chunk_index` where a concept appears |
+| `concept_curation` | Concept curation (real/vocab) + distilled prose |
+| `extracted_chunks` | Extraction-complete markers `(doc_id, chunk_index)` → `content_hash` |
 
-증분 추출은 `extracted_chunks`가 기준이다. 청크의 현재 `content_hash`가 그 인덱스의 마커와
-다르면(= 내용 변경 또는 다른 인덱스로 이동) pending이 되어 재추출되고, 재추출은 **그 청크의
-멘션과 관계 evidence를 교체**한다 — 개정된 청크에서 사라진 개념·관계는 남지 않는다. `chunk_index`가 NULL인
-행은 해시로만 기록된 구마커로, 해당 청크 내용이 바뀔 때까지만 fallback으로 인정된다.
-엣지 `weight`/`evidence_count`는 `concept_edge_evidence`의 실측 행 수에서 계산하므로 같은 청크를
-재호출해도 부풀지 않는다. 문서 삭제·청크 이동·내용 변경 시 해당 evidence도 함께 정리된다.
+Incremental extraction is driven by `extracted_chunks`. If a chunk's current `content_hash`
+differs from the marker for that index (i.e. content changed or it moved to a different index),
+it becomes pending and gets re-extracted, and re-extraction **replaces that chunk's mentions and
+relation evidence** — concepts/relations that disappeared from a revised chunk don't linger.
+Rows with a NULL `chunk_index` are legacy markers recorded by hash only, and are honored as a
+fallback only until that chunk's content changes.
+Edge `weight`/`evidence_count` are computed from the actual row count in `concept_edge_evidence`,
+so re-running the same chunk doesn't inflate them. When a document is deleted, a chunk moves, or
+content changes, the corresponding evidence is cleaned up too.
 
-스키마 정의는 `src/pkb/graph/schema.py`, CRUD는 `src/pkb/graph/store.py`.
+Schema definitions live in `src/pkb/graph/schema.py`, CRUD in `src/pkb/graph/store.py`.
 
-### 개념 정규화 (dedup)
-1. **Slug 일치**: `dependency injection` == `Dependency Injection`
-2. **Alias 일치**: "DI" → 기존 "Dependency Injection" concept에 매핑
-3. **임베딩 유사도** (≥ `GRAPH_DEDUP_THRESHOLD`, 기본 0.88): 기존 개념과 의미 매칭 → merge
-4. 새 개념이면 insert, 기존이면 alias 추가 (`mention_count`는 `concept_mentions` 실측치로
-   재계산 — 같은 청크를 재추출해도 부풀지 않는다)
+### Concept Normalization (dedup)
+1. **Slug match**: `dependency injection` == `Dependency Injection`
+2. **Alias match**: "DI" maps to the existing "Dependency Injection" concept
+3. **Embedding similarity** (≥ `GRAPH_DEDUP_THRESHOLD`, default 0.88): semantic match to an existing concept → merge
+4. Insert if new, otherwise add an alias (`mention_count` is recomputed from actual
+   `concept_mentions` rows — re-extracting the same chunk doesn't inflate it)
 
-dedup을 통과해 이미 별도 노드로 쪼개진 중복(표기 변형 등)은 `store.merge_concepts(conn,
-winner_slug, loser_slugs)`로 사후 병합한다 — 엣지·mention·별칭·산문을 승자로 승계하고
-loser 노트는 다음 `sync_concept_notes`에서 orphan으로 정리된다. 주의: "MCP Server"처럼
-상위 개념의 **구성요소**는 표기 변형이 아니므로 병합 금지.
+Duplicates that passed dedup but still ended up split into separate nodes (notation variants,
+etc.) are merged after the fact with `store.merge_concepts(conn, winner_slug, loser_slugs)` —
+edges, mentions, aliases, and prose are transferred to the winner, and loser notes are cleaned up
+as orphans on the next `sync_concept_notes`. Note: **components** of a broader concept, like "MCP
+Server", are not notation variants and must not be merged.
 
-### 노트 투영 기준
-`sync_concept_notes`는 전 개념이 아니라 **`concept_curation.label='real'`(실개념 분류)
-이면서 관계(엣지)를 1개 이상 가진 개념**만 노트로 투영한다 — 고아(관계 0) 개념은 연결
-가치가 없어 제외하되 SQLite에는 남는다(`store.projected_slugs`). 큐레이션 테이블이
-비어 있으면 전량 투영으로 폴백. 미투영 개념을 가리키는 관계·산문 링크는 평문으로
-렌더되어 깨진 위키링크가 생기지 않는다.
+### Note Projection Criteria
+`sync_concept_notes` doesn't project every concept into a note — only concepts that are
+**`concept_curation.label='real'` (classified as a real concept) and have at least one relation
+(edge)** get a note. Orphan concepts (zero relations) have no connective value and are excluded,
+though they remain in SQLite (`store.projected_slugs`). If the curation table is empty, it falls
+back to projecting everything. Relations and prose links pointing to unprojected concepts render
+as plain text so they don't produce broken wikilinks.
 
-### 관계 엣지 집계
-- 같은 청크의 (src, dst, relation) 재호출 → evidence 멱등 upsert (count 불변)
-- 서로 다른 청크의 같은 관계 → `weight`/`evidence_count`를 evidence 수로 집계
-- 각 언급 청크 → `concept_mentions`에 기록
+### Relation Edge Aggregation
+- Re-running the same chunk's (src, dst, relation) → evidence upsert is idempotent (count unchanged)
+- The same relation across different chunks → `weight`/`evidence_count` aggregate the evidence count
+- Each mentioning chunk → recorded in `concept_mentions`
 
 ---
 
-## 파이프라인: 셀프추출 → 저장 → 노트 투영
-
-전 과정은 `/pkb-graph-build [category]` 슬래시 커맨드([.claude/commands/pkb-graph-build.md](../.claude/commands/pkb-graph-build.md))로 실행할 수 있다.
+## Pipeline: Self-Extraction → Storage → Note Projection
 
 ### 1. `graph_list_chunks(category|doc_id, offset, limit, pending_only)`
-ES 청크를 페이지 단위 JSON으로 반환. `pending_only=True`면 미추출·내용 변경 청크만 반환한다(증분 추출). Claude Code가 이 결과를 직접 읽고 아래 규칙으로 개념/관계를 추출한다. 추출 전 `graph_list_concepts`로 기존 어휘를 확인해 겹치는 개념은 기존 name/slug를 재사용한다.
+Returns ES chunks as paginated JSON. With `pending_only=True`, only unextracted or content-changed chunks are returned (incremental extraction). Claude Code reads this result directly and extracts concepts/relations using the rules below. Before extracting, check the existing vocabulary with `graph_list_concepts` and reuse existing names/slugs for overlapping concepts.
 
-- 개념: 구체적 명사구 (예: "Dependency Injection", "BM25"). 일반 단어/인명/지명 제외
-- 관계 타입: `related_to` | `part_of` | `prerequisite_of` | `example_of` (필요 시 자유 라벨 허용)
-- 청크당 개념 8개·관계 12개 이내
+- Concepts: concrete noun phrases (e.g. "Dependency Injection", "BM25"). Excludes generic words, personal names, place names
+- Relation types: `related_to` | `part_of` | `prerequisite_of` | `example_of` (free-form labels allowed when needed)
+- Up to 8 concepts and 12 relations per chunk
 
 ### 2. `graph_store_concepts(items_json)`
-추출한 개념/관계 JSON을 SQLite에 upsert (정규화·alias·mention·edge 포함).
+Upserts the extracted concept/relation JSON into SQLite (including normalization, aliases, mentions, edges).
 
 ### 3. `sync_concept_notes(confirm_prune)`
-SQLite → `data/_concepts/<slug>.md` 노트로 단방향 투영 (결정적·멱등). 개념 엣지를 `[[위키링크]]`로 되써서 Obsidian 그래프뷰가 개념그래프를 그리게 한다. 링크 타깃은 doc_id가 아니라 **볼트 물리 경로**(예: `[[PKB/_concepts/slug|이름]]`) — `DATA_ROOT`가 볼트 밖이면 파일명 링크로 폴백한다. 미투영(vocab) 개념으로의 관계는 평문으로 표시된다. `<!-- pkb:auto:start/end -->` 마커 사이만 재생성하므로 마커 밖 사용자 산문은 보존된다. 노트→SQLite 역승격은 없음(SQLite가 항상 SSOT). 투영 대상 개념을 category별로 묶은 `_concepts/index.md` MOC도 함께 렌더한다 — 개념 어휘 카탈로그 진입점. 구현: `src/pkb/graph/notes.py`.
+One-way, deterministic, idempotent projection from SQLite to `data/_concepts/<slug>.md` notes. Concept edges are rewritten as `[[wikilinks]]` so Obsidian's graph view can render the concept graph. Link targets are **vault physical paths**, not doc_ids (e.g. `[[PKB/_concepts/slug|name]]`) — if `DATA_ROOT` is outside the vault, it falls back to filename-only links. Relations to unprojected (vocab) concepts are shown as plain text. Only the region between `<!-- pkb:auto:start/end -->` markers is regenerated, so user prose outside the markers is preserved. There's no note-to-SQLite promotion path (SQLite is always the SSOT). It also renders `_concepts/index.md`, a MOC that groups projected concepts by category — the entry point into the concept vocabulary catalog. Implementation: `src/pkb/graph/notes.py`.
 
-### 4. 열람
-개념 관계 질문에는 `data/_concepts/<slug>.md` 노트 파일을 **직접 Read**한다 — 전용 조회 도구는
-없다(v3에서 삭제). 개념노트는 ES에 색인되지 않으므로 `search_knowledge`로는 잡히지 않는다.
-노트에는 설명, 관계(`part_of`/`prerequisite_of`/`related_to`), 출처 문서 링크가 담겨 있다.
+### 4. Querying and Reading
+Use `graph_explain` for one concept, `graph_path` for a shortest path, `graph_query` for a
+semantic-seeded bounded subgraph, and `graph_affected` for stored-direction downstream traversal.
+Every returned edge includes confidence and bounded `doc_id`/`chunk_index` evidence. The projected
+`data/_concepts/<slug>.md` notes remain the human-readable Obsidian view. Concept notes aren't indexed
+in ES, so use `search_knowledge` when the answer requires source text rather than graph structure.
 
 ---
 
-## CLI 보조 명령
+## CLI Helper Commands
 
 ```bash
-uv run pkb graph stats        # 개념/엣지/evidence/멘션/문서/별칭 통계
-uv run pkb graph reset-evidence --yes  # 기존 그래프 유지, staging evidence·마커 초기화
-uv run pkb graph rebuild-evidence-local --yes  # Ollama 로컬 모델로 pending 전량 추출
-uv run pkb graph finalize-evidence --yes  # 전량 추출 확인 후 staging 그래프로 원자 전환
-uv run pkb graph sync-notes   # SQLite → data/_concepts/ 노트 동기화
-uv run pkb graph sync-notes --yes   # 대량 정리(21개 이상) 확인 생략
+uv run pkb graph stats        # concept/edge/evidence/mention/document/alias stats
+uv run pkb graph explain "BM25"  # one concept with inbound/outbound evidence
+uv run pkb graph path "BM25" "RRF"  # bounded shortest path
+uv run pkb graph query "how do lexical and vector retrieval connect?"  # semantic-seeded subgraph
+uv run pkb graph affected "BM25" --relation prerequisite_of  # stored-direction downstream traversal
+uv run pkb graph reset-evidence --yes  # keep the existing graph, reset staging evidence/markers
+uv run pkb graph rebuild-evidence-local --yes  # extract all pending with a local Ollama model
+uv run pkb graph finalize-evidence --yes  # after confirming full extraction, atomically switch to the staging graph
+uv run pkb graph sync-notes   # sync SQLite → data/_concepts/ notes
+uv run pkb graph sync-notes --yes   # skip confirmation for bulk cleanup (21+ items)
 ```
 
-구버전 append-only 엣지를 evidence 기반으로 전환할 때는 먼저 `reset-evidence --yes`를 한 번
-실행하고, `graph_list_chunks(..., pending_only=True)` → `graph_store_concepts` 루프를 전 청크에
-대해 다시 수행한다. 재구축 중에는 기존 관계·멘션을 계속 서비스하고 새 evidence만 staging에
-쌓는다. pending이 0이 된 뒤 `finalize-evidence --yes`를 실행하면 기존 관계를 evidence 집계로
-한 번에 교체한다. 개념·별칭·큐레이션 산문은 전 과정에서 보존된다.
+To migrate legacy append-only edges to evidence-based ones, first run `reset-evidence --yes` once,
+then re-run the `graph_list_chunks(..., pending_only=True)` → `graph_store_concepts` loop over all
+chunks. During the rebuild, existing relations/mentions keep being served while new evidence
+accumulates in staging. Once pending reaches 0, running `finalize-evidence --yes` replaces the
+existing relations with the evidence aggregate in one shot. Concepts, aliases, and curated prose
+are preserved throughout.
 
-Ollama에 생성 모델이 설치돼 있으면 `rebuild-evidence-local`이 structured output으로 이 루프를
-자동화한다. 기본 모델은 `gpt-oss:20b`, 기본 배치는 8청크이며 중단해도 마커 기준으로 재개한다.
-진행 로그는 `data/.logs/graph-evidence-rebuild.jsonl`에 기록된다. 샘플 검증에는
-`--max-batches 1`, 전체 실행에는 기본값 `--max-batches 0`을 사용한다.
+If Ollama has a generation model installed, `rebuild-evidence-local` automates this loop with
+structured output. The default model is `gpt-oss:20b`, the default batch size is 8 chunks, and it
+resumes from the markers if interrupted. Progress is logged to
+`data/.logs/graph-evidence-rebuild.jsonl`. Use `--max-batches 1` for a sample validation run, and
+the default `--max-batches 0` for a full run.
 
-일괄 API 빌드나 export CLI는 없다 — 구축과 열람 모두 MCP-first(Claude Code 셀프추출 + 노트 파일 읽기) 경로 하나로 통일했다.
+There's no batch API build or export CLI. Building remains MCP-first; reading is available through
+native SQLite graph queries, the CLI, and projected Obsidian notes.
 
 ---
 
-## 왜 SQLite인가
+## Why SQLite
 
-- 단일 파일, 설치 불필요, 백업 쉬움
-- 수천~수만 노드 규모에서는 충분히 빠름
-- Python `sqlite3`만 쓰면 외부 라이브러리 최소화
+- Single file, no install required, easy to back up
+- Fast enough at scales of thousands to tens of thousands of nodes
+- Using just Python's `sqlite3` keeps external dependencies to a minimum
 
-## 왜 API 추출을 없앴는가
+## Why We Dropped API Extraction
 
-Claude Code가 이미 청크를 읽을 수 있는 세션이므로, 별도 LLM API 호출(과 비용·키 관리)은 중복이었다. `graph_list_chunks`/`graph_store_concepts` 두 도구만으로 Claude Code 세션 자체가 추출기로 동작한다.
+Claude Code already has a session that can read chunks, so a separate LLM API call (with its cost and key management) was redundant. With just two tools, `graph_list_chunks`/`graph_store_concepts`, the Claude Code session itself acts as the extractor.

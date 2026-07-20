@@ -2,70 +2,73 @@
 
 # PKB
 
-**내 문서만 검색하고, 내 컴퓨터에서 동작하는 개인 지식 베이스**
+**A personal knowledge base that searches only your documents and runs on your machine**
 
-Elasticsearch 하이브리드 검색, MCP, Obsidian, SQLite Graph RAG를 하나의 로컬 워크플로로 연결합니다.
+Connects Elasticsearch hybrid search, MCP, Obsidian, and SQLite Graph RAG into a single local workflow.
 
 [![CI](https://github.com/jjongkwann/personal-docs/actions/workflows/ci.yml/badge.svg)](https://github.com/jjongkwann/personal-docs/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![Elasticsearch](https://img.shields.io/badge/Elasticsearch-8.17-005571?logo=elasticsearch&logoColor=white)
 ![Local first](https://img.shields.io/badge/data-local--first-2F855A)
 
+**English** | [한국어](README.ko.md)
+
 </div>
 
-PKB(Personal Knowledge Base)는 내가 선별한 Markdown, PDF, Office 문서를 로컬에서 색인하고 검색하는
-MCP-first 지식 관리 시스템입니다. 웹 전체가 아니라 **내가 관리하는 코퍼스만** 검색하며, `DATA_ROOT`의
-문서를 Source of Truth로 유지합니다.
+PKB (Personal Knowledge Base) is an MCP-first knowledge management system that indexes and searches
+your hand-picked Markdown, PDF, and Office documents locally. It searches **only the corpus you
+curate** — not the whole web — and keeps the documents under `DATA_ROOT` as the source of truth.
 
-Claude Code·Codex·Gemini에서는 MCP 도구로 검색·작성·인제스트할 수 있고, 사람은 같은 원본과 개념
-노트를 Obsidian에서 직접 읽고 편집할 수 있습니다. PKB 코드 자체는 LLM API를 호출하지 않으며 문서,
-Elasticsearch 인덱스, 개념 그래프는 모두 로컬에 저장됩니다.
+From Claude Code, Codex, or Gemini you can search, write, and ingest through MCP tools, while you
+read and edit the same originals and concept notes directly in Obsidian. PKB itself never calls an
+LLM API; your documents, the Elasticsearch index, and the concept graph all stay on your machine.
 
-## 핵심 기능
+## Key Features
 
-| 기능 | 설명 |
+| Feature | Description |
 | --- | --- |
-| 로컬 우선 | 개인 문서와 검색 인덱스를 로컬에 보관하며 별도의 LLM API 키가 필요하지 않습니다. |
-| 하이브리드 검색 | nori BM25와 dense vector kNN(BGE-M3)을 RRF로 결합합니다. CrossEncoder 재순위는 옵션. |
-| MCP-first 인터페이스 | 대화 중 검색, 파일 작성, 변환, 동기화, 문서 관리를 18개 MCP 도구로 수행합니다. |
-| 다양한 문서 인제스트 | Markdown, 텍스트, PDF, DOCX, PPTX, XLSX, HTML을 청킹하고 변경분만 다시 임베딩합니다. |
-| Obsidian 연동 | 코퍼스를 볼트 안에 두고 원본, 백링크, 자동 생성된 개념 노트를 함께 관리합니다. |
-| Graph RAG | 개념과 관계를 SQLite에 저장하고 `data/_concepts/`의 위키링크 노트로 투영합니다. |
-| 안전한 운영 | 동기화 전 정리 후보 확인, 문서 아카이브·복구, 상태 점검, 검색 품질 평가를 지원합니다. |
+| Local first | Personal documents and the search index stay local; no LLM API key required. |
+| Hybrid search | Combines nori BM25 with dense vector kNN (BGE-M3) via RRF. CrossEncoder reranking is optional. |
+| MCP-first interface | Search, file writing, conversion, sync, document management, and native graph traversal via 22 MCP tools. |
+| Broad document ingestion | Chunks Markdown, text, PDF, DOCX, PPTX, XLSX, and HTML, re-embedding only what changed. |
+| Obsidian integration | Keep the corpus inside your vault and manage originals, backlinks, and auto-generated concept notes together. |
+| Graph RAG | Stores concepts and evidence in SQLite, supports native explain/path/subgraph traversal, and projects wikilink notes. |
+| Safe operations | Pre-sync cleanup previews, document archive/restore, health checks, and search quality evaluation. |
 
-## 동작 구조
+## How It Works
 
 ```mermaid
 flowchart LR
-    A["Claude Code · Codex · Gemini"] <--> M["MCP 서버<br/>127.0.0.1:8787"]
+    A["Claude Code · Codex · Gemini"] <--> M["MCP server<br/>127.0.0.1:8787"]
     M <--> E["Elasticsearch<br/>BM25 + kNN + RRF"]
-    M <--> G["SQLite<br/>개념 그래프"]
-    D["DATA_ROOT<br/>Markdown · PDF · Office"] --> I["파싱 · 청킹 · 임베딩"] --> E
-    M -->|작성 · 변환 · 동기화| D
-    G --> C["data/_concepts/<br/>개념 노트"]
+    M <--> G["SQLite<br/>concept graph"]
+    D["DATA_ROOT<br/>Markdown · PDF · Office"] --> I["parse · chunk · embed"] --> E
+    M -->|write · convert · sync| D
+    G --> C["data/_concepts/<br/>concept notes"]
     O["Obsidian"] <--> D
     O <--> C
 ```
 
-- `DATA_ROOT`의 문서가 원본입니다. Elasticsearch와 개념 노트는 원본에서 다시 만들 수 있는 파생
-  데이터입니다.
-- 검색은 BM25와 벡터 검색 결과를 RRF로 합칩니다. CrossEncoder 재순위는 `RERANK_ENABLED`로
-  켤 수 있으며 기본 비활성입니다 (자체 벤치에서 무재순위 대비 품질·지연 모두 열위).
-- 개념 추출은 MCP 클라이언트의 에이전트가 수행하고, PKB는 결과를 SQLite에 저장해 Obsidian 노트로
-  투영합니다.
+- Documents under `DATA_ROOT` are the originals. Elasticsearch and the concept notes are derived
+  data that can always be rebuilt from them.
+- Search merges BM25 and vector results with RRF. CrossEncoder reranking can be enabled via
+  `RERANK_ENABLED` and is off by default (in-house benchmarks showed it worse than no reranking on
+  both quality and latency).
+- Concept extraction is done by the MCP client's agent; PKB stores the results in SQLite and
+  projects them as Obsidian notes.
 
-자세한 설계와 데이터 흐름은 [아키텍처 문서](docs/architecture.md)에서 확인할 수 있습니다.
+See the [architecture document](docs/architecture.md) for the detailed design and data flow.
 
-## 빠른 시작
+## Quick Start
 
-### 사전 요구사항
+### Prerequisites
 
-- Python 3.11 이상
-- Docker와 Docker Compose
+- Python 3.11+
+- Docker and Docker Compose
 - [uv](https://docs.astral.sh/uv/)
-- MCP를 사용할 경우 Claude Code, Codex 또는 Gemini CLI
+- Claude Code, Codex, or Gemini CLI if you want MCP
 
-### 1. 설치
+### 1. Install
 
 ```bash
 git clone https://github.com/jjongkwann/personal-docs.git
@@ -79,40 +82,41 @@ uv run pkb init
 uv run pkb doctor
 ```
 
-> 최초 설치에는 Docker 이미지와 임베딩·리랭커 모델 다운로드를 위한 인터넷 연결이 필요합니다.
-> 다운로드 이후 검색과 저장은 로컬에서 수행됩니다.
+> The first install needs an internet connection to download Docker images and the
+> embedding/reranker models. After that, search and storage run locally.
 
-### 2. 문서 추가와 검색
+### 2. Add documents and search
 
-`DATA_ROOT`의 기본값은 프로젝트 안의 `data/`입니다. 최상위 폴더명이 자동으로 카테고리가 됩니다.
+`DATA_ROOT` defaults to `data/` inside the project. Top-level folder names automatically become
+categories.
 
 ```text
 data/
-├── study/       # 공부 노트, 논문
-├── career/      # 경력, 기술 스택, 프로젝트
-├── writing/     # 초안, 정리 노트
-├── about/       # 자기소개, 관심사
-└── _concepts/   # SQLite에서 투영한 개념 노트 (검색 색인 제외)
+├── study/       # study notes, papers
+├── career/      # work history, tech stack, projects
+├── writing/     # drafts, summary notes
+├── about/       # self-introduction, interests
+└── _concepts/   # concept notes projected from SQLite (excluded from the search index)
 ```
 
-문서를 원하는 카테고리 폴더에 넣은 뒤 인제스트하고 검색합니다.
+Drop documents into the category folder of your choice, then ingest and search.
 
 ```bash
 uv run pkb add data/study
-uv run pkb query "RAG 검색 품질을 개선하는 방법" --category study
+uv run pkb query "how to improve RAG retrieval quality" --category study
 ```
 
-개인 코퍼스는 `.gitignore`의 `data/*` 규칙으로 Git 추적에서 제외됩니다.
+Your personal corpus is kept out of Git by the `data/*` rule in `.gitignore`.
 
-### 3. MCP 서버 연결
+### 3. Connect the MCP server
 
-개발이나 확인 용도로 서버를 포그라운드에서 실행합니다.
+Run the server in the foreground for development or verification.
 
 ```bash
 uv run python -m pkb.mcp_server
 ```
 
-다른 터미널에서 사용하는 클라이언트를 등록합니다.
+Register the client you use from another terminal.
 
 ```bash
 # Claude Code
@@ -125,124 +129,129 @@ codex mcp add pkb --url http://127.0.0.1:8787/mcp
 gemini mcp add pkb http://127.0.0.1:8787/mcp -t http -s user
 ```
 
-> MCP 서버는 임베딩·리랭커 모델 때문에 프로세스당 메모리를 많이 사용합니다. `stdio`로 세션마다
-> 실행하지 말고, `127.0.0.1:8787`의 **단일 HTTP 서버**를 여러 클라이언트가 공유하세요.
+> The MCP server uses a lot of memory per process because of the embedding/reranker models. Don't
+> spawn it per session via `stdio` — share a **single HTTP server** at `127.0.0.1:8787` across
+> clients.
 
-macOS `launchd` 상시 실행, Claude Desktop 브리지, 연결 확인 방법은
-[MCP 연동 가이드](docs/mcp.md)를 참고하세요.
+For always-on macOS `launchd` setup, the Claude Desktop bridge, and connection checks, see the
+[MCP integration guide](docs/mcp.md).
 
-## 사용 예시
+## Usage Examples
 
-MCP가 연결된 에이전트에게 자연어로 요청할 수 있습니다.
+Ask an MCP-connected agent in natural language.
 
 ```text
-"내 study 자료에서 BM25와 벡터 검색을 비교한 내용을 찾아줘"
-"~/Downloads/paper.pdf를 study 카테고리로 변환해서 넣어줘"
-"저장된 career 문서 목록을 보여줘"
-"방금 찾은 내용을 data/writing/search-notes.md로 정리해줘"
-"DI, IoC, Bean, Container 개념이 어떻게 연결돼 있어?"
+"Find the comparison of BM25 and vector search in my study notes"
+"Convert ~/Downloads/paper.pdf and ingest it into the study category"
+"Show me the list of stored career documents"
+"Write up what we just found into data/writing/search-notes.md"
+"How are the DI, IoC, Bean, and Container concepts connected?"
 ```
 
-주요 MCP 도구는 다음과 같습니다.
+The main MCP tools:
 
-| 작업 | 도구 |
+| Task | Tools |
 | --- | --- |
-| 검색 | `search_knowledge` |
-| 작성·추가 | `write_file`, `add_document`, `convert_and_ingest` |
-| 조회·재색인 | `list_documents`, `get_document`, `reindex_document` |
-| 동기화 | `sync_corpus`, `sync_obsidian` |
-| 생명주기 | `archive_document`, `restore_document` |
-| 상태 점검 | `doctor` |
-| 개념 그래프 | `graph_list_concepts`, `graph_list_chunks`, `graph_store_concepts`, `graph_curate`, `graph_merge`, `sync_concept_notes` |
+| Search | `search_knowledge` |
+| Write / add | `write_file`, `add_document`, `convert_and_ingest` |
+| Inspect / reindex | `list_documents`, `get_document`, `reindex_document` |
+| Sync | `sync_corpus`, `sync_obsidian` |
+| Lifecycle | `archive_document`, `restore_document` |
+| Health check | `doctor` |
+| Concept graph | `graph_explain`, `graph_path`, `graph_query`, `graph_affected`, plus graph build/curation/note-sync tools |
 
-전체 파라미터와 호출 예시는 [MCP 도구 문서](docs/mcp.md)에 정리되어 있습니다.
+Full parameters and call examples are documented in the [MCP tool reference](docs/mcp.md).
 
-## CLI 사용법
+## CLI Usage
 
-CLI는 색인 운영, 검증, 디버깅을 위한 보조 인터페이스입니다.
+The CLI is a secondary interface for index operations, verification, and debugging.
 
 ```bash
-# 하이브리드 검색과 주변 청크 확인
-uv run pkb query "DI IoC 의존성 주입" --category study
-uv run pkb query "RAG 검색 품질 개선" --expand 1
+# Hybrid search and neighboring-chunk expansion
+uv run pkb query "DI IoC dependency injection" --category study
+uv run pkb query "improving RAG retrieval quality" --expand 1
 
-# 원본과 검색 인덱스 재조정
+# Reconcile originals with the search index
 uv run pkb sync
 
-# 매핑 변경 후 전체 재인덱싱
+# Full reindex after mapping changes
 uv run pkb reindex
 
-# 문서 아카이브와 복구
+# Archive and restore documents
 uv run pkb archive data/career/old_resume.md --reason outdated
 uv run pkb restore data/career/old_resume.md
 
-# 개념 그래프 상태와 노트 동기화
+# Concept graph stats and note sync
 uv run pkb graph stats
+uv run pkb graph explain "BM25"
+uv run pkb graph path "BM25" "RRF"
+uv run pkb graph query "how do lexical and vector retrieval connect?"
 uv run pkb graph sync-notes
 ```
 
-`purge-archived`와 `delete`는 물리 삭제를 수행합니다. 실행 전
-[문서 생명주기 가이드](docs/usage.md#문서-생명주기-만료--soft-delete)를 확인하세요.
+`purge-archived` and `delete` perform physical deletion. Check the
+[document lifecycle guide](docs/usage.md#document-lifecycle-expiry--soft-delete) before running them.
 
-모든 명령은 `uv run pkb --help`와 `uv run pkb <command> --help`로 확인할 수 있습니다.
+All commands are listed via `uv run pkb --help` and `uv run pkb <command> --help`.
 
-## 지원 형식
+## Supported Formats
 
-| 형식 | 처리 방식 |
+| Format | Handling |
 | --- | --- |
-| `.md`, `.markdown`, `.txt` | 원문을 직접 읽고 Markdown 헤딩 구조를 보존합니다. |
-| `.pdf` | `pdfminer`로 텍스트를 추출하고 `## p.N` 페이지 마커를 유지합니다. |
-| `.docx`, `.pptx`, `.xlsx`, `.html`, `.htm` | `markitdown`으로 Markdown 변환 후 인제스트합니다. |
+| `.md`, `.markdown`, `.txt` | Read as-is, preserving the Markdown heading structure. |
+| `.pdf` | Text extracted with `pdfminer`, keeping `## p.N` page markers. |
+| `.docx`, `.pptx`, `.xlsx`, `.html`, `.htm` | Converted to Markdown with `markitdown`, then ingested. |
 
-이미지 전용 PDF에는 OCR이 적용되지 않습니다.
+OCR is not applied to image-only PDFs.
 
-## 설정
+## Configuration
 
-[.env.example](.env.example)을 복사해 시작할 수 있습니다. 아래 환경 변수를 `.env`에서 지정하지 않으면
-애플리케이션 기본값이 사용됩니다.
+Start by copying [.env.example](.env.example). If a variable below is not set in `.env`, the
+application default applies.
 
-| 환경 변수 | 기본값 | 설명 |
+| Variable | Default | Description |
 | --- | --- | --- |
-| `ES_HOST` | `http://localhost:9200` | Elasticsearch 주소 |
-| `ES_INDEX` | `pkb_documents` | 검색 인덱스 이름 |
-| `DATA_ROOT` | `data` | 개인 코퍼스 원본 경로. Obsidian 볼트 하위 폴더 권장 |
-| `OBSIDIAN_PATH` | 비활성 | `DATA_ROOT` 밖의 볼트 노트도 별도로 색인할 때 사용 |
-| `RERANK_ENABLED` | `false` | CrossEncoder 재순위 활성화 |
-| `CANDIDATE_K` | `20` | 재순위 전 후보 수 |
-| `EXPAND_CONTEXT` | `0` | 검색 결과에 포함할 전후 청크 수 |
-| `GRAPH_DB_PATH` | `data/.graph/pkb_graph.sqlite` | 개념 그래프 SQLite 경로 |
-| `GRAPH_DEDUP_THRESHOLD` | `0.88` | 유사 개념 자동 병합 임계값 |
-| `MCP_PORT` | `8787` | 공유 HTTP MCP 서버 포트 |
+| `ES_HOST` | `http://localhost:9200` | Elasticsearch address |
+| `ES_INDEX` | `pkb_documents` | Search index name |
+| `DATA_ROOT` | `data` | Path to the personal corpus originals. An Obsidian vault subfolder is recommended |
+| `OBSIDIAN_PATH` | disabled | Set to also index vault notes outside `DATA_ROOT` |
+| `RERANK_ENABLED` | `false` | Enable CrossEncoder reranking |
+| `CANDIDATE_K` | `20` | Candidate count before reranking |
+| `EXPAND_CONTEXT` | `0` | Number of neighboring chunks to include in results |
+| `GRAPH_DB_PATH` | `data/.graph/pkb_graph.sqlite` | Concept graph SQLite path |
+| `GRAPH_DEDUP_THRESHOLD` | `0.88` | Auto-merge threshold for similar concepts |
+| `MCP_PORT` | `8787` | Shared HTTP MCP server port |
 
-`DATA_ROOT`를 Obsidian 볼트 하위 폴더로 지정하면 원본, 에이전트가 작성한 문서, 개념 노트가 볼트에
-바로 나타납니다. 볼트의 나머지 문서까지 검색해야 할 때만 `OBSIDIAN_PATH`를 추가하세요.
+Point `DATA_ROOT` at a subfolder of your Obsidian vault and the originals, agent-written documents,
+and concept notes all appear in the vault directly. Add `OBSIDIAN_PATH` only when you also need to
+search the rest of the vault.
 
-## 프로젝트 구조
+## Project Structure
 
 ```text
 personal-docs/
 ├── src/pkb/
-│   ├── mcp_server.py   # MCP 도구와 HTTP 서버
-│   ├── ingest.py       # 문서 파싱, 청킹, 델타 인제스트
-│   ├── retrieve.py     # BM25 + kNN + RRF 검색
-│   ├── rerank.py       # CrossEncoder 재순위
-│   ├── store.py        # Elasticsearch 저장소
-│   └── graph/          # SQLite 개념 그래프와 노트 투영
-├── tests/              # 단위·통합 테스트
-├── docs/               # 아키텍처, MCP, CLI, Graph RAG 문서
-├── Dockerfile.es       # nori 플러그인을 포함한 Elasticsearch
+│   ├── mcp_server.py   # MCP tools and HTTP server
+│   ├── ingest.py       # document parsing, chunking, delta ingestion
+│   ├── retrieve.py     # BM25 + kNN + RRF search
+│   ├── rerank.py       # CrossEncoder reranking
+│   ├── store.py        # Elasticsearch store
+│   └── graph/          # SQLite concept graph and note projection
+├── tests/              # unit and integration tests
+├── docs/               # architecture, MCP, CLI, Graph RAG docs
+├── Dockerfile.es       # Elasticsearch with the nori plugin
 ├── docker-compose.yml
 └── pyproject.toml
 ```
 
-## 문서
+## Documentation
 
-- [MCP 연동 가이드](docs/mcp.md) — 서버 실행, 클라이언트 등록, 18개 도구와 사용 예시
-- [아키텍처](docs/architecture.md) — 구성 요소, 데이터 흐름, 동기화 책임
-- [CLI 사용법](docs/usage.md) — 인제스트, 검색, 문서 관리, 평가와 운영
-- [Graph RAG](docs/graph-rag.md) — 개념 추출, 그래프 저장, Obsidian 노트 투영
+- [MCP integration guide](docs/mcp.md) — running the server, client registration, the 22 tools with examples
+- [Architecture](docs/architecture.md) — components, data flow, sync responsibilities
+- [CLI usage](docs/usage.md) — ingestion, search, document management, evaluation and operations
+- [Graph RAG](docs/graph-rag.md) — concept extraction, graph storage, Obsidian note projection
 
-## 개발 및 기여
+## Development & Contributing
 
 ```bash
 uv sync --locked --dev
@@ -250,25 +259,26 @@ uv run ruff check .
 uv run pytest -q
 ```
 
-실제 Elasticsearch를 사용하는 통합 테스트는 컨테이너를 실행한 뒤 별도로 수행합니다.
+Integration tests against a real Elasticsearch run separately, after starting the container.
 
 ```bash
 docker compose up -d --build
 PKB_ES_INTEGRATION=1 uv run pytest -q tests/test_es_integration.py
 ```
 
-변경을 제안할 때는 관련 테스트와 문서를 함께 갱신하고, 개인 문서·절대 경로·환경 변수 값이 커밋에
-포함되지 않았는지 확인해 주세요.
+When proposing changes, update the related tests and docs together, and make sure no personal
+documents, absolute paths, or environment variable values end up in the commit.
 
-## 개인정보와 보안
+## Privacy & Security
 
-- `data/*`와 `.env`는 기본적으로 Git에서 제외됩니다.
-- Elasticsearch와 MCP 서버는 기본 설정에서 `127.0.0.1`에만 바인딩됩니다.
-- PKB는 문서를 외부 API로 전송하지 않지만, MCP 클라이언트가 도구 결과를 처리하는 방식은 각
-  클라이언트와 모델 제공자의 데이터 정책을 따릅니다.
-- 저장소를 공개하기 전 `git status`와 커밋 이력에 개인 데이터가 없는지 반드시 확인하세요.
+- `data/*` and `.env` are excluded from Git by default.
+- Elasticsearch and the MCP server bind to `127.0.0.1` only in the default configuration.
+- PKB never sends your documents to external APIs, but how MCP clients handle tool results is
+  governed by each client's and model provider's data policy.
+- Before making the repository public, always check `git status` and the commit history for
+  personal data.
 
-## 라이선스
+## License
 
-현재 저장소에는 오픈소스 라이선스가 명시되어 있지 않습니다. 외부 사용과 기여를 허용하려면 정책에
-맞는 `LICENSE` 파일을 추가해야 합니다.
+This repository does not currently declare an open-source license. To allow external use and
+contributions, add a `LICENSE` file that matches your policy.
