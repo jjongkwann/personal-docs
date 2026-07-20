@@ -292,31 +292,41 @@ def _rrf_search(
     include_archived=False(기본)면 archived/expired 문서는 검색에서 제외.
     exclude_doc_prefix가 주어지면 해당 doc_id 접두사 문서도 검색에서 제외.
     """
+    # BM25·kNN을 msearch 한 요청으로 묶는다 — HTTP 왕복 2회→1회.
+    # (ES 내부 하위 검색 비용은 동일. Basic 라이선스라 네이티브 RRF retriever는 403 — 클라이언트 RRF 유지)
     t = perf_counter()
-    bm25_result = es.search(
+    result = es.msearch(
         index=settings.es_index,
-        query=_bm25_query(
-            query_text, category, include_archived=include_archived,
-            exclude_doc_prefix=exclude_doc_prefix,
-        ),
-        size=candidate_k,
-        source_excludes=["embedding"],
+        searches=[
+            {},
+            {
+                "query": _bm25_query(
+                    query_text, category, include_archived=include_archived,
+                    exclude_doc_prefix=exclude_doc_prefix,
+                ),
+                "size": candidate_k,
+                "_source": {"excludes": ["embedding"]},
+            },
+            {},
+            {
+                "knn": _knn_query(
+                    query_vector, candidate_k, category, include_archived=include_archived,
+                    exclude_doc_prefix=exclude_doc_prefix,
+                ),
+                "size": candidate_k,
+                "_source": {"excludes": ["embedding"]},
+            },
+        ],
     )
+    bm25_result, knn_result = result["responses"]
+    for name, resp in (("bm25", bm25_result), ("knn", knn_result)):
+        if resp.get("error"):
+            raise RuntimeError(f"{name} 검색 실패: {resp['error']}")
     if timings is not None:
-        timings["bm25_ms"] = round((perf_counter() - t) * 1000, 2)
-
-    t = perf_counter()
-    knn_result = es.search(
-        index=settings.es_index,
-        knn=_knn_query(
-            query_vector, candidate_k, category, include_archived=include_archived,
-            exclude_doc_prefix=exclude_doc_prefix,
-        ),
-        size=candidate_k,
-        source_excludes=["embedding"],
-    )
-    if timings is not None:
-        timings["knn_ms"] = round((perf_counter() - t) * 1000, 2)
+        timings["msearch_ms"] = round((perf_counter() - t) * 1000, 2)
+        # 하위 검색별 서버측 소요시간 (ES took, ms)
+        timings["bm25_ms"] = bm25_result.get("took", 0)
+        timings["knn_ms"] = knn_result.get("took", 0)
 
     t = perf_counter()
     # doc_id(_id) → {rrf_score, source}
