@@ -51,7 +51,7 @@ def search_knowledge(
     query_variants: list[str] = [],  # noqa: B006 — FastMCP가 호출마다 검증·생성, 변이 없음
 ) -> str:
     """개인 지식 베이스에서 관련 정보를 하이브리드 검색(BM25+kNN)합니다.
-    RRF 결합 + CrossEncoder 재순위로 정밀도를 높입니다.
+    RRF 결합으로 정밀도를 높입니다 (CrossEncoder 재순위는 RERANK_ENABLED 설정 시).
 
     결과 최상단에 '코퍼스 개념 어휘:' 줄이 있으면, 결과가 부실할 때 그 용어로 쿼리를
     바꿔 재검색하세요. 히트별 '관련 개념' 링크(data/_concepts/<slug>.md)는 ES 미색인
@@ -879,6 +879,7 @@ def _warmup_background() -> None:
     """서버 기동 직후 백그라운드로 embedding/rerank 모델 + ES 경로를 예열.
     실패해도 서버 기동·정상 경로를 막지 않는다."""
     try:
+        from pkb.config import settings
         from pkb.retrieve import hybrid_search
         from pkb.store import get_client
 
@@ -886,7 +887,7 @@ def _warmup_background() -> None:
             get_client(),
             "warmup",
             top_k=1,
-            rerank=True,
+            rerank=settings.rerank_enabled,  # 실제 검색 경로가 쓰는 모델만 예열
             log=False,
         )
     except Exception:

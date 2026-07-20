@@ -6,11 +6,12 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     es_host: str = "http://localhost:9200"
     es_index: str = "pkb_documents"
-    embedding_model: str = "paraphrase-multilingual-MiniLM-L12-v2"
-    embedding_dims: int = 384
+    embedding_model: str = "BAAI/bge-m3"  # 2026-07 매트릭스 실측 채택 (KURE-v1·MiniLM 대비 우위)
+    embedding_dims: int = 1024
     embedding_device: str = "auto"  # auto | cpu | mps | cuda
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
-    rerank_enabled: bool = True
+    # 2026-07 벤치: BGE-M3 후보 풀에서 bge/qwen3 리랭커 모두 no-rerank(MRR 0.517)보다 낮아 기본 off
+    rerank_enabled: bool = False
     rerank_device: str = "auto"  # auto | cpu | mps | cuda
     rerank_batch_size: int = 8  # MPS에선 작은 배치가 더 빠름 (bench_rerank_models.py 결과)
     mcp_port: int = 8787  # 공유 HTTP MCP 서버 포트 (127.0.0.1 고정)
@@ -19,7 +20,7 @@ class Settings(BaseSettings):
     expand_context: int = 0  # N>0이면 각 검색 결과의 ±N 청크를 neighbors로 부착
     chunk_size: int = 500
     chunk_overlap: int = 100
-    embed_context_prefix: bool = False  # True면 임베딩 입력에 title·section_path를 prefix로 포함
+    embed_context_prefix: bool = True  # 임베딩 입력에 title·section_path prefix (rrf MRR 0.499→0.517 실측)
     default_top_k: int = 5
     obsidian_path: str = ""  # Obsidian 볼트 절대경로 (비어있으면 비활성화)
     data_root: str = "data"  # 개인 코퍼스 루트. 볼트 하위 절대경로로 두면 Obsidian과 원본 공유(SSOT)

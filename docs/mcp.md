@@ -135,7 +135,7 @@ uv run pkb doctor
 
 | 도구 | 역할 |
 |------|------|
-| `search_knowledge` | 개인 지식 베이스 하이브리드 검색. BM25와 kNN을 분리 검색한 뒤 RRF로 결합, CrossEncoder로 재순위(기본 활성), 문서당 최대 2청크로 캡. 개념 그래프가 있으면 히트별 관련 개념 링크와 재검색용 개념 어휘를 함께 부착. `include_obsidian=False`로 코퍼스 밖(볼트 직속, `obsidian/` 접두 doc_id) 문서 제외 가능. 기본 검색이 부실하면 `query_variants`(RAG-Fusion 쿼리 변형, 최대 3개)로 변형 쿼리를 함께 검색해 RRF 병합 |
+| `search_knowledge` | 개인 지식 베이스 하이브리드 검색. BM25와 kNN을 msearch 한 요청으로 검색한 뒤 RRF로 결합(CrossEncoder 재순위는 기본 비활성), 문서당 최대 2청크로 캡. 개념 그래프가 있으면 히트별 관련 개념 링크와 재검색용 개념 어휘를 함께 부착. `include_obsidian=False`로 코퍼스 밖(볼트 직속, `obsidian/` 접두 doc_id) 문서 제외 가능. 기본 검색이 부실하면 `query_variants`(RAG-Fusion 쿼리 변형, 최대 3개)로 변형 쿼리를 함께 검색해 RRF 병합 |
 | `write_file` | `data/` 하위 `.md` 작성. 기본값으로 작성 직후 자동 인제스트 |
 | `list_documents` | ES에 저장된 문서 목록. `date_modified` 내림차순으로 상위 `limit`(기본 50)개만 표시. `limit<=0`이면 전체 |
 | `add_document` | `data/` 하위 파일 인제스트 (md/txt/pdf/docx/pptx/xlsx/html) |

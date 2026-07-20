@@ -10,10 +10,18 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from pkb.config import settings
 from pkb.ingest import _content_hash, embed_input, embedding_fingerprint, ingest_files
 
 DOC_ID = "data/test/fp.md"
+
+
+@pytest.fixture(autouse=True)
+def _no_prefix(monkeypatch):
+    # 판정 로직 검증이 목적 — 임베딩 입력을 content 단독으로 고정해 prefix 기본값과 격리
+    monkeypatch.setattr(settings, "embed_context_prefix", False)
 
 
 def _chunk(idx: int, content: str) -> dict:
@@ -58,6 +66,7 @@ def test_fingerprint_changes_with_model(monkeypatch):
 
 
 def test_prefix_toggle_changes_input_and_fingerprint(monkeypatch):
+    monkeypatch.setattr(settings, "embed_context_prefix", False)
     c = _chunk(0, "본문")
     assert embed_input(c) == "본문"
     monkeypatch.setattr(settings, "embed_context_prefix", True)

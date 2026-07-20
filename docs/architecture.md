@@ -177,7 +177,8 @@ Docker 컨테이너 `pkb-es`로 실행되며, 기본 인덱스는 `pkb_documents
 1. BM25 검색 — nori 한국어 분석기, `content`/`title`/`section_path` 가중 매치
 2. kNN 검색 — sentence-transformers 임베딩, ES dense_vector(HNSW)
 3. RRF 결합 — 두 후보 집합을 Reciprocal Rank Fusion으로 결합(`RRF_K=60`, 고정 로직)
-4. CrossEncoder 재순위 — 기본 활성(`RERANK_ENABLED=true`), 모델 `BAAI/bge-reranker-v2-m3`
+4. CrossEncoder 재순위 — 기본 비활성(`RERANK_ENABLED=false`), 모델 `BAAI/bge-reranker-v2-m3`.
+   2026-07 벤치에서 BGE-M3 후보 풀 기준 무재순위(MRR 0.517)가 bge(0.388)·Qwen3-0.6B(0.492)를 앞서 기본 off.
 5. **문서당 최대 2청크 캡**(`MAX_CHUNKS_PER_DOC`) — 한 문서가 상위권을 독점하지 않도록 다양성 확보
 6. 선택: `EXPAND_CONTEXT=N` — 결과마다 전후 N청크를 `neighbors`로 부착
 

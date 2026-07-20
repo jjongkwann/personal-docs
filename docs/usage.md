@@ -246,9 +246,10 @@ GRAPH_DEDUP_THRESHOLD=0.88
 
 | 이름 | 기본값 | 설명 |
 |------|--------|------|
-| `EMBEDDING_MODEL` | `paraphrase-multilingual-MiniLM-L12-v2` | sentence-transformers 모델 |
+| `EMBEDDING_MODEL` | `BAAI/bge-m3` | sentence-transformers 모델 (1024d, `EMBEDDING_DIMS`와 함께 변경) |
+| `EMBED_CONTEXT_PREFIX` | `true` | 임베딩 입력에 title·section_path prefix 포함 |
 | `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | CrossEncoder 리랭커 모델 |
-| `RERANK_ENABLED` | `true` | 리랭크 기본 사용 여부 |
+| `RERANK_ENABLED` | `false` | 리랭크 기본 사용 여부 |
 | `CANDIDATE_K` | `20` | RRF/리랭커 후보 수. 기본값은 rerank 경로 벤치마크에서 `ck=50` 대비 latency 2.4x↓·품질 동일로 채택. 같은 벤치에서 RRF-only 경로도 `ck=20`이 nDCG/MRR 미세 우위. 더 큰 후보 풀이 필요하면 50으로 상향. |
 | `EXPAND_CONTEXT` | `0` | N>0이면 검색 결과 전후 N 청크를 neighbors로 부착 (parent context) |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | 500 / 100 | 고정 크기 청킹 |

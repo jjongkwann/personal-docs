@@ -10,9 +10,18 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
+from pkb.config import settings
 from pkb.ingest import _content_hash, embedding_fingerprint, ingest_files
 
 DOC_ID = "data/test/delta_move.md"
+
+
+@pytest.fixture(autouse=True)
+def _no_prefix(monkeypatch):
+    # 델타 기제 검증이 목적 — 임베딩 입력을 content 단독으로 고정해 prefix 기본값과 격리
+    monkeypatch.setattr(settings, "embed_context_prefix", False)
 
 
 def _chunk(idx: int, content: str) -> dict:

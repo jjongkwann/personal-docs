@@ -26,7 +26,7 @@ Elasticsearch 인덱스, 개념 그래프는 모두 로컬에 저장됩니다.
 | 기능 | 설명 |
 | --- | --- |
 | 로컬 우선 | 개인 문서와 검색 인덱스를 로컬에 보관하며 별도의 LLM API 키가 필요하지 않습니다. |
-| 하이브리드 검색 | nori BM25와 dense vector kNN을 RRF로 결합하고 CrossEncoder로 재순위합니다. |
+| 하이브리드 검색 | nori BM25와 dense vector kNN(BGE-M3)을 RRF로 결합합니다. CrossEncoder 재순위는 옵션. |
 | MCP-first 인터페이스 | 대화 중 검색, 파일 작성, 변환, 동기화, 문서 관리를 18개 MCP 도구로 수행합니다. |
 | 다양한 문서 인제스트 | Markdown, 텍스트, PDF, DOCX, PPTX, XLSX, HTML을 청킹하고 변경분만 다시 임베딩합니다. |
 | Obsidian 연동 | 코퍼스를 볼트 안에 두고 원본, 백링크, 자동 생성된 개념 노트를 함께 관리합니다. |
@@ -49,7 +49,8 @@ flowchart LR
 
 - `DATA_ROOT`의 문서가 원본입니다. Elasticsearch와 개념 노트는 원본에서 다시 만들 수 있는 파생
   데이터입니다.
-- 검색은 BM25와 벡터 검색 결과를 RRF로 합친 뒤, 기본적으로 CrossEncoder 재순위를 적용합니다.
+- 검색은 BM25와 벡터 검색 결과를 RRF로 합칩니다. CrossEncoder 재순위는 `RERANK_ENABLED`로
+  켤 수 있으며 기본 비활성입니다 (자체 벤치에서 무재순위 대비 품질·지연 모두 열위).
 - 개념 추출은 MCP 클라이언트의 에이전트가 수행하고, PKB는 결과를 SQLite에 저장해 Obsidian 노트로
   투영합니다.
 
@@ -206,7 +207,7 @@ uv run pkb graph sync-notes
 | `ES_INDEX` | `pkb_documents` | 검색 인덱스 이름 |
 | `DATA_ROOT` | `data` | 개인 코퍼스 원본 경로. Obsidian 볼트 하위 폴더 권장 |
 | `OBSIDIAN_PATH` | 비활성 | `DATA_ROOT` 밖의 볼트 노트도 별도로 색인할 때 사용 |
-| `RERANK_ENABLED` | `true` | CrossEncoder 재순위 활성화 |
+| `RERANK_ENABLED` | `false` | CrossEncoder 재순위 활성화 |
 | `CANDIDATE_K` | `20` | 재순위 전 후보 수 |
 | `EXPAND_CONTEXT` | `0` | 검색 결과에 포함할 전후 청크 수 |
 | `GRAPH_DB_PATH` | `data/.graph/pkb_graph.sqlite` | 개념 그래프 SQLite 경로 |
