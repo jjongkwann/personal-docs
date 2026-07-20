@@ -81,6 +81,31 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+# 임베딩 입력 구성 로직 버전. embed_input의 조합 방식이 바뀌면 올린다 —
+# fingerprint가 전부 달라져 다음 sync 때 전량 재임베딩된다.
+EMBED_PREPROC_VERSION = "1"
+
+
+def embed_input(chunk: dict) -> str:
+    """실제로 임베딩되는 텍스트. embed_context_prefix면 title·section_path를 앞에 붙인다."""
+    if not settings.embed_context_prefix:
+        return chunk["content"]
+    prefix = "\n".join(
+        p for p in (chunk.get("title") or "", chunk.get("section_path") or "") if p
+    )
+    return f"{prefix}\n{chunk['content']}" if prefix else chunk["content"]
+
+
+def embedding_fingerprint(chunk: dict) -> str:
+    """벡터 재사용 판정 키 — 모델·전처리 버전·임베딩 입력이 모두 같을 때만 재사용.
+
+    content_hash는 '본문이 같은가'(그래프 pending 추적)만 답한다. 모델 교체나
+    prefix 토글처럼 본문이 같아도 벡터가 달라져야 하는 변경은 이 키가 잡는다.
+    """
+    key = "\n".join([settings.embedding_model, EMBED_PREPROC_VERSION, embed_input(chunk)])
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
 _META_DIFF_FIELDS = (
     "tags",
     "title",
@@ -537,6 +562,7 @@ def process_file(
             chunk["archived_at"] = fm_archived_at
         if fm_archive_reason:
             chunk["archive_reason"] = fm_archive_reason
+        chunk["embedding_fingerprint"] = embedding_fingerprint(chunk)
         results.append(chunk)
     return results
 
@@ -614,11 +640,14 @@ def ingest_files(
         existing = get_existing_chunks(es, doc_id)
         new_by_idx = {c["chunk_index"]: c for c in new_chunks}
 
-        old_idx_by_hash: dict[str, int] = {}
+        # 벡터 재사용·복사 판정은 embedding_fingerprint(모델+전처리+임베딩 입력) 기준.
+        # fingerprint가 없는 구 청크는 어떤 구성으로 임베딩됐는지 알 수 없으므로 재임베딩
+        # — 마이그레이션 순서 함정(모델 교체 후 구벡터에 새 fingerprint 백필) 방지.
+        old_idx_by_fp: dict[str, int] = {}
         for idx, old in existing.items():
-            h = old.get("content_hash")
-            if h is not None and h not in old_idx_by_hash:
-                old_idx_by_hash[h] = idx
+            fp = old.get("embedding_fingerprint")
+            if fp is not None and fp not in old_idx_by_fp:
+                old_idx_by_fp[fp] = idx
 
         to_embed_indices: list[int] = []
         to_copy: list[tuple[int, int]] = []  # (new_idx, old_idx) 슬롯 이동
@@ -628,9 +657,9 @@ def ingest_files(
 
         for idx, new in new_by_idx.items():
             old = existing.get(idx)
-            if old is None or old.get("content_hash") != new["content_hash"]:
-                # 슬롯 불일치 — 같은 내용이 다른 슬롯에 있으면 임베딩 복사
-                src_idx = old_idx_by_hash.get(new["content_hash"])
+            if old is None or old.get("embedding_fingerprint") != new["embedding_fingerprint"]:
+                # 슬롯 불일치 — 같은 fingerprint가 다른 슬롯에 있으면 임베딩 복사
+                src_idx = old_idx_by_fp.get(new["embedding_fingerprint"])
                 if src_idx is not None:
                     to_copy.append((idx, src_idx))
                 else:
@@ -673,7 +702,7 @@ def ingest_files(
         prepared.append(delta)
         for idx in to_embed_indices:
             embedding_targets.append((delta, idx))
-            embedding_texts.append(new_by_idx[idx]["content"])
+            embedding_texts.append(embed_input(new_by_idx[idx]))
 
     # 파일별 encode 호출 대신 이번 ingest_files 호출의 신규/변경 청크를 한 번에 배치한다.
     if embedding_texts:

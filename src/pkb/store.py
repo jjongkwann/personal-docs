@@ -42,6 +42,8 @@ INDEX_SETTINGS = {
             "date_modified": {"type": "date"},
             "language": {"type": "keyword"},
             "content_hash": {"type": "keyword"},
+            # 벡터 재사용 판정 키 (모델+전처리+임베딩 입력 해시). ingest.embedding_fingerprint 참고.
+            "embedding_fingerprint": {"type": "keyword"},
             # Lifecycle: 사용자 지정 만료일(expires_at)과 실제 아카이브 시점(archived_at).
             # 둘 다 null이면 검색에 정상 포함. 쿼리 필터는 retrieve._lifecycle_filter 참고.
             "expires_at": {"type": "date"},
@@ -73,6 +75,35 @@ def create_index(es: Elasticsearch) -> None:
 def delete_index(es: Elasticsearch) -> None:
     with contextlib.suppress(NotFoundError):
         es.indices.delete(index=settings.es_index)
+
+
+def switch_read_alias(es: Elasticsearch, new_index: str) -> list[str]:
+    """settings.es_index를 읽기 alias로 보고 new_index 하나로 원자 전환.
+
+    모델·차원이 다른 물리 인덱스(예: pkb_documents_v2)를 미리 채운 뒤 호출하면
+    검색 경로가 무중단으로 새 인덱스를 보게 된다. 이전 alias 대상 목록을 반환한다.
+    물리 인덱스가 alias 이름을 점유 중이면 에러 — 물리 삭제는 사용자가 명시적으로 한다.
+    """
+    alias = settings.es_index
+    if not es.indices.exists(index=new_index):
+        raise ValueError(f"대상 인덱스가 없습니다: {new_index}")
+    if new_index == alias:
+        raise ValueError(f"대상이 alias 이름과 같습니다: {new_index}")
+    if es.indices.exists(index=alias) and not es.indices.exists_alias(name=alias):
+        raise ValueError(
+            f"'{alias}'는 alias가 아니라 물리 인덱스입니다. 먼저 데이터를 새 물리 인덱스로 "
+            f"옮기고 '{alias}'를 삭제한 뒤 다시 실행하세요."
+        )
+    actions: list[dict] = []
+    old_targets: list[str] = []
+    if es.indices.exists_alias(name=alias):
+        old_targets = sorted(es.indices.get_alias(name=alias))
+        actions.extend(
+            {"remove": {"index": old, "alias": alias}} for old in old_targets
+        )
+    actions.append({"add": {"index": new_index, "alias": alias}})
+    es.indices.update_aliases(actions=actions)
+    return old_targets
 
 
 def add_chunks(

@@ -92,6 +92,27 @@ def reindex(
     typer.echo("\n완료.")
 
 
+@app.command("index-switch")
+def index_switch(
+    new_index: str = typer.Argument(
+        ..., help="전환할 물리 인덱스 이름 (예: pkb_documents_v2)"
+    ),
+):
+    """읽기 alias(ES_INDEX)를 새 물리 인덱스로 원자 전환합니다.
+
+    모델·차원 변경 시: 새 물리 인덱스를 ES_INDEX 오버라이드로 채운 뒤 이 명령으로 전환.
+    """
+    from pkb.store import get_client, switch_read_alias
+
+    try:
+        old = switch_read_alias(get_client(), new_index)
+    except ValueError as e:
+        typer.echo(f"오류: {e}")
+        raise typer.Exit(1) from None
+    prev = f" (이전: {', '.join(old)})" if old else " (신규 alias)"
+    typer.echo(f"alias 전환 완료: {settings.es_index} → {new_index}{prev}")
+
+
 @app.command()
 def sync(
     yes: bool = typer.Option(False, "--yes", "-y", help="대량 삭제 확인 생략"),
@@ -133,7 +154,7 @@ def sync(
             f"1. data 코퍼스 동기화: {outcome.stats['files']}개 파일 ({outcome.root})"
         )
         typer.echo(f"   → {format_delta_stats(outcome.stats)}")
-        prune(list(outcome.stale))
+        prune([*outcome.stale])
     else:
         # 루트 소실은 연동 해제가 아니라 설정 오류일 가능성이 높다 → 정리하지 않음
         typer.echo(f"1. data 코퍼스 루트 없음 — 건너뜀 (정리 안 함): {root}")
@@ -147,7 +168,7 @@ def sync(
                 f"2. Obsidian 동기화: {outcome.stats['files']}개 파일 ({outcome.root})"
             )
             typer.echo(f"   → {format_delta_stats(outcome.stats)}")
-            prune(list(outcome.stale))
+            prune([*outcome.stale])
         else:
             typer.echo(f"2. OBSIDIAN_PATH 디렉터리 없음 — 건너뜀 (정리 안 함): {vault}")
     else:

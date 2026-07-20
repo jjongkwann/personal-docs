@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     expand_context: int = 0  # N>0이면 각 검색 결과의 ±N 청크를 neighbors로 부착
     chunk_size: int = 500
     chunk_overlap: int = 100
+    embed_context_prefix: bool = False  # True면 임베딩 입력에 title·section_path를 prefix로 포함
     default_top_k: int = 5
     obsidian_path: str = ""  # Obsidian 볼트 절대경로 (비어있으면 비활성화)
     data_root: str = "data"  # 개인 코퍼스 루트. 볼트 하위 절대경로로 두면 Obsidian과 원본 공유(SSOT)

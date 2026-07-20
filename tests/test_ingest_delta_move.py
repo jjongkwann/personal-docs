@@ -10,13 +10,13 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from pkb.ingest import _content_hash, ingest_files
+from pkb.ingest import _content_hash, embedding_fingerprint, ingest_files
 
 DOC_ID = "data/test/delta_move.md"
 
 
 def _chunk(idx: int, content: str) -> dict:
-    return {
+    chunk = {
         "content": content,
         "content_hash": _content_hash(content),
         "source_path": DOC_ID,
@@ -29,6 +29,8 @@ def _chunk(idx: int, content: str) -> dict:
         "date_modified": "2026-07-05",
         "language": "ko",
     }
+    chunk["embedding_fingerprint"] = embedding_fingerprint(chunk)
+    return chunk
 
 
 def _existing_hit(chunk: dict) -> dict:

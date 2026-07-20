@@ -51,6 +51,7 @@ CAPABILITY: dict[str, dict[str, str]] = {
 ALLOWLIST_CLI_ONLY = {
     "init",
     "reindex",
+    "index-switch",
     "delete",
     "purge-archived",
     "eval",
