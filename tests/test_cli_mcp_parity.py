@@ -40,6 +40,10 @@ CAPABILITY: dict[str, dict[str, str]] = {
     "archive": {"cli": "archive", "mcp": "archive_document"},
     "restore": {"cli": "restore", "mcp": "restore_document"},
     "doctor": {"cli": "doctor", "mcp": "doctor"},
+    "graph_explain": {"cli": "graph explain", "mcp": "graph_explain"},
+    "graph_path": {"cli": "graph path", "mcp": "graph_path"},
+    "graph_query": {"cli": "graph query", "mcp": "graph_query"},
+    "graph_affected": {"cli": "graph affected", "mcp": "graph_affected"},
     "concept_notes": {"cli": "graph sync-notes", "mcp": "sync_concept_notes"},
 }
 
@@ -48,6 +52,8 @@ CAPABILITY: dict[str, dict[str, str]] = {
 # "eval"은 골드셋 전체를 4개 모드로 도는 벤치마크 하니스라 CLI 전용.
 # "stale"은 SessionStart 훅용 신선도 점검(fail-open)이라 CLI 전용.
 # "watch"는 폴링 데몬(포그라운드 상주 프로세스)이라 CLI 전용.
+# "graph map"은 로컬 HTML 스냅샷 생성·브라우저 열기라 CLI 전용 —
+#   MCP 소비자는 graph_explain/query/path의 JSON을 직접 쓴다.
 ALLOWLIST_CLI_ONLY = {
     "init",
     "reindex",
@@ -56,6 +62,7 @@ ALLOWLIST_CLI_ONLY = {
     "purge-archived",
     "eval",
     "graph stats",
+    "graph map",
     "graph reset-evidence",
     "graph finalize-evidence",
     "graph rebuild-evidence-local",

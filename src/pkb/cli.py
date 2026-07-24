@@ -688,6 +688,182 @@ def graph_stats():
         typer.echo(f"  {k}: {v}")
 
 
+def _echo_graph_json(result: dict) -> None:
+    import json
+
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def _graph_relations(value: str) -> list[str]:
+    return [relation.strip() for relation in value.split(",") if relation.strip()]
+
+
+@graph_app.command("explain")
+def graph_explain(
+    concept: str = typer.Argument(..., help="개념 이름, slug 또는 alias"),
+    edge_limit: int = typer.Option(30, min=1, max=100, help="방향별 관계 수 상한"),
+    evidence_limit: int = typer.Option(5, min=0, max=20, help="관계별 근거 수 상한"),
+    mention_limit: int = typer.Option(20, min=0, max=100, help="언급 출처 수 상한"),
+):
+    """개념 하나의 설명·관계·언급 출처를 근거와 함께 조회."""
+    from pkb.graph import query as graph_queries
+    from pkb.graph.schema import graph_connection
+
+    with graph_connection(settings.graph_db_path) as conn:
+        result = graph_queries.explain(
+            conn,
+            concept,
+            edge_limit=edge_limit,
+            evidence_limit=evidence_limit,
+            mention_limit=mention_limit,
+        )
+    _echo_graph_json(result)
+
+
+@graph_app.command("path")
+def graph_path(
+    source: str = typer.Argument(..., help="시작 개념 이름, slug 또는 alias"),
+    target: str = typer.Argument(..., help="도착 개념 이름, slug 또는 alias"),
+    max_hops: int = typer.Option(4, min=1, max=8, help="최대 탐색 거리"),
+    directed: bool = typer.Option(False, help="저장된 src→dst 방향만 탐색"),
+    relation: str = typer.Option("", "--relation", "-r", help="관계 타입 필터(쉼표 구분)"),
+    evidence_limit: int = typer.Option(3, min=0, max=20, help="관계별 근거 수 상한"),
+):
+    """두 개념 사이의 최단 관계 경로를 조회."""
+    from pkb.graph import query as graph_queries
+    from pkb.graph.schema import graph_connection
+
+    with graph_connection(settings.graph_db_path) as conn:
+        result = graph_queries.shortest_path(
+            conn,
+            source,
+            target,
+            max_hops=max_hops,
+            directed=directed,
+            relations=_graph_relations(relation),
+            evidence_limit=evidence_limit,
+        )
+    _echo_graph_json(result)
+
+
+@graph_app.command("query")
+def graph_query(
+    query: str = typer.Argument(..., help="관계를 탐색할 자연어 질문 또는 키워드"),
+    depth: int = typer.Option(2, min=0, max=4, help="시드에서 확장할 깊이"),
+    seed_limit: int = typer.Option(3, min=1, max=10, help="시작 개념 수"),
+    max_nodes: int = typer.Option(30, min=1, max=100, help="반환 노드 상한"),
+    min_similarity: float = typer.Option(0.4, min=0.0, max=1.0, help="최소 의미 유사도"),
+    relation: str = typer.Option("", "--relation", "-r", help="관계 타입 필터(쉼표 구분)"),
+    evidence_limit: int = typer.Option(3, min=0, max=20, help="관계별 근거 수 상한"),
+):
+    """자연어 질문으로 개념 시드를 찾고 주변 관계 하위 그래프를 조회."""
+    from pkb.embeddings import embed
+    from pkb.graph import query as graph_queries
+    from pkb.graph.schema import graph_connection
+
+    if not query.strip():
+        raise typer.BadParameter("query는 비어 있을 수 없습니다.")
+    query_embedding = embed([query])[0]
+    with graph_connection(settings.graph_db_path) as conn:
+        result = graph_queries.query_subgraph(
+            conn,
+            query,
+            query_embedding=query_embedding,
+            depth=depth,
+            seed_limit=seed_limit,
+            max_nodes=max_nodes,
+            min_similarity=min_similarity,
+            relations=_graph_relations(relation),
+            evidence_limit=evidence_limit,
+        )
+    _echo_graph_json(result)
+
+
+@graph_app.command("affected")
+def graph_affected(
+    concept: str = typer.Argument(..., help="시작 개념 이름, slug 또는 alias"),
+    max_depth: int = typer.Option(2, min=1, max=6, help="최대 탐색 깊이"),
+    max_nodes: int = typer.Option(30, min=1, max=100, help="반환 노드 상한"),
+    relation: str = typer.Option("", "--relation", "-r", help="관계 타입 필터(쉼표 구분)"),
+    evidence_limit: int = typer.Option(3, min=0, max=20, help="관계별 근거 수 상한"),
+):
+    """저장된 src→dst 방향으로 이어지는 하위 개념을 조회."""
+    from pkb.graph import query as graph_queries
+    from pkb.graph.schema import graph_connection
+
+    with graph_connection(settings.graph_db_path) as conn:
+        result = graph_queries.affected(
+            conn,
+            concept,
+            max_depth=max_depth,
+            max_nodes=max_nodes,
+            relations=_graph_relations(relation),
+            evidence_limit=evidence_limit,
+        )
+    _echo_graph_json(result)
+
+
+@graph_app.command("map")
+def graph_map(
+    concept: str = typer.Option("", "--concept", "-c", help="중심 개념 이름, slug 또는 alias"),
+    query: str = typer.Option("", "--query", "-q", help="자연어 질문/키워드로 시드 탐색"),
+    path: tuple[str, str] = typer.Option(
+        (None, None), "--path", help="두 개념 사이 최단 경로 (예: --path BM25 RAG)"
+    ),
+    depth: int = typer.Option(1, min=0, max=2, help="확장 깊이 (기본 1-hop, 최대 2-hop)"),
+    max_nodes: int = typer.Option(30, min=1, max=100, help="표시 노드 상한"),
+    relation: str = typer.Option("", "--relation", "-r", help="관계 타입 필터(쉼표 구분)"),
+    evidence_limit: int = typer.Option(5, min=0, max=20, help="관계별 근거 수 상한"),
+    out: Path | None = typer.Option(None, help="출력 HTML 경로 (기본 data/.graph/evidence-map.html)"),
+    open_browser: bool = typer.Option(False, "--open", help="생성 후 브라우저로 열기"),
+):
+    """개념·질문·경로 중심 Evidence Map HTML 스냅샷 생성 (오프라인 자급식)."""
+    from pkb.graph import viewmap
+    from pkb.graph.schema import graph_connection
+
+    concept, query = concept.strip(), query.strip()
+    path_pair = tuple(path) if all(path) else None
+    if sum(map(bool, (concept, query, path_pair))) != 1:
+        raise typer.BadParameter("--concept, --query, --path 중 정확히 하나를 지정하세요.")
+
+    query_embedding = None
+    if query:
+        from pkb.embeddings import embed
+
+        query_embedding = embed([query])[0]
+
+    with graph_connection(settings.graph_db_path) as conn:
+        try:
+            model = viewmap.build(
+                conn,
+                concept=concept or None,
+                query=query or None,
+                query_embedding=query_embedding,
+                path=path_pair,
+                depth=depth,
+                max_nodes=max_nodes,
+                relations=_graph_relations(relation),
+                evidence_limit=evidence_limit,
+            )
+        except ValueError as exc:
+            typer.echo(f"오류: {exc}")
+            raise typer.Exit(1) from exc
+
+    out_path = out or Path(settings.graph_db_path).parent / "evidence-map.html"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(viewmap.render(model), encoding="utf-8")
+    typer.echo(
+        f"Evidence Map 생성: {out_path} "
+        f"(nodes={len(model['nodes'])}, edges={len(model['edges'])})"
+    )
+    if model["message"]:
+        typer.echo(f"안내: {model['message']}")
+    if open_browser:
+        import webbrowser
+
+        webbrowser.open(out_path.resolve().as_uri())
+
+
 @graph_app.command("reset-evidence")
 def graph_reset_evidence(
     yes: bool = typer.Option(False, "--yes", "-y", help="evidence·추출 마커 초기화 승인"),
