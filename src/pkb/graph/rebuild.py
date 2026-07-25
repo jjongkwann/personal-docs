@@ -149,13 +149,29 @@ def _ollama_extract(
 
     content = (raw.get("message") or {}).get("content", "")
     batch = ExtractedBatch.model_validate_json(content)
+    # 청크당 개념이 max_length를 넘으면 모델이 같은 키로 항목을 쪼개 반환한다.
+    # 스키마상 유효하고 내용도 정상이므로 키 기준으로 병합한다 (temperature=0이라
+    # 재시도로는 해소되지 않고, 병합하지 않으면 해당 청크에서 영구히 막힌다).
+    if len({(item.doc_id, item.chunk_index) for item in batch.items}) != len(batch.items):
+        merged: dict[tuple[str, int], ExtractedItem] = {}
+        for item in batch.items:
+            key = (item.doc_id, item.chunk_index)
+            if key in merged:
+                head = merged[key]
+                head.concepts.extend(item.concepts)
+                head.relations.extend(item.relations)
+            else:
+                merged[key] = item
+        batch.items = list(merged.values())
     expected = {(chunk["doc_id"], int(chunk["chunk_index"])) for chunk in chunks}
+    # 요청하지 않은 청크 키를 지어내 덧붙이는 경우도 있다. 요청한 키만 남기고
+    # 버린다 (역시 temperature=0이라 재시도로는 해소되지 않는다).
+    batch.items = [
+        item for item in batch.items if (item.doc_id, item.chunk_index) in expected
+    ]
     actual = {(item.doc_id, item.chunk_index) for item in batch.items}
-    if not actual or not actual.issubset(expected) or len(batch.items) != len(actual):
-        raise ValueError(
-            f"Ollama 항목 키 불일치: missing={sorted(expected - actual)} "
-            f"extra={sorted(actual - expected)}"
-        )
+    if actual != expected:
+        raise ValueError(f"Ollama 항목 키 불일치: missing={sorted(expected - actual)}")
     return batch, raw
 
 
