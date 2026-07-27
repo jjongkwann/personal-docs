@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
@@ -95,6 +96,11 @@ Do not invent concepts or relations. Empty concepts/relations is valid.
 Return only the JSON matching the supplied schema."""
 
 
+def _doc_id_key(doc_id: str) -> str:
+    """구분 문자·유니코드 정규화 차이를 흡수한 doc_id 비교 키."""
+    return re.sub(r"[\s_-]+", "", unicodedata.normalize("NFC", doc_id))
+
+
 def _ollama_extract(
     chunks: list[dict],
     hints: dict[tuple[str, int], list[str]],
@@ -149,6 +155,14 @@ def _ollama_extract(
 
     content = (raw.get("message") or {}).get("content", "")
     batch = ExtractedBatch.model_validate_json(content)
+    expected = {(chunk["doc_id"], int(chunk["chunk_index"])) for chunk in chunks}
+    # 긴 doc_id를 옮겨 적다 구분 문자를 흘리는 일이 잦다(지식_의존도 -> 지식의존도).
+    # 추출 내용은 멀쩡하므로 구분 문자·유니코드 정규화 차이를 무시하고 원래 키로
+    # 되돌린다 (temperature=0이라 재시도로는 해소되지 않는다).
+    canonical = {_doc_id_key(doc_id): doc_id for doc_id, _ in expected}
+    for item in batch.items:
+        if (item.doc_id, item.chunk_index) not in expected:
+            item.doc_id = canonical.get(_doc_id_key(item.doc_id), item.doc_id)
     # 청크당 개념이 max_length를 넘으면 모델이 같은 키로 항목을 쪼개 반환한다.
     # 스키마상 유효하고 내용도 정상이므로 키 기준으로 병합한다 (temperature=0이라
     # 재시도로는 해소되지 않고, 병합하지 않으면 해당 청크에서 영구히 막힌다).
@@ -163,7 +177,6 @@ def _ollama_extract(
             else:
                 merged[key] = item
         batch.items = list(merged.values())
-    expected = {(chunk["doc_id"], int(chunk["chunk_index"])) for chunk in chunks}
     # 요청하지 않은 청크 키를 지어내 덧붙이는 경우도 있다. 요청한 키만 남기고
     # 버린다 (역시 temperature=0이라 재시도로는 해소되지 않는다).
     batch.items = [
@@ -296,14 +309,23 @@ def rebuild_with_ollama(
     completed_batches = 0
     completed_chunks = 0
     started = time.monotonic()
+    # 청크 하나가 계속 실패해도 전량 재구축을 통째로 버리지 않는다. 보류해 두고
+    # 다음 청크로 넘어가되, 목록을 결과에 실어 finalize를 막는다.
+    deferred: dict[tuple[str, int], str] = {}
+    consecutive_failures = 0
 
     while max_batches <= 0 or completed_batches < max_batches:
         with graph_connection(settings.graph_db_path) as conn:
             if not graph_store.edge_evidence_rebuild_active(conn):
                 raise ValueError("먼저 `pkb graph reset-evidence --yes`를 실행하세요.")
             chunks, pending, total = load_pending_batch(
-                es, conn, limit=batch_size
+                es, conn, limit=batch_size + len(deferred)
             )
+            chunks = [
+                chunk
+                for chunk in chunks
+                if (chunk["doc_id"], int(chunk["chunk_index"])) not in deferred
+            ][:batch_size]
             hints = legacy_concept_hints(
                 conn,
                 [(chunk["doc_id"], int(chunk["chunk_index"])) for chunk in chunks],
@@ -318,13 +340,17 @@ def rebuild_with_ollama(
                     "SELECT COUNT(*) FROM concept_edge_evidence"
                 ).fetchone()[0]
             result = {
-                "complete": True,
-                "ready_to_finalize": True,
+                "complete": not deferred,
+                "ready_to_finalize": not deferred,
                 "batches": completed_batches,
                 "chunks": completed_chunks,
                 "elapsed_seconds": round(time.monotonic() - started, 1),
                 "edges_before": edges_before,
                 "edge_evidence": edge_evidence,
+                "deferred": [
+                    {"doc_id": doc_id, "chunk_index": index, "error": reason}
+                    for (doc_id, index), reason in sorted(deferred.items())
+                ],
             }
             _append_log({"ts": datetime.now(UTC).isoformat(), **result})
             return result
@@ -372,14 +398,27 @@ def rebuild_with_ollama(
                 error = exc
                 progress(f"batch={completed_batches + 1} attempt={attempt} 실패: {exc}")
         if error is not None:
+            keys = [(chunk["doc_id"], int(chunk["chunk_index"])) for chunk in chunks]
+            for key in keys:
+                deferred[key] = f"{type(error).__name__}: {error}"
             _append_log(
                 {
                     "ts": datetime.now(UTC).isoformat(),
                     "batch": completed_batches + 1,
                     "error": f"{type(error).__name__}: {error}",
+                    "deferred": [list(key) for key in keys],
                 }
             )
-            raise error
+            # 연속 실패는 개별 청크가 아니라 Ollama/ES 장애다. 전 코퍼스를 헛돌지
+            # 않도록 그대로 올린다.
+            consecutive_failures += 1
+            if consecutive_failures >= 5:
+                raise error
+            progress(
+                f"batch={completed_batches + 1} 보류 {len(deferred)}건 — 다음 청크로 진행"
+            )
+            continue
+        consecutive_failures = 0
 
         completed_batches += 1
         completed_chunks += len(extracted.items)
@@ -390,4 +429,8 @@ def rebuild_with_ollama(
         "batches": completed_batches,
         "chunks": completed_chunks,
         "elapsed_seconds": round(time.monotonic() - started, 1),
+        "deferred": [
+            {"doc_id": doc_id, "chunk_index": index, "error": reason}
+            for (doc_id, index), reason in sorted(deferred.items())
+        ],
     }
