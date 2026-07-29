@@ -88,15 +88,45 @@ On the default MCP path, Claude Code sets `category` directly when calling `conv
 ```bash
 uv run pkb query "how does vector search work?"
 uv run pkb query "Python framework experience" --category career --top-k 10
+uv run pkb query "RAG evaluation" --expand 1     # attach ±1 neighboring chunks
+uv run pkb query "BM25" --rerank                 # force CrossEncoder reranking on for this run
+uv run pkb query "BM25" --no-obsidian            # corpus only, drop obsidian/* documents
 ```
+
+`--top-k` defaults to `DEFAULT_TOP_K` (5); `--rerank`/`--no-rerank` and `--expand` fall back to
+`RERANK_ENABLED` and `EXPAND_CONTEXT` when omitted. **Note the asymmetric negative form** — the flag
+pair is `--include-obsidian` / `--no-obsidian`, not `--no-include-obsidian`.
 
 ## Document Management
 
 ```bash
 uv run pkb list
 uv run pkb list --category study
+uv run pkb list --limit 0                        # 0 = no limit (default 50)
+
+uv run pkb show data/study/rag-overview.md                     # metadata + table of contents
+uv run pkb show data/study/rag-overview.md --content           # include chunk bodies
+uv run pkb show data/study/rag-overview.md --content --chunks "3-7"   # only chunks 3-7
+
+uv run pkb write data/writing/note.md --content "..."   # write + auto-ingest (stdin if --content omitted)
+uv run pkb write data/writing/note.md --no-ingest       # save only, ingest later
+
+uv run pkb reindex-doc data/study/rag-overview.md       # re-ingest one document after an external edit
 uv run pkb delete data/study/rag-overview.md
 ```
+
+`write`, `show`, and `reindex-doc` are the CLI twins of `write_file`, `get_document`, and
+`reindex_document` — same core path, same `data/`-only boundary.
+
+### Watching for Changes
+
+```bash
+uv run pkb watch                 # poll every 10s
+uv run pkb watch --interval 60   # poll every 60s
+```
+
+Runs one `sync`-equivalent reconcile at startup to establish a baseline, then delta-ingests only
+changed files (mtime + size snapshot). Ctrl+C to stop.
 
 ---
 
@@ -110,6 +140,25 @@ uv run pkb reindex --yes     # run immediately
 ```
 
 Fully re-indexes the data corpus (DATA_ROOT) and OBSIDIAN_PATH.
+
+### Zero-Downtime Switch (`index-switch`)
+
+`reindex` deletes and rebuilds in place, so search is degraded while it runs. When you change
+`EMBEDDING_MODEL`/`EMBEDDING_DIMS` — which forces a full re-embed — build a new **physical** index
+first, then flip the read alias atomically:
+
+```bash
+# 1. Fill a new physical index by overriding ES_INDEX for this run only
+ES_INDEX=pkb_documents_v2 uv run pkb reindex --yes
+
+# 2. Atomically repoint the read alias; prints the previous target
+uv run pkb index-switch pkb_documents_v2
+```
+
+`ES_INDEX` is treated as a **read alias**, not a physical index. `index-switch` fails loudly if the
+target index doesn't exist, if it equals the alias name, or if `ES_INDEX` is currently a physical
+index rather than an alias (`store.switch_read_alias`). The old physical index is never deleted —
+verify the new one, then remove it yourself.
 
 ---
 
@@ -167,11 +216,20 @@ start (`~/.claude/settings.json`, replace `<repo-path>` with this repo's absolut
 
 ## Graph RAG Operations CLI
 
-Building the concept graph is done directly by Claude Code via MCP's `graph_list_chunks`/`graph_store_concepts` (no API calls). The CLI provides stats, evidence rebuild prep, and note sync.
+Building the concept graph is done directly by Claude Code via MCP's `graph_list_chunks`/`graph_store_concepts` (no API calls). The CLI covers stats, the four read queries, the Evidence Map snapshot, evidence rebuild, and note sync.
 
 ```bash
 # Current graph stats
 uv run pkb graph stats
+
+# Read queries — same models the MCP graph_* tools use
+uv run pkb graph explain "BM25"                 # one concept, inbound/outbound edges + evidence
+uv run pkb graph path "BM25" "RRF"              # bounded shortest path
+uv run pkb graph query "how do lexical and vector retrieval connect?"   # semantic-seeded subgraph
+uv run pkb graph affected "BM25" --relation prerequisite_of  # stored-direction downstream
+
+# Offline Evidence Map HTML (see docs/graph-rag.md for the full option table)
+uv run pkb graph map --concept "BM25" --open
 
 # Only run this to fully rebuild the old append-only relations onto an evidence basis
 # Keeps the existing graph, resets only staging evidence and extraction markers
@@ -179,6 +237,10 @@ uv run pkb graph reset-evidence --yes
 
 # Optional: auto-extract all pending items with an installed Ollama model (resumable if interrupted)
 uv run pkb graph rebuild-evidence-local --yes
+#   --model gpt-oss:20b            # any installed Ollama generation model
+#   --batch-size 8                 # chunks per generation (1-8)
+#   --max-batches 0                # 0 = run to completion, 1 = sample validation
+#   --endpoint http://127.0.0.1:11434   # local Ollama endpoint
 
 # After manually processing all graph_list_chunks → graph_store_concepts, atomically switch over once pending=0
 uv run pkb graph finalize-evidence --yes
@@ -205,9 +267,12 @@ uv run pkb init    # creates the ES index + (if configured) initial Obsidian ing
 ```
 
 After that, reconcile vault changes with `uv run pkb sync` (or MCP's `sync_obsidian`). There's no
-live watcher. Files ingested through this path get `category=obsidian`, and their `doc_id` is stored
-as `obsidian/<relative-path>`; the `DATA_ROOT` subtree is automatically excluded from the crawl to
-avoid double-ingestion.
+live watcher. Files ingested through this path get their `doc_id` stored as
+`obsidian/<relative-path>`, and the **category is derived dynamically from the first folder name in
+the vault** — the same rule as `data/` (`ingest.py:_extract_category`), so `obsidian/career/x.md`
+becomes `category=career`, not `category=obsidian`. Files sitting directly at the vault root fall
+back to `misc`. The `DATA_ROOT` subtree is automatically excluded from the crawl to avoid
+double-ingestion.
 
 ---
 
@@ -224,6 +289,8 @@ avoid double-ingestion.
 └── src/pkb/
     ├── mcp_server.py        # MCP server (primary usage path)
     ├── cli.py               # CLI commands
+    ├── operations.py        # Write/convert/sync domain core shared by CLI and MCP
+    ├── documents.py         # Document path resolution, lookup, lifecycle
     ├── config.py            # Settings management
     ├── ingest.py            # Parsing, chunking (PDF preserves pages via pdfminer, others via markitdown)
     ├── embeddings.py        # sentence-transformers embeddings
@@ -231,8 +298,9 @@ avoid double-ingestion.
     ├── store.py             # Elasticsearch CRUD, index management
     ├── retrieve.py          # Hybrid search (BM25 + kNN + RRF)
     ├── report.py            # doctor status report
+    ├── eval.py              # Search quality evaluation (recall/MRR by mode)
     ├── search_log.py        # Search call JSONL logging
-    └── graph/               # SQLite-based Graph RAG
+    └── graph/               # SQLite Graph RAG (schema, store, query, notes, rebuild, viewmap)
 ```
 
 ---
@@ -255,13 +323,19 @@ Other tuning options in `pkb.config.Settings` (overridable via environment varia
 |------|--------|------|
 | `EMBEDDING_MODEL` | `BAAI/bge-m3` | sentence-transformers model (1024d, change together with `EMBEDDING_DIMS`) |
 | `EMBED_CONTEXT_PREFIX` | `true` | Include title/section_path prefix in embedding input |
+| `EMBEDDING_DEVICE` | `auto` | Torch device for embedding. `auto` picks mps → cuda → cpu; or pin `cpu`/`mps`/`cuda` |
 | `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | CrossEncoder reranker model |
+| `RERANK_DEVICE` | `auto` | Torch device for the reranker (same resolution rule) |
+| `RERANK_BATCH_SIZE` | `8` | CrossEncoder batch size. Small batches measured faster on MPS |
 | `RERANK_ENABLED` | `false` | Whether reranking is on by default |
 | `CANDIDATE_K` | `20` | Number of RRF/reranker candidates. The default was chosen from rerank-path benchmarks, where `ck=20` gave 2.4x lower latency than `ck=50` with the same quality. In the same benchmark, the RRF-only path also showed a slight nDCG/MRR edge at `ck=20`. Raise to 50 if you need a larger candidate pool. |
 | `EXPAND_CONTEXT` | `0` | If N>0, attaches N chunks before/after each search result as neighbors (parent context) |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | 500 / 100 | Fixed-size chunking |
 | `GRAPH_DB_PATH` | `data/.graph/pkb_graph.sqlite` | SQLite concept graph file |
 | `GRAPH_DEDUP_THRESHOLD` | `0.88` | Embedding similarity threshold for concept merging |
+| `DEFAULT_TOP_K` | `5` | Default result count for `pkb query` and `search_knowledge` |
+| `MCP_PORT` | `8787` | Shared HTTP MCP server port (always bound to `127.0.0.1`) |
+| `WARMUP_ON_START` | `false` | Preload the models when the MCP server starts. Left off, the server idles at ~50MB until the first search |
 
 ## Chunking Strategy
 

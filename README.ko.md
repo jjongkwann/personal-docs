@@ -10,6 +10,7 @@ Elasticsearch 하이브리드 검색, MCP, Obsidian, SQLite Graph RAG를 하나�
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![Elasticsearch](https://img.shields.io/badge/Elasticsearch-8.17-005571?logo=elasticsearch&logoColor=white)
 ![Local first](https://img.shields.io/badge/data-local--first-2F855A)
+![License](https://img.shields.io/badge/license-MIT-blue)
 
 [English](README.md) | **한국어**
 
@@ -20,8 +21,10 @@ MCP-first 지식 관리 시스템입니다. 웹 전체가 아니라 **내가 관
 문서를 Source of Truth로 유지합니다.
 
 Claude Code·Codex·Gemini에서는 MCP 도구로 검색·작성·인제스트할 수 있고, 사람은 같은 원본과 개념
-노트를 Obsidian에서 직접 읽고 편집할 수 있습니다. PKB 코드 자체는 LLM API를 호출하지 않으며 문서,
-Elasticsearch 인덱스, 개념 그래프는 모두 로컬에 저장됩니다.
+노트를 Obsidian에서 직접 읽고 편집할 수 있습니다. PKB는 외부 LLM API를 호출하지 않고 API 키도
+필요 없습니다 — 코드에 있는 유일한 LLM 호출은 선택 기능인 `pkb graph rebuild-evidence-local`이
+로컬 Ollama 엔드포인트를 부르는 경우뿐입니다. 문서, Elasticsearch 인덱스, 개념 그래프는 모두
+로컬에 저장됩니다.
 
 ## 핵심 기능
 
@@ -32,7 +35,7 @@ Elasticsearch 인덱스, 개념 그래프는 모두 로컬에 저장됩니다.
 | MCP-first 인터페이스 | 검색, 파일 작성, 변환, 동기화, 문서 관리, 그래프 순회를 22개 MCP 도구로 수행합니다. |
 | 다양한 문서 인제스트 | Markdown, 텍스트, PDF, DOCX, PPTX, XLSX, HTML을 청킹하고 변경분만 다시 임베딩합니다. |
 | Obsidian 연동 | 코퍼스를 볼트 안에 두고 원본, 백링크, 자동 생성된 개념 노트를 함께 관리합니다. |
-| Graph RAG | 개념과 근거를 SQLite에 저장하고 explain/path/subgraph 순회와 위키링크 노트 투영을 지원합니다. |
+| Graph RAG | 개념과 근거를 SQLite에 저장하고 explain/path/subgraph 순회, 위키링크 노트 투영, 오프라인 Evidence Map 렌더를 지원합니다. |
 | 안전한 운영 | 동기화 전 정리 후보 확인, 문서 아카이브·복구, 상태 점검, 검색 품질 평가를 지원합니다. |
 
 ## 동작 구조
@@ -178,12 +181,16 @@ uv run pkb reindex
 uv run pkb archive data/career/old_resume.md --reason outdated
 uv run pkb restore data/career/old_resume.md
 
-# 개념 그래프 상태와 노트 동기화
+# 개념 그래프 상태·조회·노트 동기화
 uv run pkb graph stats
 uv run pkb graph explain "BM25"
 uv run pkb graph path "BM25" "RRF"
 uv run pkb graph query "키워드 검색과 벡터 검색은 어떻게 연결돼?"
+uv run pkb graph map --concept "BM25" --open   # 오프라인 Evidence Map HTML
 uv run pkb graph sync-notes
+
+# 읽기 alias를 새 물리 인덱스로 전환 (예: 임베딩 모델 변경 후)
+uv run pkb index-switch pkb_documents_v2
 ```
 
 `purge-archived`와 `delete`는 물리 삭제를 수행합니다. 실행 전
@@ -228,11 +235,15 @@ uv run pkb graph sync-notes
 personal-docs/
 ├── src/pkb/
 │   ├── mcp_server.py   # MCP 도구와 HTTP 서버
+│   ├── cli.py          # CLI 명령
+│   ├── operations.py   # CLI·MCP가 공유하는 작성·변환·동기화 도메인 코어
+│   ├── documents.py    # 문서 경로 해석, 조회, 생명주기
 │   ├── ingest.py       # 문서 파싱, 청킹, 델타 인제스트
 │   ├── retrieve.py     # BM25 + kNN + RRF 검색
 │   ├── rerank.py       # CrossEncoder 재순위
 │   ├── store.py        # Elasticsearch 저장소
-│   └── graph/          # SQLite 개념 그래프와 노트 투영
+│   ├── config.py       # 설정 (환경 변수로 오버라이드)
+│   └── graph/          # SQLite 개념 그래프, 조회 질의, 노트 투영, Evidence Map
 ├── tests/              # 단위·통합 테스트
 ├── docs/               # 아키텍처, MCP, CLI, Graph RAG 문서
 ├── Dockerfile.es       # nori 플러그인을 포함한 Elasticsearch
@@ -275,5 +286,5 @@ PKB_ES_INTEGRATION=1 uv run pytest -q tests/test_es_integration.py
 
 ## 라이선스
 
-현재 저장소에는 오픈소스 라이선스가 명시되어 있지 않습니다. 외부 사용과 기여를 허용하려면 정책에
-맞는 `LICENSE` 파일을 추가해야 합니다.
+[MIT](LICENSE). `DATA_ROOT` 아래의 개인 문서는 이 저장소에 포함되지 않으며 라이선스 대상도
+아닙니다 — 라이선스는 PKB 코드에만 적용됩니다.

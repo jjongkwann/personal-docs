@@ -170,6 +170,43 @@ For each client, verify the connection with `claude` → `/mcp`, `codex mcp list
 
 Graph RAG's MCP-first workflow: read chunks with `graph_list_chunks`, have Claude Code extract concepts and relations directly, and store them with `graph_store_concepts`. After storing, label real/vocab with `graph_curate`, merge notation variants with `graph_merge`, and project the result with `sync_concept_notes`. Query SQLite directly with `graph_explain`/`graph_path`/`graph_query`/`graph_affected`; use projected notes as the human-readable Obsidian view.
 
+### Parameter Reference
+
+Exact signatures as registered in `src/pkb/mcp_server.py`:
+
+```python
+search_knowledge(query, category="", top_k=5, include_archived=False,
+                 include_obsidian=True, query_variants=[])
+write_file(file_path, content, ingest=True)
+list_documents(category="", include_archived=False, limit=50)
+add_document(file_path, tags="")
+convert_and_ingest(input_path, category, output_name="", ingest=True)
+get_document(doc_id, include_content=False, chunk_range="")
+reindex_document(doc_id)
+sync_corpus(confirm_prune=False)
+sync_obsidian(path="", confirm_prune=False)
+archive_document(doc_id, reason="")
+restore_document(doc_id)
+doctor()
+
+graph_list_concepts(category="", limit=500)
+graph_explain(concept, edge_limit=30, evidence_limit=5, mention_limit=20)
+graph_path(source, target, max_hops=4, directed=False, relations=[], evidence_limit=3)
+graph_query(query, depth=2, seed_limit=3, max_nodes=30, min_similarity=0.4,
+            relations=[], evidence_limit=3)
+graph_affected(concept, max_depth=2, max_nodes=30, relations=[], evidence_limit=3)
+graph_list_chunks(category="", doc_id="", offset=0, limit=20, pending_only=False)
+graph_store_concepts(items_json)
+graph_curate(items_json="")
+graph_merge(winner_slug, loser_slugs_json)
+sync_concept_notes(confirm_prune=False)
+```
+
+`add_document(tags=...)` takes a comma-separated string, while the graph tools take
+`relations` as a **list**. The CLI equivalents diverge here on purpose: `pkb graph …` uses
+`--relation` with a comma-separated string (`cli.py:_graph_relations`), because shells handle a
+single string better than a repeated flag.
+
 ## Usage Examples
 
 Having a natural conversation in Claude Code triggers the appropriate MCP tool calls.

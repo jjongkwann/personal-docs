@@ -33,6 +33,7 @@ Main tables:
 | `concept_mentions` | `doc_id`/`chunk_index` where a concept appears |
 | `concept_curation` | Concept curation (real/vocab) + distilled prose |
 | `extracted_chunks` | Extraction-complete markers `(doc_id, chunk_index)` → `content_hash` |
+| `graph_meta` | Key/value markers — one-shot schema migrations and the `edge_evidence_rebuild` staging flag |
 
 Incremental extraction is driven by `extracted_chunks`. If a chunk's current `content_hash`
 differs from the marker for that index (i.e. content changed or it moved to a different index),
@@ -106,6 +107,7 @@ uv run pkb graph explain "BM25"  # one concept with inbound/outbound evidence
 uv run pkb graph path "BM25" "RRF"  # bounded shortest path
 uv run pkb graph query "how do lexical and vector retrieval connect?"  # semantic-seeded subgraph
 uv run pkb graph affected "BM25" --relation prerequisite_of  # stored-direction downstream traversal
+uv run pkb graph map --concept "BM25"   # offline Evidence Map HTML snapshot
 uv run pkb graph reset-evidence --yes  # keep the existing graph, reset staging evidence/markers
 uv run pkb graph rebuild-evidence-local --yes  # extract all pending with a local Ollama model
 uv run pkb graph finalize-evidence --yes  # after confirming full extraction, atomically switch to the staging graph
@@ -125,6 +127,31 @@ structured output. The default model is `gpt-oss:20b`, the default batch size is
 resumes from the markers if interrupted. Progress is logged to
 `data/.logs/graph-evidence-rebuild.jsonl`. Use `--max-batches 1` for a sample validation run, and
 the default `--max-batches 0` for a full run.
+
+### Evidence Map (`graph map`)
+
+`graph map` renders a **single self-contained HTML file** — a radial-tree snapshot of a subgraph
+with an evidence panel and relation filters, no server and no network access required. Pick exactly
+one entry mode:
+
+```bash
+uv run pkb graph map --concept "BM25"                    # centered on one concept
+uv run pkb graph map --query "how do BM25 and RRF relate?"  # semantic-seeded
+uv run pkb graph map --path BM25 RAG                     # shortest path between two concepts
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--depth` | `1` | Expansion hops (0–2) |
+| `--max-nodes` | `30` | Node cap (1–100) |
+| `--relation` / `-r` | all | Comma-separated relation-type filter |
+| `--evidence-limit` | `5` | Evidence rows per relation (0–20) |
+| `--out` | `<GRAPH_DB_PATH dir>/evidence-map.html` | Output path |
+| `--open` | off | Open in the browser after rendering |
+
+Specifying zero or more than one of `--concept`/`--query`/`--path` is a usage error. `--query`
+embeds the text, so it loads the embedding model; `--concept` and `--path` read SQLite only.
+Implementation: `src/pkb/graph/viewmap.py`.
 
 There's no batch API build or export CLI. Building remains MCP-first; reading is available through
 native SQLite graph queries, the CLI, and projected Obsidian notes.

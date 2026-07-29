@@ -6,8 +6,11 @@ PKB는 **두 가지 일**을 합니다.
 2. **사람이 Obsidian에서 마크다운을 읽는다** — 코퍼스 원본(`data/`)과, SQLite 개념 그래프에서
    투영된 개념노트(`data/_concepts/`) 둘 다 일반 마크다운 파일이라 그대로 열람됩니다.
 
-100% 로컬입니다 — 코드 안에 LLM API 호출이 없고, `ANTHROPIC_API_KEY`도 필요 없습니다. 개념
-추출·문서 작성 모두 Claude Code 세션 자체가 수행합니다.
+100% 로컬입니다 — 외부 API 호출이 없고 `ANTHROPIC_API_KEY`도 필요 없습니다. 개념 추출·문서 작성
+모두 Claude Code 세션 자체가 수행합니다. 코드에 존재하는 유일한 LLM 호출은 선택 기능이며 머신
+안에 머뭅니다: `pkb graph rebuild-evidence-local`이 근거 재구축 루프를 자동화하려고 로컬 Ollama
+엔드포인트(`http://127.0.0.1:11434`, `graph/rebuild.py`)로 요청을 보냅니다. 그 외에는 코드 어디서도
+생성 모델과 통신하지 않습니다.
 
 핵심 구성은 네 층입니다:
 
@@ -72,20 +75,20 @@ doc_id는 위치와 무관하게 항상 `data/<상대경로>`로 고정됩니다
 
 ```
 data/                       # = DATA_ROOT. doc_id는 위치 무관하게 항상 data/…
-├── rag/                    # 폴더=주제. 하위 계층도 자유 (예: retrieval/, rerank/, evaluation/…)
-├── agent/
-├── backend/
-├── ...                     # 폴더 추가 = 카테고리 추가
-├── news/
-├── journal/
-├── _concepts/               # 개념노트 (SQLite→노트 단방향 투영, ES 미색인)
+├── study/                  # 폴더=카테고리. 하위 계층도 자유 (예: rag/retrieval/, rag/rerank/…)
+├── career/
+├── writing/
+├── about/
+├── ...                     # 폴더 추가 = 카테고리 추가 (news, journal, agent, backend…)
+├── _concepts/              # 개념노트 (SQLite→노트 단방향 투영, ES 미색인)
 ├── .logs/                  # 검색 로그 JSONL (search_log.py)
 └── .graph/                 # 그래프 SQLite (GRAPH_DB_PATH)
 ```
 
-개인 폴더(about·career·writing·운동)는 `data/` 코퍼스가 아니라 볼트 루트에서 `obsidian/` 크롤로
-검색됩니다 — 아래 "Obsidian" 절 참고. 청크/문서 수는 폴더 구성에 따라 달라지므로 최신 수치는
-`list_documents`로 확인합니다.
+위 폴더명은 예시일 뿐입니다 — 코드는 고정 목록을 강제하지 않습니다. 코퍼스를 어떻게 나눌지는
+정책 선택입니다: 전부 `data/` 아래에 두거나, 주제 자료만 `data/`에 두고 개인 폴더는 볼트의 다른
+곳에 남겨 아래 설명하는 선택적 `obsidian/` 크롤로 잡히게 할 수 있습니다. 청크/문서 수는 폴더
+구성에 따라 달라지므로 최신 수치는 `list_documents`로 확인합니다.
 
 색인 제외 대상(`ingest.py:EXCLUDED_DIR_NAMES`, `is_concept_path`):
 
@@ -195,8 +198,9 @@ Docker 컨테이너 `pkb-es`로 실행되며, 기본 인덱스는 `pkb_documents
 
 Graph RAG는 검색을 대체하지 않고 개념 간 관계 질의를 보완합니다. 저장 위치는
 `data/.graph/pkb_graph.sqlite`(`GRAPH_DB_PATH`)이며, 주요 테이블은 `concepts`,
-`concept_aliases`, `documents`, `concept_edges`, `concept_edge_evidence`, `concept_mentions`,
-`concept_curation`, `graph_meta`입니다. `concept_edges`의 weight/evidence_count는 청크별
+`concept_aliases`, `documents`, `concept_edges`, `concept_edge_evidence`, `extracted_chunks`,
+`concept_mentions`, `concept_curation`, `graph_meta` 9개가 전체 테이블입니다(`graph/schema.py`).
+`concept_edges`의 weight/evidence_count는 청크별
 `concept_edge_evidence`에서 집계되어 재추출·문서 삭제에도 정확히 정리됩니다.
 
 빌드 파이프라인(전량 Claude Code 셀프추출, API 호출 없음):
@@ -219,8 +223,19 @@ Graph RAG는 검색을 대체하지 않고 개념 간 관계 질의를 보완합
 launchd로 상시 기동한 단일 서버를 Claude Code·Codex·Gemini가 공유합니다.
 
 ```
-Claude Code / Codex / Gemini → HTTP :8787/mcp → mcp_server.py → ES / data / SQLite
+Claude Code / Codex / Gemini → HTTP :8787/mcp → mcp_server.py ─┐
+                                                               ├→ operations.py / documents.py
+uv run pkb <command> ────────────────────────→ cli.py ─────────┘   (공유 도메인 코어)
+                                                                          ↓
+                                                                 ES / data / SQLite
 ```
+
+`mcp_server.py`와 `cli.py`는 둘 다 얇은 표면입니다. 작성·변환·동기화 도메인 작업은
+`src/pkb/operations.py`에, 문서 경로 해석·조회·생명주기는 `src/pkb/documents.py`에 있습니다 —
+도구와 그 CLI 쌍둥이가 서로 어긋나지 못하도록 추출한 계층입니다. 위에서 말한 CLI↔MCP 정합을
+실제로 성립시키는 것이 이 공유 코어입니다. `tests/test_cli_mcp_parity.py`는 introspection으로
+*표면*을 가드해 — 새로 등록된 명령·도구가 capability 맵이나 allowlist에 선언되지 않으면 실패 —
+동작 자체를 비교하지는 않습니다. 동작 일치는 공유 코어가 담당합니다.
 
 제공 도구 22개:
 
@@ -245,13 +260,15 @@ MCP 서버가 지키는 경계:
 
 ## 5. 보조 인터페이스 (CLI)
 
-`src/pkb/cli.py`는 운영과 검증에 사용합니다: `init`, `reindex`, `sync`, `convert`, `add`,
-`write`, `show`, `reindex-doc`, `list`, `query`, `delete`, `archive`, `restore`, `doctor`,
-`eval`, `purge-archived`, `stale`, `watch`, `graph stats`, `graph reset-evidence`,
-`graph rebuild-evidence-local`, `graph finalize-evidence`, `graph sync-notes`.
+`src/pkb/cli.py`는 운영과 검증에 사용합니다. 최상위 명령 19개: `init`, `reindex`, `index-switch`,
+`sync`, `convert`, `add`, `write`, `show`, `reindex-doc`, `list`, `query`, `delete`, `archive`,
+`restore`, `doctor`, `eval`, `purge-archived`, `stale`, `watch`. 여기에 `graph` 하위 명령 10개:
+`stats`, `explain`, `path`, `query`, `affected`, `map`, `reset-evidence`, `finalize-evidence`,
+`rebuild-evidence-local`, `sync-notes`.
 
-대부분의 능력은 CLI와 MCP 양쪽에 있습니다(`sync` ↔ `sync_corpus`, `show` ↔ `get_document` 등).
-CLI 전용: `init`, `reindex`, `delete`, `purge-archived`, `eval`, `graph stats`,
+대부분의 능력은 CLI와 MCP 양쪽에 있습니다(`sync` ↔ `sync_corpus`, `show` ↔ `get_document`,
+`graph explain` ↔ `graph_explain` 등). CLI 전용: `init`, `reindex`, `index-switch`(읽기 alias 전환),
+`delete`, `purge-archived`, `eval`, `graph stats`, `graph map`(오프라인 HTML 스냅샷),
 `graph reset-evidence`, `graph rebuild-evidence-local`, `graph finalize-evidence`
 (무거운 evidence 마이그레이션), `stale`,
 `watch`(훅·데몬용). MCP 전용: `graph_list_concepts`,

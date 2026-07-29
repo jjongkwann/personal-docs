@@ -33,6 +33,7 @@
 | `concept_mentions` | 개념이 등장한 `doc_id`/`chunk_index` |
 | `concept_curation` | 개념 큐레이션(real/vocab) + 증류 산문 |
 | `extracted_chunks` | 추출 완료 마커 `(doc_id, chunk_index)` → `content_hash` |
+| `graph_meta` | key/value 마커 — 1회성 스키마 마이그레이션과 `edge_evidence_rebuild` staging 플래그 |
 
 증분 추출은 `extracted_chunks`가 기준이다. 청크의 현재 `content_hash`가 그 인덱스의 마커와
 다르면(= 내용 변경 또는 다른 인덱스로 이동) pending이 되어 재추출되고, 재추출은 **그 청크의
@@ -100,6 +101,7 @@ uv run pkb graph explain "BM25"  # 단일 개념과 양방향 관계 근거
 uv run pkb graph path "BM25" "RRF"  # 제한된 최단 경로
 uv run pkb graph query "키워드 검색과 벡터 검색은 어떻게 연결돼?"  # 의미 시드 하위 그래프
 uv run pkb graph affected "BM25" --relation prerequisite_of  # 저장 방향 하위 순회
+uv run pkb graph map --concept "BM25"   # 오프라인 Evidence Map HTML 스냅샷
 uv run pkb graph reset-evidence --yes  # 기존 그래프 유지, staging evidence·마커 초기화
 uv run pkb graph rebuild-evidence-local --yes  # Ollama 로컬 모델로 pending 전량 추출
 uv run pkb graph finalize-evidence --yes  # 전량 추출 확인 후 staging 그래프로 원자 전환
@@ -117,6 +119,31 @@ Ollama에 생성 모델이 설치돼 있으면 `rebuild-evidence-local`이 struc
 자동화한다. 기본 모델은 `gpt-oss:20b`, 기본 배치는 8청크이며 중단해도 마커 기준으로 재개한다.
 진행 로그는 `data/.logs/graph-evidence-rebuild.jsonl`에 기록된다. 샘플 검증에는
 `--max-batches 1`, 전체 실행에는 기본값 `--max-batches 0`을 사용한다.
+
+### Evidence Map (`graph map`)
+
+`graph map`은 **단일 자급식 HTML 파일**을 생성한다 — 하위 그래프를 방사형 트리로 그리고 근거
+패널과 관계 필터를 붙인 스냅샷으로, 서버도 네트워크도 필요 없다. 진입 모드는 정확히 하나만
+지정한다:
+
+```bash
+uv run pkb graph map --concept "BM25"                    # 개념 하나를 중심으로
+uv run pkb graph map --query "BM25와 RRF는 어떻게 연결돼?"   # 의미 시드 탐색
+uv run pkb graph map --path BM25 RAG                     # 두 개념 사이 최단 경로
+```
+
+| 옵션 | 기본값 | 의미 |
+|---|---|---|
+| `--depth` | `1` | 확장 깊이 (0~2) |
+| `--max-nodes` | `30` | 표시 노드 상한 (1~100) |
+| `--relation` / `-r` | 전체 | 관계 타입 필터(쉼표 구분) |
+| `--evidence-limit` | `5` | 관계당 근거 수 (0~20) |
+| `--out` | `<GRAPH_DB_PATH 디렉터리>/evidence-map.html` | 출력 경로 |
+| `--open` | 끔 | 생성 후 브라우저로 열기 |
+
+`--concept`/`--query`/`--path`를 하나도 안 주거나 둘 이상 주면 사용법 오류다. `--query`는 텍스트를
+임베딩하므로 임베딩 모델을 로드하고, `--concept`·`--path`는 SQLite만 읽는다. 구현은
+`src/pkb/graph/viewmap.py`.
 
 일괄 API 빌드나 export CLI는 없다. 구축은 MCP-first로 유지하고, 조회는 SQLite 네이티브 그래프 도구,
 CLI, Obsidian 투영 노트를 함께 제공한다.

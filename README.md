@@ -10,6 +10,7 @@ Connects Elasticsearch hybrid search, MCP, Obsidian, and SQLite Graph RAG into a
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![Elasticsearch](https://img.shields.io/badge/Elasticsearch-8.17-005571?logo=elasticsearch&logoColor=white)
 ![Local first](https://img.shields.io/badge/data-local--first-2F855A)
+![License](https://img.shields.io/badge/license-MIT-blue)
 
 **English** | [한국어](README.ko.md)
 
@@ -20,8 +21,10 @@ your hand-picked Markdown, PDF, and Office documents locally. It searches **only
 curate** — not the whole web — and keeps the documents under `DATA_ROOT` as the source of truth.
 
 From Claude Code, Codex, or Gemini you can search, write, and ingest through MCP tools, while you
-read and edit the same originals and concept notes directly in Obsidian. PKB itself never calls an
-LLM API; your documents, the Elasticsearch index, and the concept graph all stay on your machine.
+read and edit the same originals and concept notes directly in Obsidian. PKB never calls an
+external LLM API and needs no API key — the only LLM call in the codebase is optional and targets a
+local Ollama endpoint (`pkb graph rebuild-evidence-local`). Your documents, the Elasticsearch index,
+and the concept graph all stay on your machine.
 
 ## Key Features
 
@@ -32,7 +35,7 @@ LLM API; your documents, the Elasticsearch index, and the concept graph all stay
 | MCP-first interface | Search, file writing, conversion, sync, document management, and native graph traversal via 22 MCP tools. |
 | Broad document ingestion | Chunks Markdown, text, PDF, DOCX, PPTX, XLSX, and HTML, re-embedding only what changed. |
 | Obsidian integration | Keep the corpus inside your vault and manage originals, backlinks, and auto-generated concept notes together. |
-| Graph RAG | Stores concepts and evidence in SQLite, supports native explain/path/subgraph traversal, and projects wikilink notes. |
+| Graph RAG | Stores concepts and evidence in SQLite, supports native explain/path/subgraph traversal, projects wikilink notes, and renders an offline Evidence Map. |
 | Safe operations | Pre-sync cleanup previews, document archive/restore, health checks, and search quality evaluation. |
 
 ## How It Works
@@ -181,12 +184,16 @@ uv run pkb reindex
 uv run pkb archive data/career/old_resume.md --reason outdated
 uv run pkb restore data/career/old_resume.md
 
-# Concept graph stats and note sync
+# Concept graph stats, queries, and note sync
 uv run pkb graph stats
 uv run pkb graph explain "BM25"
 uv run pkb graph path "BM25" "RRF"
 uv run pkb graph query "how do lexical and vector retrieval connect?"
+uv run pkb graph map --concept "BM25" --open   # offline Evidence Map HTML
 uv run pkb graph sync-notes
+
+# Swap the read alias to a new physical index (e.g. after an embedding model change)
+uv run pkb index-switch pkb_documents_v2
 ```
 
 `purge-archived` and `delete` perform physical deletion. Check the
@@ -232,11 +239,15 @@ search the rest of the vault.
 personal-docs/
 ├── src/pkb/
 │   ├── mcp_server.py   # MCP tools and HTTP server
+│   ├── cli.py          # CLI commands
+│   ├── operations.py   # write/convert/sync domain core shared by CLI and MCP
+│   ├── documents.py    # document path resolution, lookup, lifecycle
 │   ├── ingest.py       # document parsing, chunking, delta ingestion
 │   ├── retrieve.py     # BM25 + kNN + RRF search
 │   ├── rerank.py       # CrossEncoder reranking
 │   ├── store.py        # Elasticsearch store
-│   └── graph/          # SQLite concept graph and note projection
+│   ├── config.py       # settings, overridable via environment variables
+│   └── graph/          # SQLite concept graph, read queries, note projection, Evidence Map
 ├── tests/              # unit and integration tests
 ├── docs/               # architecture, MCP, CLI, Graph RAG docs
 ├── Dockerfile.es       # Elasticsearch with the nori plugin
@@ -280,5 +291,5 @@ documents, absolute paths, or environment variable values end up in the commit.
 
 ## License
 
-This repository does not currently declare an open-source license. To allow external use and
-contributions, add a `LICENSE` file that matches your policy.
+[MIT](LICENSE). Your own documents under `DATA_ROOT` are not part of this repository and are not
+covered by it — the license applies to the PKB code only.

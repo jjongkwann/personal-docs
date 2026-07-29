@@ -85,15 +85,45 @@ MCP 기본 경로에서는 `convert_and_ingest` 호출 시 Claude Code가 `categ
 ```bash
 uv run pkb query "벡터 검색의 원리는?"
 uv run pkb query "Python 프레임워크 경험" --category career --top-k 10
+uv run pkb query "RAG 평가" --expand 1           # 전후 1청크를 neighbors로 부착
+uv run pkb query "BM25" --rerank                 # 이번 실행만 CrossEncoder 재순위 강제
+uv run pkb query "BM25" --no-obsidian            # 코퍼스만, obsidian/* 문서 제외
 ```
+
+`--top-k` 기본값은 `DEFAULT_TOP_K`(5)이고, `--rerank`/`--no-rerank`와 `--expand`는 생략 시 각각
+`RERANK_ENABLED`·`EXPAND_CONTEXT` 설정값을 따릅니다. **부정형이 비대칭이라는 점에 주의** — 플래그
+쌍은 `--no-include-obsidian`이 아니라 `--include-obsidian` / `--no-obsidian`입니다.
 
 ## 문서 관리
 
 ```bash
 uv run pkb list
 uv run pkb list --category study
+uv run pkb list --limit 0                        # 0 = 전체 (기본 50)
+
+uv run pkb show data/study/rag-overview.md                     # 메타 + 목차
+uv run pkb show data/study/rag-overview.md --content           # 청크 본문 포함
+uv run pkb show data/study/rag-overview.md --content --chunks "3-7"   # 3~7번 청크만
+
+uv run pkb write data/writing/note.md --content "..."   # 작성 + 자동 인제스트 (--content 생략 시 stdin)
+uv run pkb write data/writing/note.md --no-ingest       # 저장만 하고 나중에 인제스트
+
+uv run pkb reindex-doc data/study/rag-overview.md       # 외부에서 편집한 문서 하나만 재인제스트
 uv run pkb delete data/study/rag-overview.md
 ```
+
+`write`·`show`·`reindex-doc`는 각각 `write_file`·`get_document`·`reindex_document`의 CLI 쌍둥이로,
+동일한 코어 경로와 동일한 `data/` 하위 제한을 공유합니다.
+
+### 변경 감시
+
+```bash
+uv run pkb watch                 # 10초 간격 폴링
+uv run pkb watch --interval 60   # 60초 간격 폴링
+```
+
+시작 시 `sync`와 동일한 reconcile을 한 번 수행해 기준선을 잡고, 이후에는 변경된 파일만 델타
+인제스트합니다(mtime + size 스냅샷 비교). 종료는 Ctrl+C.
 
 ---
 
@@ -107,6 +137,25 @@ uv run pkb reindex --yes     # 바로 실행
 ```
 
 데이터 코퍼스(DATA_ROOT)와 OBSIDIAN_PATH 전체를 새로 인덱싱합니다.
+
+### 무중단 전환 (`index-switch`)
+
+`reindex`는 제자리에서 삭제 후 재생성하므로 실행 중에는 검색 품질이 떨어집니다. 전량 재임베딩을
+강제하는 `EMBEDDING_MODEL`/`EMBEDDING_DIMS` 변경 시에는 새 **물리** 인덱스를 먼저 채운 뒤 읽기
+alias를 원자적으로 전환하세요:
+
+```bash
+# 1. 이번 실행에만 ES_INDEX를 덮어써서 새 물리 인덱스를 채움
+ES_INDEX=pkb_documents_v2 uv run pkb reindex --yes
+
+# 2. 읽기 alias를 원자 전환 (이전 대상 출력)
+uv run pkb index-switch pkb_documents_v2
+```
+
+`ES_INDEX`는 물리 인덱스가 아니라 **읽기 alias**로 취급됩니다. `index-switch`는 대상 인덱스가
+없거나, alias 이름과 같거나, `ES_INDEX`가 alias가 아닌 물리 인덱스일 때 명시적으로 실패합니다
+(`store.switch_read_alias`). 이전 물리 인덱스는 절대 자동 삭제하지 않으므로, 새 인덱스를 검증한
+뒤 직접 지우면 됩니다.
 
 ---
 
@@ -162,11 +211,20 @@ Claude Code `SessionStart` 훅으로 등록하면 세션 시작 시 sync 필요 
 
 ## Graph RAG 운영 CLI
 
-개념 그래프 구축은 Claude Code가 MCP의 `graph_list_chunks`/`graph_store_concepts`로 직접 추출·저장합니다(API 호출 없음). CLI는 통계·evidence 재구축 준비·노트 동기화를 제공합니다.
+개념 그래프 구축은 Claude Code가 MCP의 `graph_list_chunks`/`graph_store_concepts`로 직접 추출·저장합니다(API 호출 없음). CLI는 통계·조회 질의 4종·Evidence Map 스냅샷·evidence 재구축·노트 동기화를 제공합니다.
 
 ```bash
 # 현재 그래프 통계
 uv run pkb graph stats
+
+# 조회 질의 — MCP graph_* 도구와 동일한 모델을 사용
+uv run pkb graph explain "BM25"                 # 개념 하나의 양방향 엣지 + 근거
+uv run pkb graph path "BM25" "RRF"              # 제한된 최단 경로
+uv run pkb graph query "키워드 검색과 벡터 검색은 어떻게 연결돼?"   # 의미 시드 하위 그래프
+uv run pkb graph affected "BM25" --relation prerequisite_of  # 저장 방향 하위 순회
+
+# 오프라인 Evidence Map HTML (전체 옵션 표는 docs/ko/graph-rag.md 참고)
+uv run pkb graph map --concept "BM25" --open
 
 # 구 append-only 관계를 evidence 기반으로 전량 재구축할 때만 실행
 # 기존 그래프는 유지하고 staging evidence·추출 마커만 초기화
@@ -174,6 +232,10 @@ uv run pkb graph reset-evidence --yes
 
 # 선택: 설치된 Ollama 모델로 pending 전량 자동 추출 (중단 후 재실행 가능)
 uv run pkb graph rebuild-evidence-local --yes
+#   --model gpt-oss:20b            # 설치된 Ollama 생성 모델
+#   --batch-size 8                 # 생성 1회당 청크 수 (1~8)
+#   --max-batches 0                # 0=완료까지, 1=샘플 검증
+#   --endpoint http://127.0.0.1:11434   # 로컬 Ollama 엔드포인트
 
 # 수동 graph_list_chunks → graph_store_concepts 전량 처리 후 pending=0일 때 원자 전환
 uv run pkb graph finalize-evidence --yes
@@ -199,8 +261,11 @@ uv run pkb init    # ES 인덱스 생성 + (설정 시) Obsidian 초기 인제�
 ```
 
 이후 볼트 변경사항은 `uv run pkb sync`(또는 MCP `sync_obsidian`)로 재조정합니다. 실시간 감시는
-없습니다. 이 경로로 인제스트된 파일은 `category=obsidian`, `doc_id`는 `obsidian/<상대경로>`로
-저장되며, `DATA_ROOT` 서브트리는 크롤에서 자동 제외되어 이중 인제스트가 없습니다.
+없습니다. 이 경로로 인제스트된 파일은 `doc_id`가 `obsidian/<상대경로>`로 저장되고, **카테고리는
+볼트 최상위 폴더명에서 동적으로 결정**됩니다 — `data/`와 같은 규칙(`ingest.py:_extract_category`)이라
+`obsidian/career/x.md`는 `category=obsidian`이 아니라 `category=career`가 됩니다. 볼트 루트에 직접
+놓인 파일은 `misc`로 떨어집니다. `DATA_ROOT` 서브트리는 크롤에서 자동 제외되어 이중 인제스트가
+없습니다.
 
 ---
 
@@ -217,6 +282,8 @@ uv run pkb init    # ES 인덱스 생성 + (설정 시) Obsidian 초기 인제�
 └── src/pkb/
     ├── mcp_server.py        # MCP 서버 (기본 사용 방법)
     ├── cli.py               # CLI 커맨드
+    ├── operations.py        # CLI·MCP가 공유하는 작성·변환·동기화 도메인 코어
+    ├── documents.py         # 문서 경로 해석, 조회, 생명주기
     ├── config.py            # 설정 관리
     ├── ingest.py            # 파싱, 청킹 (PDF는 pdfminer 페이지 보존, 그 외 markitdown)
     ├── embeddings.py        # sentence-transformers 임베딩
@@ -224,8 +291,9 @@ uv run pkb init    # ES 인덱스 생성 + (설정 시) Obsidian 초기 인제�
     ├── store.py             # Elasticsearch CRUD, 인덱스 관리
     ├── retrieve.py          # 하이브리드 검색 (BM25 + kNN + RRF)
     ├── report.py            # doctor 상태 리포트
+    ├── eval.py              # 검색 품질 평가 (모드별 recall/MRR)
     ├── search_log.py        # 검색 호출 JSONL 로깅
-    └── graph/               # SQLite 기반 Graph RAG
+    └── graph/               # SQLite Graph RAG (schema, store, query, notes, rebuild, viewmap)
 ```
 
 ---
@@ -248,13 +316,19 @@ GRAPH_DEDUP_THRESHOLD=0.88
 |------|--------|------|
 | `EMBEDDING_MODEL` | `BAAI/bge-m3` | sentence-transformers 모델 (1024d, `EMBEDDING_DIMS`와 함께 변경) |
 | `EMBED_CONTEXT_PREFIX` | `true` | 임베딩 입력에 title·section_path prefix 포함 |
+| `EMBEDDING_DEVICE` | `auto` | 임베딩 torch 디바이스. `auto`는 mps → cuda → cpu 순 선택, `cpu`/`mps`/`cuda` 고정 가능 |
 | `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | CrossEncoder 리랭커 모델 |
+| `RERANK_DEVICE` | `auto` | 리랭커 torch 디바이스 (동일한 해석 규칙) |
+| `RERANK_BATCH_SIZE` | `8` | CrossEncoder 배치 크기. MPS에서는 작은 배치가 더 빠른 것으로 측정됨 |
 | `RERANK_ENABLED` | `false` | 리랭크 기본 사용 여부 |
 | `CANDIDATE_K` | `20` | RRF/리랭커 후보 수. 기본값은 rerank 경로 벤치마크에서 `ck=50` 대비 latency 2.4x↓·품질 동일로 채택. 같은 벤치에서 RRF-only 경로도 `ck=20`이 nDCG/MRR 미세 우위. 더 큰 후보 풀이 필요하면 50으로 상향. |
 | `EXPAND_CONTEXT` | `0` | N>0이면 검색 결과 전후 N 청크를 neighbors로 부착 (parent context) |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | 500 / 100 | 고정 크기 청킹 |
 | `GRAPH_DB_PATH` | `data/.graph/pkb_graph.sqlite` | SQLite 개념 그래프 파일 |
 | `GRAPH_DEDUP_THRESHOLD` | `0.88` | 개념 병합 임베딩 유사도 임계값 |
+| `DEFAULT_TOP_K` | `5` | `pkb query`·`search_knowledge` 기본 결과 수 |
+| `MCP_PORT` | `8787` | 공유 HTTP MCP 서버 포트 (항상 `127.0.0.1`에 바인딩) |
+| `WARMUP_ON_START` | `false` | MCP 서버 기동 시 모델 예열. 끄면 첫 검색까지 서버가 ~50MB로 유휴 |
 
 ## 청킹 전략
 

@@ -7,8 +7,11 @@ PKB does **two things**.
    notes projected from the SQLite concept graph (`data/_concepts/`) are plain markdown files, so
    they can be viewed as-is.
 
-100% local — there are no LLM API calls in the code, and no `ANTHROPIC_API_KEY` is needed.
-Concept extraction and document writing are both performed by the Claude Code session itself.
+100% local — no external API calls, and no `ANTHROPIC_API_KEY` is needed. Concept extraction and
+document writing are both performed by the Claude Code session itself. The one LLM call that does
+exist in the code is optional and stays on the machine: `pkb graph rebuild-evidence-local` posts to
+a local Ollama endpoint (`http://127.0.0.1:11434`, `graph/rebuild.py`) to automate the evidence
+rebuild loop. Nothing else in the codebase talks to a generation model.
 
 The core architecture has four layers:
 
@@ -75,20 +78,21 @@ list of categories, so creating a new folder creates a new category (`ingest.py:
 
 ```
 data/                       # = DATA_ROOT. doc_id is always data/… regardless of location
-├── rag/                    # folder = topic. Subdirectory structure is free-form (e.g. retrieval/, rerank/, evaluation/…)
-├── agent/
-├── backend/
-├── ...                     # adding a folder = adding a category
-├── news/
-├── journal/
-├── _concepts/               # concept notes (one-way SQLite→note projection, not indexed in ES)
+├── study/                  # folder = category. Subdirectory structure is free-form (e.g. rag/retrieval/, rag/rerank/…)
+├── career/
+├── writing/
+├── about/
+├── ...                     # adding a folder = adding a category (news, journal, agent, backend…)
+├── _concepts/              # concept notes (one-way SQLite→note projection, not indexed in ES)
 ├── .logs/                  # search log JSONL (search_log.py)
 └── .graph/                 # graph SQLite (GRAPH_DB_PATH)
 ```
 
-Personal folders (about, career, writing, exercise) aren't part of the `data/` corpus — they're
-indexed via the `obsidian/` crawl from the vault root instead. See the "Obsidian" section below.
-Chunk/document counts vary with folder structure, so check `list_documents` for current numbers.
+These folder names are only an example — the code enforces no fixed list. How you split the corpus
+is a policy choice: keep everything under `data/`, or keep topical material in `data/` and leave
+personal folders elsewhere in the vault, where the optional `obsidian/` crawl described below picks
+them up. Chunk/document counts vary with folder structure, so check `list_documents` for current
+numbers.
 
 Excluded from indexing (`ingest.py:EXCLUDED_DIR_NAMES`, `is_concept_path`):
 
@@ -204,8 +208,8 @@ Search calls are logged as JSONL to `data/.logs/search.jsonl`.
 
 Graph RAG doesn't replace search — it complements it by answering relationship queries between
 concepts. It's stored at `data/.graph/pkb_graph.sqlite` (`GRAPH_DB_PATH`), with `concepts`,
-`concept_aliases`, `documents`, `concept_edges`, `concept_edge_evidence`, `concept_mentions`,
-`concept_curation`, and `graph_meta` as the main tables. The weight/evidence_count on
+`concept_aliases`, `documents`, `concept_edges`, `concept_edge_evidence`, `extracted_chunks`,
+`concept_mentions`, `concept_curation`, and `graph_meta` as the nine tables (`graph/schema.py`). The weight/evidence_count on
 `concept_edges` is aggregated from per-chunk `concept_edge_evidence`, so it stays accurate through
 re-extraction and document deletion.
 
@@ -232,8 +236,19 @@ format.
 single server kept always-on via launchd is shared by Claude Code, Codex, and Gemini.
 
 ```
-Claude Code / Codex / Gemini → HTTP :8787/mcp → mcp_server.py → ES / data / SQLite
+Claude Code / Codex / Gemini → HTTP :8787/mcp → mcp_server.py ─┐
+                                                               ├→ operations.py / documents.py
+uv run pkb <command> ────────────────────────→ cli.py ─────────┘   (shared domain core)
+                                                                          ↓
+                                                                 ES / data / SQLite
 ```
+
+`mcp_server.py` and `cli.py` are both thin surfaces. The write/convert/sync domain operations live
+in `src/pkb/operations.py`, and document path resolution, lookup, and lifecycle live in
+`src/pkb/documents.py` — extracted so that a tool and its CLI twin cannot drift apart. This shared
+core is what actually makes the CLI↔MCP parity above true. `tests/test_cli_mcp_parity.py` guards
+the *surface* by introspection — it fails when a newly registered command or tool isn't declared in
+its capability map or an allowlist — but it never compares behavior; the shared core does that.
 
 22 tools provided:
 
@@ -259,15 +274,18 @@ Boundaries the MCP server enforces:
 
 ## 5. Secondary Interface (CLI)
 
-`src/pkb/cli.py` is used for operations and verification: `init`, `reindex`, `sync`, `convert`,
-`add`, `write`, `show`, `reindex-doc`, `list`, `query`, `delete`, `archive`, `restore`, `doctor`,
-`eval`, `purge-archived`, `stale`, `watch`, `graph stats`, `graph reset-evidence`,
-`graph rebuild-evidence-local`, `graph finalize-evidence`, `graph sync-notes`.
+`src/pkb/cli.py` is used for operations and verification. 19 top-level commands: `init`, `reindex`,
+`index-switch`, `sync`, `convert`, `add`, `write`, `show`, `reindex-doc`, `list`, `query`, `delete`,
+`archive`, `restore`, `doctor`, `eval`, `purge-archived`, `stale`, `watch`. Plus 10 `graph`
+subcommands: `stats`, `explain`, `path`, `query`, `affected`, `map`, `reset-evidence`,
+`finalize-evidence`, `rebuild-evidence-local`, `sync-notes`.
 
 Most capabilities exist on both the CLI and MCP sides (`sync` ↔ `sync_corpus`, `show` ↔
-`get_document`, etc.). CLI-only: `init`, `reindex`, `delete`, `purge-archived`, `eval`,
-`graph stats`, `graph reset-evidence`, `graph rebuild-evidence-local`, `graph finalize-evidence`
-(heavy evidence migration), `stale`, `watch` (for hooks/daemons). MCP-only: `graph_list_concepts`,
+`get_document`, `graph explain` ↔ `graph_explain`, etc.). CLI-only: `init`, `reindex`,
+`index-switch` (read-alias switch), `delete`, `purge-archived`, `eval`, `graph stats`, `graph map`
+(offline HTML snapshot), `graph reset-evidence`, `graph rebuild-evidence-local`,
+`graph finalize-evidence` (heavy evidence migration), `stale`, `watch` (for hooks/daemons).
+MCP-only: `graph_list_concepts`,
 `graph_list_chunks`, `graph_store_concepts`, `graph_curate`, `graph_merge` (Claude self-extraction
 loop), `sync_obsidian` (vault-only reconciliation). This mapping is guarded by
 `tests/test_cli_mcp_parity.py`.

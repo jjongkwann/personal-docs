@@ -165,6 +165,43 @@ uv run pkb doctor
 
 Graph RAG의 MCP-first 흐름은 `graph_list_chunks`로 청크를 읽고, Claude Code가 직접 개념과 관계를 추출한 뒤, `graph_store_concepts`로 저장하는 방식입니다. 저장 후 `graph_curate`로 real/vocab을 라벨링하고 표기 변형은 `graph_merge`로 병합한 뒤 `sync_concept_notes`로 투영합니다. 관계 조회는 `graph_explain`/`graph_path`/`graph_query`/`graph_affected`로 SQLite를 직접 읽고, 투영 노트는 사람이 읽는 Obsidian 뷰로 사용합니다.
 
+### 파라미터 레퍼런스
+
+`src/pkb/mcp_server.py`에 등록된 그대로의 시그니처:
+
+```python
+search_knowledge(query, category="", top_k=5, include_archived=False,
+                 include_obsidian=True, query_variants=[])
+write_file(file_path, content, ingest=True)
+list_documents(category="", include_archived=False, limit=50)
+add_document(file_path, tags="")
+convert_and_ingest(input_path, category, output_name="", ingest=True)
+get_document(doc_id, include_content=False, chunk_range="")
+reindex_document(doc_id)
+sync_corpus(confirm_prune=False)
+sync_obsidian(path="", confirm_prune=False)
+archive_document(doc_id, reason="")
+restore_document(doc_id)
+doctor()
+
+graph_list_concepts(category="", limit=500)
+graph_explain(concept, edge_limit=30, evidence_limit=5, mention_limit=20)
+graph_path(source, target, max_hops=4, directed=False, relations=[], evidence_limit=3)
+graph_query(query, depth=2, seed_limit=3, max_nodes=30, min_similarity=0.4,
+            relations=[], evidence_limit=3)
+graph_affected(concept, max_depth=2, max_nodes=30, relations=[], evidence_limit=3)
+graph_list_chunks(category="", doc_id="", offset=0, limit=20, pending_only=False)
+graph_store_concepts(items_json)
+graph_curate(items_json="")
+graph_merge(winner_slug, loser_slugs_json)
+sync_concept_notes(confirm_prune=False)
+```
+
+`add_document(tags=...)`는 쉼표 구분 문자열을 받고, 그래프 도구의 `relations`는 **리스트**를
+받습니다. CLI 쪽은 의도적으로 갈라져 있습니다 — `pkb graph …`는 쉼표 구분 문자열을 받는
+`--relation`을 씁니다(`cli.py:_graph_relations`). 셸에서는 플래그를 반복하는 것보다 문자열 하나가
+다루기 쉽기 때문입니다.
+
 ## 사용 예시
 
 Claude Code에서 자연스럽게 대화하면 적절한 MCP 도구가 호출됩니다.
