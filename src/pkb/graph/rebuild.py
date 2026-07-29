@@ -16,7 +16,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from pkb.config import data_dir, settings
 from pkb.graph import store as graph_store
 from pkb.graph.schema import graph_connection
-from pkb.graph.services import legacy_concept_hints, load_pending_batch, store_concepts
+from pkb.graph.services import (
+    corpus_vocabulary,
+    legacy_concept_hints,
+    load_pending_batch,
+    store_concepts,
+)
 from pkb.store import get_client
 
 GENERIC_NAVIGATION_CONCEPTS = {
@@ -101,6 +106,24 @@ def _doc_id_key(doc_id: str) -> str:
     return re.sub(r"[\s_-]+", "", unicodedata.normalize("NFC", doc_id))
 
 
+def build_system_prompt(vocabulary: list[str]) -> str:
+    """전역 어휘 블록을 SYSTEM_PROMPT 뒤에 붙인다.
+
+    블록은 run 내내 동일하므로 llama.cpp 프롬프트 캐시가 그대로 적중한다 —
+    청크별 힌트와 달리 앞부분이 바뀌지 않는다.
+    """
+    if not vocabulary:
+        return SYSTEM_PROMPT
+    return (
+        SYSTEM_PROMPT
+        + "\nCorpus vocabulary already in the graph. When the chunk supports one of "
+        "these, reuse the name verbatim instead of minting a new variant; put the "
+        "chunk's literal wording in aliases. Do not extract a name merely because it "
+        "appears here — the chunk must support it.\n"
+        + "\n".join(vocabulary)
+    )
+
+
 def _ollama_extract(
     chunks: list[dict],
     hints: dict[tuple[str, int], list[str]],
@@ -108,6 +131,7 @@ def _ollama_extract(
     model: str,
     endpoint: str,
     timeout: int,
+    system_prompt: str = SYSTEM_PROMPT,
 ) -> tuple[ExtractedBatch, dict]:
     inputs = [
         {
@@ -121,7 +145,7 @@ def _ollama_extract(
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {
                 "role": "user",
                 "content": "Extract the graph for this JSON array:\n"
@@ -313,6 +337,9 @@ def rebuild_with_ollama(
     # 다음 청크로 넘어가되, 목록을 결과에 실어 finalize를 막는다.
     deferred: dict[tuple[str, int], str] = {}
     consecutive_failures = 0
+    # run 시작 시 1회만 조회 — 어휘가 매 호출 바뀌면 프롬프트 캐시가 전부 무효화된다.
+    with graph_connection(settings.graph_db_path) as conn:
+        system_prompt = build_system_prompt(corpus_vocabulary(conn))
 
     while max_batches <= 0 or completed_batches < max_batches:
         with graph_connection(settings.graph_db_path) as conn:
@@ -362,6 +389,7 @@ def rebuild_with_ollama(
                     chunks,
                     hints,
                     model=model,
+                    system_prompt=system_prompt,
                     endpoint=endpoint,
                     timeout=timeout,
                 )

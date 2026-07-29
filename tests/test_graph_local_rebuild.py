@@ -409,3 +409,41 @@ def test_rebuild_raises_on_systemic_failure(monkeypatch, tmp_path):
 
     with pytest.raises(RuntimeError, match="Ollama 호출 실패"):
         rebuild_with_ollama(batch_size=1, retries=0, progress=lambda message: None)
+
+
+def test_corpus_vocabulary_prefers_real_and_ranks_by_mentions(tmp_path):
+    """전역 어휘는 mention_count 순이며 큐레이션이 있으면 real만 반환한다."""
+    from pkb.graph.services import corpus_vocabulary
+
+    db = str(tmp_path / "g.sqlite")
+    init_schema(db)
+    with graph_connection(db) as conn:
+        for name, slug, mentions in (
+            ("BM25", "bm25", 50),
+            ("방법", "방법", 900),
+            ("HNSW", "hnsw", 10),
+        ):
+            conn.execute(
+                "INSERT INTO concepts (name, slug, mention_count, created_at, updated_at) "
+                "VALUES (?, ?, ?, '2026-01-01', '2026-01-01')",
+                (name, slug, mentions),
+            )
+        # 큐레이션 없으면 순수 mention 순 — 쓰레기('방법')가 1위로 올라온다
+        assert corpus_vocabulary(conn) == ["방법", "BM25", "HNSW"]
+
+        graph_store.set_curation(conn, "bm25", "real")
+        graph_store.set_curation(conn, "hnsw", "real")
+        graph_store.set_curation(conn, "방법", "vocab")
+        assert corpus_vocabulary(conn) == ["BM25", "HNSW"]
+        assert corpus_vocabulary(conn, limit=1) == ["BM25"]
+
+
+def test_build_system_prompt_appends_vocabulary_only_when_present():
+    """어휘가 비면 프롬프트가 그대로여야 캐시·기존 동작이 유지된다."""
+    from pkb.graph.rebuild import SYSTEM_PROMPT, build_system_prompt
+
+    assert build_system_prompt([]) == SYSTEM_PROMPT
+    built = build_system_prompt(["BM25", "HNSW"])
+    assert built.startswith(SYSTEM_PROMPT)
+    assert built.rstrip().endswith("HNSW")
+    assert "reuse the name verbatim" in built

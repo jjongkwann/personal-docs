@@ -95,6 +95,30 @@ def legacy_concept_hints(
     return hints
 
 
+def corpus_vocabulary(conn: sqlite3.Connection, *, limit: int = 400) -> list[str]:
+    """코퍼스 전역에서 가장 많이 언급된 개념 이름 목록.
+
+    legacy_concept_hints는 해당 청크에 이미 있던 개념만 준다. 그래서 추출 시 모델은
+    다른 청크에서 뽑힌 어휘를 모르고, 같은 개념에 청크마다 새 이름을 붙인다(1회성
+    개념 65%, 별칭 19,419개의 원인). 전역 어휘를 함께 주어 재사용을 유도한다.
+
+    큐레이션이 있으면 real만 — vocab을 어휘로 제시하면 쓰레기 개념을 오히려 권하게 된다.
+    """
+    curated = conn.execute(
+        "SELECT 1 FROM concept_curation WHERE label = 'real' LIMIT 1"
+    ).fetchone()
+    sql = (
+        "SELECT c.name FROM concepts c "
+        + (
+            "JOIN concept_curation cc ON cc.slug = c.slug AND cc.label = 'real' "
+            if curated
+            else ""
+        )
+        + "ORDER BY c.mention_count DESC, c.slug LIMIT ?"
+    )
+    return [row["name"] for row in conn.execute(sql, (limit,))]
+
+
 def _chunk_hashes(keys: list[tuple[str, int]]) -> dict[tuple[str, int], str]:
     """(doc_id, chunk_index) → 현재 content_hash. ES 조회 실패는 빈 dict."""
     if not keys:
