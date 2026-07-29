@@ -1037,6 +1037,42 @@ def sync_concept_notes(confirm_prune: bool = False) -> str:
     return msg
 
 
+# 22개 도구 중 최근 400세션(8.6일)에서 실제 호출된 것은 7개뿐이었다. 이름을 바꿔
+# mode 인자로 접는 리팩터는 CLI↔MCP 패리티(test_cli_mcp_parity)를 함께 깨야 하므로,
+# 먼저 노출만 줄여 무엇이 아쉬운지 측정한다. PKB_MCP_PROFILE=core 로 켠다.
+CORE_TOOLS = frozenset(
+    {
+        "search_knowledge",  # 22회 — 주 진입점
+        "get_document",  # 11회
+        "list_documents",  # 8회
+        "doctor",  # 3회
+        "sync_corpus",  # 3회
+        "write_file",  # 서버 instructions가 파일 작성 경로로 지정
+        "graph_explain",  # 그래프 읽기 최소 2종 — 07-24 추가라 호출 이력이 짧다
+        "graph_query",
+    }
+)
+
+
+def _apply_tool_profile() -> None:
+    """PKB_MCP_PROFILE=core 이면 CORE_TOOLS 외 도구를 등록 해제한다.
+
+    ponytail: 데코레이터 22개를 고치는 대신 등록 후 pruning — _tool_manager는 비공개
+    API지만 패리티 테스트도 이미 같은 곳을 읽는다. FastMCP가 이 속성을 바꾸면 여기서
+    깨지므로, 그때 프로파일 인자를 받는 데코레이터 래퍼로 올린다.
+    """
+    import os
+
+    if os.environ.get("PKB_MCP_PROFILE", "full").strip().lower() != "core":
+        return
+    tools = mcp._tool_manager._tools
+    for name in [n for n in tools if n not in CORE_TOOLS]:
+        del tools[name]
+
+
+_apply_tool_profile()
+
+
 def _warmup_background() -> None:
     """서버 기동 직후 백그라운드로 embedding/rerank 모델 + ES 경로를 예열.
     실패해도 서버 기동·정상 경로를 막지 않는다."""

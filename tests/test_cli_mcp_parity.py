@@ -109,3 +109,21 @@ def test_no_unmapped_mcp_tools():
     allowed = mapped | ALLOWLIST_MCP_ONLY
     unmapped = mcp_names() - allowed
     assert not unmapped, f"미매핑 MCP 도구: {unmapped} — CAPABILITY 또는 ALLOWLIST_MCP_ONLY에 추가 필요"
+
+
+def test_core_profile_exposes_only_core_tools(monkeypatch):
+    """PKB_MCP_PROFILE=core는 CORE_TOOLS만 남기고, 기본값은 전량 유지한다."""
+    import importlib
+
+    import pkb.mcp_server as m
+
+    monkeypatch.setenv("PKB_MCP_PROFILE", "core")
+    core_mod = importlib.reload(m)
+    try:
+        exposed = set(core_mod.mcp._tool_manager._tools)
+        assert exposed == set(core_mod.CORE_TOOLS)
+        assert "graph_merge" not in exposed
+    finally:
+        monkeypatch.delenv("PKB_MCP_PROFILE", raising=False)
+        full = importlib.reload(m)
+    assert set(full.CORE_TOOLS) < set(full.mcp._tool_manager._tools)
