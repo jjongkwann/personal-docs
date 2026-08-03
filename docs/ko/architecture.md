@@ -267,13 +267,21 @@ MCP 서버가 지키는 경계:
 `rebuild-evidence-local`, `sync-notes`.
 
 대부분의 능력은 CLI와 MCP 양쪽에 있습니다(`sync` ↔ `sync_corpus`, `show` ↔ `get_document`,
-`graph explain` ↔ `graph_explain` 등). CLI 전용: `init`, `reindex`, `index-switch`(읽기 alias 전환),
-`delete`, `purge-archived`, `eval`, `graph stats`, `graph map`(오프라인 HTML 스냅샷),
+`graph explain` ↔ `graph_explain`, `graph map` ↔ `graph_map` 등). CLI 전용: `init`, `reindex`,
+`index-switch`(읽기 alias 전환), `delete`, `purge-archived`, `eval`, `graph stats`,
 `graph reset-evidence`, `graph rebuild-evidence-local`, `graph finalize-evidence`
 (무거운 evidence 마이그레이션), `stale`,
 `watch`(훅·데몬용). MCP 전용: `graph_list_concepts`,
 `graph_list_chunks`, `graph_store_concepts`, `graph_curate`, `graph_merge`(Claude 셀프추출
 루프), `sync_obsidian`(볼트 전용 재조정). 이 매핑은 `tests/test_cli_mcp_parity.py`가 가드합니다.
+
+### 도구 프로파일 (`PKB_MCP_PROFILE`)
+
+MCP 서버 프로세스에 `PKB_MCP_PROFILE=core`를 주면 전체 23개 대신 `CORE_TOOLS`
+(`mcp_server.py`)의 9개만 노출합니다 — 실제로 호출되던 것들에 `graph_map`을 더한 구성으로,
+그래프를 보려고 CLI로 나갈 일을 없앴습니다. 기본값은 `full`입니다.
+서버 `instructions`도 프로파일에 따라 바뀌어 없는 도구를 안내하지 않으며,
+`tests/test_cli_mcp_parity.py`가 이를 가드합니다.
 
 ---
 

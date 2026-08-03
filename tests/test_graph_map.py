@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from typer.testing import CliRunner
 
@@ -133,3 +135,19 @@ def test_cli_unknown_concept_message(graph_db):
     result = runner.invoke(app, ["graph", "map", "--concept", "없는개념"])
     assert result.exit_code == 1
     assert "오류" in result.output
+
+
+def test_mcp_graph_map_writes_html_and_returns_path(graph_db):
+    """MCP 쪽은 브라우저를 열 수 없으니 경로를 돌려줘야 쓸모가 있다."""
+    import json
+
+    from pkb.mcp_server import graph_map
+
+    payload = json.loads(graph_map(concept="BM25"))
+    assert payload["nodes"] == 2
+    assert Path(payload["path"]).read_text(encoding="utf-8").startswith("<!doctype html>")
+    assert Path(payload["path"]).parent == Path(graph_db).parent
+
+    assert "정확히 하나" in graph_map(concept="BM25", query="also")
+    assert "정확히 하나" in graph_map()
+    assert "오류" in graph_map(concept="없는개념")

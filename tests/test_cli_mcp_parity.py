@@ -44,6 +44,7 @@ CAPABILITY: dict[str, dict[str, str]] = {
     "graph_path": {"cli": "graph path", "mcp": "graph_path"},
     "graph_query": {"cli": "graph query", "mcp": "graph_query"},
     "graph_affected": {"cli": "graph affected", "mcp": "graph_affected"},
+    "graph_map": {"cli": "graph map", "mcp": "graph_map"},
     "concept_notes": {"cli": "graph sync-notes", "mcp": "sync_concept_notes"},
 }
 
@@ -52,8 +53,9 @@ CAPABILITY: dict[str, dict[str, str]] = {
 # "eval"은 골드셋 전체를 4개 모드로 도는 벤치마크 하니스라 CLI 전용.
 # "stale"은 SessionStart 훅용 신선도 점검(fail-open)이라 CLI 전용.
 # "watch"는 폴링 데몬(포그라운드 상주 프로세스)이라 CLI 전용.
-# "graph map"은 로컬 HTML 스냅샷 생성·브라우저 열기라 CLI 전용 —
-#   MCP 소비자는 graph_explain/query/path의 JSON을 직접 쓴다.
+# "graph map"은 07-24에 CLI 전용으로 뒀었다("MCP 소비자는 JSON을 직접 쓴다"). 사람이
+#   그래프를 눈으로 보고 싶을 때 MCP만 쓰는 사용자가 CLI로 나가야 하는 게 실제 병목이라
+#   MCP에도 노출했다. --open(브라우저 실행)만 CLI에 남는다.
 ALLOWLIST_CLI_ONLY = {
     "init",
     "reindex",
@@ -62,7 +64,6 @@ ALLOWLIST_CLI_ONLY = {
     "purge-archived",
     "eval",
     "graph stats",
-    "graph map",
     "graph reset-evidence",
     "graph finalize-evidence",
     "graph rebuild-evidence-local",
@@ -127,3 +128,29 @@ def test_core_profile_exposes_only_core_tools(monkeypatch):
         monkeypatch.delenv("PKB_MCP_PROFILE", raising=False)
         full = importlib.reload(m)
     assert set(full.CORE_TOOLS) < set(full.mcp._tool_manager._tools)
+
+
+def test_instructions_never_name_a_pruned_tool(monkeypatch):
+    """instructions가 안내한 도구는 그 프로파일에 실제로 등록돼 있어야 한다.
+
+    core로 줄이면서 graph_path/graph_affected 안내가 남으면 모델은 없는 도구를 부른다 —
+    instructions는 FastMCP 생성 시점 고정이라 pruning과 별개로 틀어질 수 있다.
+    """
+    import importlib
+
+    import pkb.mcp_server as m
+
+    monkeypatch.delenv("PKB_MCP_PROFILE", raising=False)
+    universe = set(importlib.reload(m).mcp._tool_manager._tools)
+
+    monkeypatch.setenv("PKB_MCP_PROFILE", "core")
+    try:
+        core = importlib.reload(m)
+        named = {tool for tool in universe if tool in core.mcp.instructions}
+        registered = set(core.mcp._tool_manager._tools)
+        assert named <= registered, f"core에 없는 도구를 안내함: {named - registered}"
+        # 지도 안내가 빠지면 MCP만 쓰는 사용자는 그래프를 볼 방법이 없다.
+        assert "graph_map" in named
+    finally:
+        monkeypatch.delenv("PKB_MCP_PROFILE", raising=False)
+        importlib.reload(m)

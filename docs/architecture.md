@@ -281,14 +281,22 @@ subcommands: `stats`, `explain`, `path`, `query`, `affected`, `map`, `reset-evid
 `finalize-evidence`, `rebuild-evidence-local`, `sync-notes`.
 
 Most capabilities exist on both the CLI and MCP sides (`sync` ↔ `sync_corpus`, `show` ↔
-`get_document`, `graph explain` ↔ `graph_explain`, etc.). CLI-only: `init`, `reindex`,
-`index-switch` (read-alias switch), `delete`, `purge-archived`, `eval`, `graph stats`, `graph map`
-(offline HTML snapshot), `graph reset-evidence`, `graph rebuild-evidence-local`,
+`get_document`, `graph explain` ↔ `graph_explain`, `graph map` ↔ `graph_map`, etc.). CLI-only:
+`init`, `reindex`, `index-switch` (read-alias switch), `delete`, `purge-archived`, `eval`,
+`graph stats`, `graph reset-evidence`, `graph rebuild-evidence-local`,
 `graph finalize-evidence` (heavy evidence migration), `stale`, `watch` (for hooks/daemons).
 MCP-only: `graph_list_concepts`,
 `graph_list_chunks`, `graph_store_concepts`, `graph_curate`, `graph_merge` (Claude self-extraction
 loop), `sync_obsidian` (vault-only reconciliation). This mapping is guarded by
 `tests/test_cli_mcp_parity.py`.
+
+### Tool profile (`PKB_MCP_PROFILE`)
+
+Set `PKB_MCP_PROFILE=core` on the MCP server process to expose only the 9 tools in
+`CORE_TOOLS` (`mcp_server.py`) instead of all 23 — the ones that actually get called, plus
+`graph_map` so the graph stays viewable without dropping to the CLI. Default is `full`.
+The server `instructions` adapt to the profile so they never advertise a pruned tool;
+`tests/test_cli_mcp_parity.py` guards that.
 
 ---
 
