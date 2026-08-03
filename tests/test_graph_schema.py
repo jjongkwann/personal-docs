@@ -1,6 +1,11 @@
 """그래프 스키마의 레거시 데이터 마이그레이션 테스트."""
 
-from pkb.graph.schema import get_connection, init_schema
+import os
+import sqlite3
+
+import pytest
+
+from pkb.graph.schema import get_connection, graph_connection, init_schema
 
 
 def test_init_schema_removes_blank_slug_concepts_and_edges(tmp_path):
@@ -32,3 +37,20 @@ def test_init_schema_removes_blank_slug_concepts_and_edges(tmp_path):
         assert conn.execute(
             "SELECT value FROM graph_meta WHERE key = 'invalid_slug_cleanup_v1'"
         ).fetchone()[0] == "complete"
+
+
+def test_graph_connection_closes_and_does_not_leak_fds(tmp_path):
+    """`with conn`은 커밋만 하고 닫지 않는다 — 회귀하면 호출당 FD 2개(init_schema + 본체)."""
+    db_path = str(tmp_path / "graph.sqlite")
+
+    with graph_connection(db_path) as conn:
+        conn.execute("SELECT 1")
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute("SELECT 1")
+
+    before = len(os.listdir("/dev/fd"))
+    for _ in range(20):
+        with graph_connection(db_path):
+            pass
+    # 누수 시 +40. 여유 5는 테스트 자체가 여는 fd 몫.
+    assert len(os.listdir("/dev/fd")) - before <= 5

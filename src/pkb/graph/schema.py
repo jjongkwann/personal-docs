@@ -134,7 +134,10 @@ def _cleanup_invalid_slugs(conn: sqlite3.Connection) -> None:
 
 def init_schema(db_path: str) -> None:
     """스키마 초기화 (존재하지 않는 테이블만 생성)."""
-    with get_connection(db_path) as conn:
+    # `with conn`은 트랜잭션만 관리하고 커넥션은 닫지 않는다. closing()을 밖에 둬야
+    # 커밋 후 닫힌다. 없으면 호출마다 FD가 새고 launchd 자식(maxfiles 256)에서
+    # Errno 24로 터진다 — graph_connection이 매번 여기를 거치므로 호출당 2개씩 샜다.
+    with contextlib.closing(get_connection(db_path)) as conn, conn:
         _migrate_extracted_chunks(conn)
         conn.executescript(SCHEMA_SQL)
         # 기존 DB 마이그레이션: 컬럼이 이미 있으면 no-op
@@ -150,5 +153,5 @@ def init_schema(db_path: str) -> None:
 def graph_connection(db_path: str) -> Iterator[sqlite3.Connection]:
     """스키마 초기화가 보장된 그래프 연결을 트랜잭션 컨텍스트로 제공."""
     init_schema(db_path)
-    with get_connection(db_path) as conn:
+    with contextlib.closing(get_connection(db_path)) as conn, conn:
         yield conn
