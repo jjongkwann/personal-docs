@@ -154,3 +154,13 @@ def test_instructions_never_name_a_pruned_tool(monkeypatch):
     finally:
         monkeypatch.delenv("PKB_MCP_PROFILE", raising=False)
         importlib.reload(m)
+
+
+def test_write_workflow_checks_paths_and_duplicates_before_creation():
+    import pkb.mcp_server as m
+
+    workflow = m._WRITE_WORKFLOW
+    assert workflow.index("list_documents") < workflow.index("search_knowledge")
+    assert workflow.index("search_knowledge") < workflow.index("get_document")
+    assert "없을 때만" in workflow
+    assert "canonical_group=False" in workflow

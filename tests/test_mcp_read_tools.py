@@ -126,3 +126,36 @@ def test_tool_guard_converts_unexpected_es_error(monkeypatch):
     result = list_documents()
 
     assert result == "오류: ConnectionError: down"
+
+
+def test_list_documents_exposes_paths_and_document_contract(monkeypatch):
+    docs = [
+        {
+            "doc_id": "data/agent/concepts/reasoning/react.md",
+            "category": "agent",
+            "chunks": 3,
+            "date_modified": "2026-08-06T00:00:00",
+            "doc_type": "concept",
+            "canonical_id": "agent-react",
+            "status": "canonical",
+            "title": "ReAct",
+        },
+        {
+            "doc_id": "data/agent/guides/agent-design.md",
+            "category": "agent",
+            "chunks": 2,
+            "date_modified": "2026-08-05T00:00:00",
+        },
+    ]
+    monkeypatch.setattr("pkb.store.get_client", lambda: MagicMock())
+    monkeypatch.setattr("pkb.store.list_documents", lambda *_args, **_kwargs: docs)
+
+    result = list_documents(category="agent", limit=1)
+
+    assert "현재 문서가 있는 경로:" in result
+    assert "data/agent/concepts/reasoning/" in result
+    assert "data/agent/guides/" in result
+    assert "유형=concept" in result
+    assert "정본=agent-react" in result
+    assert "상태=canonical" in result
+    assert "data/agent/guides/agent-design.md" not in result

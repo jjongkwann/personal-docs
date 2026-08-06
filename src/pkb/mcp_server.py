@@ -2,6 +2,7 @@
 
 import os
 from functools import wraps
+from pathlib import PurePosixPath
 
 from mcp.server.mcpserver import MCPServer
 
@@ -24,15 +25,24 @@ _GRAPH_HINT = (
     )
 )
 
+_WRITE_WORKFLOW = """새 문서를 작성할 때는 다음 순서를 반드시 지키세요.
+1. list_documents(category=..., limit=0)로 해당 카테고리의 현재 폴더·문서 경로를 확인합니다.
+2. search_knowledge(profile="all", canonical_group=False)로 제목·별칭·한영 핵심어를 검색해
+   같은 내용이나 합칠 수 있는 관련 내용이 다른 파일에 있는지 확인합니다.
+3. 관련 문서가 있으면 get_document로 읽고 가장 적절한 기존 정본을 편집합니다. 검색 결과가
+   없을 때만 기존 구조의 concepts/guides/research/_origin 아래에 새 파일을 만듭니다.
+4. concepts는 개념 정본, guides는 종합 설명, research는 조사·근거, _origin은 원본에 사용합니다.
+   번호 폴더나 새 분류는 기존 경로로 표현할 수 없을 때만 만듭니다.
+5. 편집·작성은 write_file(dry_run=True)로 먼저 검토하고, 기존 파일은 반환된 previous_hash를
+   expected_hash로 전달해 적용합니다. 여러 파일을 바꾼 뒤 마지막에 한 번만 동기화합니다."""
+
 mcp = MCPServer(
     "pkb",
     instructions=f"""개인 지식 관리 시스템(PKB)의 기본 인터페이스입니다.
 사용자의 개인 데이터(경력, 공부 노트, 자기소개, Obsidian 등)가 Elasticsearch에 저장되어 있습니다.
 질문에 답하려면 search_knowledge로 먼저 검색하세요. 정본만 필요하면 profile="curated",
 연구 근거까지 필요하면 profile="evidence", 레거시까지 넓히려면 profile="all"을 사용합니다.
-문서 작성·편집 전에는 같은 주제를 검색하고, concepts/guides/research 중 목적에 맞는 경로와
-canonical_id를 정하세요. 기존 파일 편집은 write_file(dry_run=True)로 diff와 hash를 확인한 뒤
-그 hash를 expected_hash로 전달해 적용하세요. 여러 파일을 바꾼 뒤 마지막에 한 번만 동기화합니다.
+{_WRITE_WORKFLOW}
 {_GRAPH_HINT}
 개념 지도를 사람이 볼 형태로 원하면 graph_map이 오프라인 HTML을 만들고 경로를 돌려줍니다.
 개념 이름이 불확실할 때만 PKB/_concepts/index.md에서 찾으세요 — 450KB 카탈로그라 통독하지 마세요.
@@ -201,8 +211,11 @@ def write_file(
     """파일 쓰기를 미리 보거나 적용합니다.
     data/ 하위 경로에만 저장 가능합니다 (.md만).
 
-    저장 전 같은 주제를 search_knowledge로 찾으세요. 정리된 카테고리는
-    concepts/(개념 정본), guides/(종합 설명), research/(조사 근거), _origin/(원본)으로 나눕니다.
+    저장 전 list_documents(category=..., limit=0)로 기존 경로를 확인하고,
+    search_knowledge(profile="all", canonical_group=False)로 제목·별칭·한영 핵심어를 검색하세요.
+    관련 문서가 있으면 get_document로 읽어 기존 정본을 편집하고, 관련 내용이 없을 때만
+    새 파일을 만듭니다. 정리된 카테고리는 concepts/(개념 정본), guides/(종합 설명),
+    research/(조사 근거), _origin/(원본)으로 나눕니다.
     concepts/guides/research/00_MOC.md에는 schema_version, title, doc_type, canonical_id, status,
     authority, tags frontmatter가 필수입니다. 기존 문서는 dry_run=True → diff/hash 확인 →
     expected_hash를 넣은 적용 순서를 사용합니다.
@@ -261,7 +274,11 @@ def write_file(
 @mcp.tool()
 @_tool_guard
 def list_documents(category: str = "", include_archived: bool = False, limit: int = 50) -> str:
-    """저장된 문서 목록을 확인합니다. 기본적으로 아카이브된 문서는 제외.
+    """저장된 문서와 현재 사용 중인 경로 구조를 확인합니다.
+
+    새 문서를 쓰기 전에 category를 지정해 호출하고, 기존 폴더와 문서 유형·canonical_id를
+    확인하세요. 그다음 search_knowledge로 관련 내용을 찾아 기존 문서에 합칠지 판단합니다.
+    기본적으로 아카이브된 문서는 제외합니다.
 
     date_modified 내림차순으로 정렬해 상위 limit개만 표시합니다.
 
@@ -282,11 +299,28 @@ def list_documents(category: str = "", include_archived: bool = False, limit: in
     docs.sort(key=lambda d: d.get("date_modified") or "", reverse=True)
     shown = docs if limit <= 0 else docs[:limit]
 
-    lines = [f"총 {len(docs)}개 문서 (표시 {len(shown)}개 — limit·category로 조절)\n"]
+    directories = sorted(
+        {
+            str(PurePosixPath(doc["doc_id"]).parent)
+            for doc in docs
+            if doc.get("doc_id")
+        }
+    )
+    lines = [f"총 {len(docs)}개 문서 (표시 {len(shown)}개 — limit·category로 조절)"]
+    lines.append("\n현재 문서가 있는 경로:")
+    lines.extend(f"- {directory}/" for directory in directories)
+    lines.append("\n문서:")
     for doc in shown:
-        lines.append(
-            f"- {doc['doc_id']} [{doc['category']}] ({doc['chunks']}개 청크)"
-        )
+        details = [f"카테고리={doc['category']}", f"청크={doc['chunks']}"]
+        if doc.get("doc_type"):
+            details.append(f"유형={doc['doc_type']}")
+        if doc.get("canonical_id"):
+            details.append(f"정본={doc['canonical_id']}")
+        if doc.get("status"):
+            details.append(f"상태={doc['status']}")
+        if doc.get("title"):
+            details.append(f"제목={doc['title']}")
+        lines.append(f"- {doc['doc_id']} [{', '.join(details)}]")
     return "\n".join(lines)
 
 
