@@ -134,7 +134,7 @@ def test_instructions_never_name_a_pruned_tool(monkeypatch):
     """instructions가 안내한 도구는 그 프로파일에 실제로 등록돼 있어야 한다.
 
     core로 줄이면서 graph_path/graph_affected 안내가 남으면 모델은 없는 도구를 부른다 —
-    instructions는 FastMCP 생성 시점 고정이라 pruning과 별개로 틀어질 수 있다.
+    instructions는 MCPServer 생성 시점 고정이라 pruning과 별개로 틀어질 수 있다.
     """
     import importlib
 

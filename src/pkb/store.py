@@ -49,6 +49,19 @@ INDEX_SETTINGS = {
             "expires_at": {"type": "date"},
             "archived_at": {"type": "date"},
             "archive_reason": {"type": "keyword"},
+            # Optional document-contract metadata from YAML frontmatter.  ES
+            # accepts scalar-or-array values for keyword fields, so aliases,
+            # source IDs, support links, and concept IDs all use the same
+            # mapping while retaining exact-match filter semantics.
+            "schema_version": {"type": "keyword"},
+            "doc_type": {"type": "keyword"},
+            "canonical_id": {"type": "keyword"},
+            "status": {"type": "keyword"},
+            "authority": {"type": "keyword"},
+            "aliases": {"type": "keyword"},
+            "source_ids": {"type": "keyword"},
+            "supports": {"type": "keyword"},
+            "concept_ids": {"type": "keyword"},
         }
     },
 }
@@ -384,6 +397,15 @@ def list_documents(
                     "tags",
                     "date_modified",
                     "expires_at",
+                    "schema_version",
+                    "doc_type",
+                    "canonical_id",
+                    "status",
+                    "authority",
+                    "aliases",
+                    "source_ids",
+                    "supports",
+                    "concept_ids",
                 ],
             }
         },

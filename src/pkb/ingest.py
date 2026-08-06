@@ -117,6 +117,41 @@ _META_DIFF_FIELDS = (
     "section_path",
     "language",
     "source_path",
+    # Optional document contract metadata.  These fields are intentionally
+    # diffed alongside the historical fields above so a frontmatter-only edit
+    # can use the metadata update path without re-embedding a chunk.
+    "schema_version",
+    "doc_type",
+    "canonical_id",
+    "status",
+    "authority",
+    "aliases",
+    "source_ids",
+    "supports",
+    "concept_ids",
+)
+
+# Frontmatter fields introduced after the original corpus was created.  Keep
+# the names in one place so ingest, metadata diffing, and tests can share the
+# same contract.  Optional fields are omitted from chunks when the key is
+# absent; this is important for old notes and lets ``_diff_metadata`` preserve
+# values that were written by a newer producer when an old note is reindexed.
+DOCUMENT_METADATA_FIELDS = (
+    "schema_version",
+    "doc_type",
+    "canonical_id",
+    "status",
+    "authority",
+    "aliases",
+    "source_ids",
+    "supports",
+    "concept_ids",
+)
+_DOCUMENT_METADATA_LIST_FIELDS = frozenset(
+    {"aliases", "source_ids", "supports", "concept_ids"}
+)
+_DOCUMENT_METADATA_SCALAR_FIELDS = frozenset(
+    {"schema_version", "doc_type", "canonical_id", "status", "authority"}
 )
 
 
@@ -124,10 +159,30 @@ def _diff_metadata(old: dict, new: dict) -> dict:
     """content 외 필드 비교. 다른 필드만 dict로 반환. tags는 정렬 후 비교."""
     diff: dict = {}
     for f in _META_DIFF_FIELDS:
+        # The document-contract fields are optional.  A legacy producer may
+        # omit them entirely, and an old note without frontmatter must not
+        # erase values already present in ES during a metadata-only update.
+        # An explicit YAML null is different: process_file includes the key
+        # and the resulting ``None`` is propagated as a field removal.
+        if f in DOCUMENT_METADATA_FIELDS and f not in new:
+            continue
         ov, nv = old.get(f), new.get(f)
-        if f == "tags":
-            ov = sorted(ov or [])
-            nv = sorted(nv or [])
+        if f == "tags" or f in _DOCUMENT_METADATA_LIST_FIELDS:
+            # ES returns keyword arrays as lists, but hand-built legacy test
+            # fixtures (and a few old importers) may use a scalar.  Compare
+            # normalized string sets so ordering and representation do not
+            # trigger a spurious metadata update.
+            def _as_sorted_list(value: object) -> list[str]:
+                if value is None:
+                    return []
+                if isinstance(value, str):
+                    return [value]
+                if isinstance(value, (list, tuple, set, frozenset)):
+                    return sorted(str(item) for item in value if item is not None)
+                return [str(value)]
+
+            ov = _as_sorted_list(ov)
+            nv = _as_sorted_list(nv)
         # 특수 케이스: 아카이브 필드는 None을 전파하지 않는다 — frontmatter 마커 없는
         # 파일(볼트 노트·비-md·ES-only 아카이브 md)의 재인제스트가 ES 아카이브 상태를
         # 지우면 안 됨. 마커 제거 복구는 restore_document가 ES 필드를 명시 해제한다.
@@ -136,6 +191,58 @@ def _diff_metadata(old: dict, new: dict) -> dict:
         if ov != nv:
             diff[f] = new.get(f)
     return diff
+
+
+def _normalize_document_metadata(frontmatter: dict) -> dict:
+    """Normalize optional document-contract metadata from YAML frontmatter.
+
+    Missing keys are omitted so old documents retain their historical shape.
+    Scalars remain scalars (including numeric ``schema_version`` values),
+    while list-like fields are converted to a stable list of strings.  A
+    comma-separated string is accepted for convenience, matching
+    the existing ``tags`` frontmatter behavior.  Explicit ``null`` is kept as
+    ``None`` so callers can intentionally clear a field via metadata delta.
+    """
+    metadata: dict = {}
+    for field in DOCUMENT_METADATA_FIELDS:
+        if field not in frontmatter:
+            continue
+        value = frontmatter[field]
+        if value is None:
+            metadata[field] = None
+            continue
+
+        if field in _DOCUMENT_METADATA_LIST_FIELDS:
+            if isinstance(value, str):
+                values = value.split(",")
+            elif isinstance(value, (list, tuple, set, frozenset)):
+                values = list(value)
+            else:
+                values = [value]
+            normalized: list[str] = []
+            for item in values:
+                if item is None:
+                    continue
+                item_text = str(item).strip()
+                if not item_text:
+                    continue
+                normalized.append(item_text)
+            metadata[field] = normalized
+            continue
+
+        # Scalar fields are intentionally permissive.  YAML commonly parses
+        # ``schema_version: 1`` as an integer; preserving that value keeps the
+        # chunk API unsurprising while Elasticsearch's keyword mapping accepts
+        # the value through its normal coercion rules.
+        if isinstance(value, (str, int, float, bool)):
+            if isinstance(value, str):
+                value = value.strip()
+                if not value:
+                    value = None
+            metadata[field] = value
+        else:
+            metadata[field] = str(value).strip() or None
+    return metadata
 
 
 def format_delta_stats(stats: dict) -> str:
@@ -540,6 +647,7 @@ def process_file(
     fm_archive_reason = frontmatter.get("archive_reason")
     if not isinstance(fm_archive_reason, str):
         fm_archive_reason = None
+    document_metadata = _normalize_document_metadata(frontmatter)
 
     results = []
     for i, (section_path, chunk_text) in enumerate(chunks_with_path):
@@ -556,6 +664,11 @@ def process_file(
             "date_modified": mtime,
             "language": language,
         }
+        # Keep optional contract metadata absent for legacy notes.  Copy list
+        # values per chunk so a caller mutating one result cannot accidentally
+        # alter the metadata attached to its siblings.
+        for key, value in document_metadata.items():
+            chunk[key] = list(value) if isinstance(value, list) else value
         if fm_expires_at:
             chunk["expires_at"] = fm_expires_at
         if fm_archived_at:

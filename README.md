@@ -32,7 +32,7 @@ and the concept graph all stay on your machine.
 | --- | --- |
 | Local first | Personal documents and the search index stay local; no LLM API key required. |
 | Hybrid search | Combines nori BM25 with dense vector kNN (BGE-M3) via RRF. CrossEncoder reranking is optional. |
-| MCP-first interface | Search, file writing, conversion, sync, document management, and native graph traversal via 22 MCP tools. |
+| MCP-first interface | Search, file writing, conversion, sync, document management, and native graph traversal via 23 MCP tools. |
 | Broad document ingestion | Chunks Markdown, text, PDF, DOCX, PPTX, XLSX, and HTML, re-embedding only what changed. |
 | Obsidian integration | Keep the corpus inside your vault and manage originals, backlinks, and auto-generated concept notes together. |
 | Graph RAG | Stores concepts and evidence in SQLite, supports native explain/path/subgraph traversal, projects wikilink notes, and renders an offline Evidence Map. |
@@ -133,8 +133,14 @@ gemini mcp add pkb http://127.0.0.1:8787/mcp -t http -s user
 ```
 
 > The MCP server uses a lot of memory per process because of the embedding/reranker models. Don't
-> spawn it per session via `stdio` — share a **single HTTP server** at `127.0.0.1:8787` across
+> spawn it per agent/CLI session via `stdio` — share a **single HTTP server** at `127.0.0.1:8787` across
 > clients.
+
+The 2026-07-28 MCP update makes Streamable HTTP stateless: there is no protocol `initialize`
+handshake or `Mcp-Session-Id`, and each request carries its own metadata. “Session” here means an
+agent/CLI conversation or process, not a protocol session. Clients automatically set `Mcp-Method` and
+`Mcp-Name`, so the endpoint and registration commands above need no manual header configuration.
+PKB keeps cross-call application state in Elasticsearch/SQLite or in explicit tool arguments/handles.
 
 For always-on macOS `launchd` setup, the Claude Desktop bridge, and connection checks, see the
 [MCP integration guide](docs/mcp.md).
@@ -257,7 +263,7 @@ personal-docs/
 
 ## Documentation
 
-- [MCP integration guide](docs/mcp.md) — running the server, client registration, the 22 tools with examples
+- [MCP integration guide](docs/mcp.md) — running the server, client registration, the 23 tools with examples
 - [Architecture](docs/architecture.md) — components, data flow, sync responsibilities
 - [CLI usage](docs/usage.md) — ingestion, search, document management, evaluation and operations
 - [Graph RAG](docs/graph-rag.md) — concept extraction, graph storage, Obsidian note projection

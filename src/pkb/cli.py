@@ -260,6 +260,9 @@ def write(
         None, help="파일에 작성할 내용. 생략하면 stdin에서 읽음"
     ),
     ingest: bool = typer.Option(True, help="저장 후 자동 인제스트"),
+    dry_run: bool = typer.Option(False, help="파일·인덱스를 바꾸지 않고 diff/hash만 표시"),
+    expected_hash: str = typer.Option("", help="기존 파일 SHA-256 (낙관적 잠금)"),
+    strict_policy: bool = typer.Option(False, help="curated 경로 frontmatter 계약 강제"),
 ):
     """파일을 작성하고 ES에 인제스트. mcp write_file과 동일 동작(data/ 하위 .md만)."""
     from pkb.ingest import format_delta_stats
@@ -269,12 +272,24 @@ def write(
         content = sys.stdin.read()
 
     try:
-        outcome = write_and_ingest(file_path, content, ingest=ingest)
+        outcome = write_and_ingest(
+            file_path,
+            content,
+            ingest=ingest,
+            dry_run=dry_run,
+            expected_hash=expected_hash,
+            strict_policy=strict_policy,
+        )
     except OperationError as exc:
         typer.echo(f"오류: {exc}")
         raise typer.Exit(1) from exc
 
-    typer.echo(f"파일 저장 완료: {file_path} ({outcome.chars}자)")
+    action = "쓰기 미리보기" if outcome.dry_run else "파일 저장 완료"
+    typer.echo(f"{action}: {file_path} ({outcome.chars}자)")
+    typer.echo(f"previous_hash: {outcome.previous_hash or '<missing>'}")
+    typer.echo(f"content_hash: {outcome.content_hash}")
+    if outcome.dry_run and outcome.diff:
+        typer.echo(outcome.diff)
     if outcome.stats is not None:
         typer.echo(f"인제스트: {format_delta_stats(outcome.stats)}")
 
@@ -364,6 +379,9 @@ def query(
     include_obsidian: bool = typer.Option(
         True, "--include-obsidian/--no-obsidian", help="Obsidian 볼트 노트 포함 여부"
     ),
+    profile: str = typer.Option("all", help="검색 프로필: all|curated|evidence|source"),
+    canonical_group: bool = typer.Option(True, help="canonical_id 기준 결과 다양화"),
+    canonical_boost: float = typer.Option(0.15, help="canonical_id 문서 상대 점수 가산율"),
 ):
     """하이브리드 검색 (BM25 + kNN + RRF + 옵션 리랭커)."""
     from pkb.retrieve import hybrid_search
@@ -377,6 +395,9 @@ def query(
         rerank=rerank if rerank is not None else settings.rerank_enabled,
         expand_context=expand if expand is not None else settings.expand_context,
         exclude_doc_prefix="obsidian/" if not include_obsidian else None,
+        profile=profile,
+        canonical_group=canonical_group,
+        canonical_boost=canonical_boost,
     )
 
     if not results:
@@ -389,7 +410,12 @@ def query(
         sp = r.get('section_path', '')
         if sp:
             typer.echo(f"    섹션: {sp}")
-        typer.echo(f"    카테고리: {r['category']} | 점수: {r['score']:.4f}")
+        contract = ""
+        if r.get("doc_type"):
+            contract += f" | 유형: {r['doc_type']}"
+        if r.get("canonical_id"):
+            contract += f" | 정본: {r['canonical_id']}"
+        typer.echo(f"    카테고리: {r['category']} | 점수: {r['score']:.4f}{contract}")
         typer.echo(f"{'─'*60}")
         # 내용 미리보기 (처음 300자)
         preview = r["content"][:300]

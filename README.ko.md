@@ -32,7 +32,7 @@ Claude Code·Codex·Gemini에서는 MCP 도구로 검색·작성·인제스트�
 | --- | --- |
 | 로컬 우선 | 개인 문서와 검색 인덱스를 로컬에 보관하며 별도의 LLM API 키가 필요하지 않습니다. |
 | 하이브리드 검색 | nori BM25와 dense vector kNN(BGE-M3)을 RRF로 결합합니다. CrossEncoder 재순위는 옵션. |
-| MCP-first 인터페이스 | 검색, 파일 작성, 변환, 동기화, 문서 관리, 그래프 순회를 22개 MCP 도구로 수행합니다. |
+| MCP-first 인터페이스 | 검색, 파일 작성, 변환, 동기화, 문서 관리, 그래프 순회를 23개 MCP 도구로 수행합니다. |
 | 다양한 문서 인제스트 | Markdown, 텍스트, PDF, DOCX, PPTX, XLSX, HTML을 청킹하고 변경분만 다시 임베딩합니다. |
 | Obsidian 연동 | 코퍼스를 볼트 안에 두고 원본, 백링크, 자동 생성된 개념 노트를 함께 관리합니다. |
 | Graph RAG | 개념과 근거를 SQLite에 저장하고 explain/path/subgraph 순회, 위키링크 노트 투영, 오프라인 Evidence Map 렌더를 지원합니다. |
@@ -130,8 +130,14 @@ codex mcp add pkb --url http://127.0.0.1:8787/mcp
 gemini mcp add pkb http://127.0.0.1:8787/mcp -t http -s user
 ```
 
-> MCP 서버는 임베딩·리랭커 모델 때문에 프로세스당 메모리를 많이 사용합니다. `stdio`로 세션마다
+> MCP 서버는 임베딩·리랭커 모델 때문에 프로세스당 메모리를 많이 사용합니다. `stdio`로 에이전트/CLI 세션마다
 > 실행하지 말고, `127.0.0.1:8787`의 **단일 HTTP 서버**를 여러 클라이언트가 공유하세요.
+
+2026-07-28 MCP 업데이트에서 Streamable HTTP는 무상태가 되었습니다. 프로토콜 `initialize`
+핸드셰이크와 `Mcp-Session-Id`가 없고, 각 요청이 자체 메타데이터를 전달합니다. 여기서 “세션”은
+에이전트/CLI 대화 또는 프로세스를 뜻하며 프로토콜 세션이 아닙니다. 클라이언트가 `Mcp-Method`와
+`Mcp-Name`을 자동 설정하므로 위 endpoint와 등록 명령에 헤더를 수동으로 추가할 필요가 없습니다.
+PKB의 호출 간 애플리케이션 상태는 Elasticsearch/SQLite 또는 명시적 tool 인자/handle로 관리합니다.
 
 macOS `launchd` 상시 실행, Claude Desktop 브리지, 연결 확인 방법은
 [MCP 연동 가이드](docs/ko/mcp.md)를 참고하세요.
@@ -253,7 +259,7 @@ personal-docs/
 
 ## 문서
 
-- [MCP 연동 가이드](docs/ko/mcp.md) — 서버 실행, 클라이언트 등록, 22개 도구와 사용 예시
+- [MCP 연동 가이드](docs/ko/mcp.md) — 서버 실행, 클라이언트 등록, 23개 도구와 사용 예시
 - [아키텍처](docs/ko/architecture.md) — 구성 요소, 데이터 흐름, 동기화 책임
 - [CLI 사용법](docs/ko/usage.md) — 인제스트, 검색, 문서 관리, 평가와 운영
 - [Graph RAG](docs/ko/graph-rag.md) — 개념 추출, 그래프 저장, Obsidian 노트 투영

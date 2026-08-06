@@ -25,6 +25,52 @@ def make_slug(name: str) -> str:
     return s
 
 
+def _namespace_slug(namespace: str | None) -> str:
+    """Return the normalized identity namespace (empty = legacy/global)."""
+    if namespace is None:
+        return ""
+    return make_slug(str(namespace))
+
+
+def _effective_namespace(
+    namespace: str | None,
+    category: str | None,
+) -> str:
+    """Resolve the optional identity namespace without changing old callers.
+
+    ``namespace`` is explicit for callers that have a domain namespace.  The
+    ingestion path historically only supplied ``category``, so category is a
+    useful fallback for new writes.  A missing value remains the global legacy
+    scope and therefore keeps existing slug/alias behavior.
+    """
+    return _namespace_slug(namespace if namespace is not None else category)
+
+
+def _row_namespace(row: sqlite3.Row) -> str:
+    """Read namespace from both migrated and pre-migration rows."""
+    keys = row.keys()
+    explicit = row["namespace"] if "namespace" in keys else ""
+    if explicit:
+        return _namespace_slug(explicit)
+    # Before namespace migration category was the only useful scope hint.
+    # Treating a categorized legacy row as scoped prevents a new, unrelated
+    # category from silently reusing its slug; uncategorized rows stay global.
+    category = row["category"] if "category" in keys else None
+    return _namespace_slug(category)
+
+
+def _scope_matches(row: sqlite3.Row, namespace: str) -> bool:
+    """Whether an existing row may satisfy a scoped identity lookup.
+
+    An unscoped caller is intentionally a wildcard for backwards compatibility
+    with ``get_concept(name)`` and old graph tools.  Scoped callers match the
+    exact namespace, or a truly global (uncategorized) legacy row.
+    """
+    if not namespace:
+        return True
+    return not _row_namespace(row) or _row_namespace(row) == namespace
+
+
 def _pack_embedding(vec: list[float]) -> bytes:
     return struct.pack(f"{len(vec)}f", *vec)
 
@@ -48,33 +94,128 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 # ---------- Concepts ----------
 
-def find_concept_by_slug(conn: sqlite3.Connection, slug: str) -> sqlite3.Row | None:
-    return conn.execute(
+def find_concept_by_slug(
+    conn: sqlite3.Connection,
+    slug: str,
+    *,
+    namespace: str | None = None,
+    category: str | None = None,
+) -> sqlite3.Row | None:
+    """Find one physical slug, optionally constrained to a namespace.
+
+    ``slug`` remains the stable public identifier for legacy callers.  Scoped
+    writes may allocate a physical ``<base>--<namespace>`` slug, so callers
+    that have category context should pass it to avoid selecting a conflicting
+    legacy row.
+    """
+    identity_namespace = _effective_namespace(namespace, category)
+    rows = conn.execute(
         "SELECT * FROM concepts WHERE slug = ?", (slug,)
-    ).fetchone()
+    ).fetchall()
+    if not identity_namespace:
+        return rows[0] if rows else None
+    matches = [row for row in rows if _scope_matches(row, identity_namespace)]
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        return None
+    # The requested concept may have received a scoped physical slug because
+    # another namespace already owned the base slug.  Treat this helper as a
+    # namespace-aware identity lookup as well, while retaining exact-slug
+    # behavior for unqualified callers.
+    candidates = conn.execute(
+        "SELECT * FROM concepts WHERE base_slug = ? ORDER BY id", (slug,)
+    ).fetchall()
+    candidates = [row for row in candidates if _scope_matches(row, identity_namespace)]
+    return candidates[0] if len(candidates) == 1 else None
 
 
-def find_concept_by_alias(conn: sqlite3.Connection, alias_slug: str) -> sqlite3.Row | None:
-    row = conn.execute(
+def find_concepts_by_base_slug(
+    conn: sqlite3.Connection,
+    base_slug: str,
+    *,
+    namespace: str | None = None,
+    category: str | None = None,
+) -> list[sqlite3.Row]:
+    """Return all concepts sharing a normalized name, scope-aware."""
+    identity_namespace = _effective_namespace(namespace, category)
+    rows = conn.execute(
+        "SELECT * FROM concepts WHERE base_slug = ? OR (base_slug = '' AND slug = ?) "
+        "ORDER BY id",
+        (base_slug, base_slug),
+    ).fetchall()
+    if identity_namespace:
+        rows = [row for row in rows if _scope_matches(row, identity_namespace)]
+    return list(rows)
+
+
+def find_concepts_by_alias(
+    conn: sqlite3.Connection,
+    alias_slug: str,
+    *,
+    namespace: str | None = None,
+    category: str | None = None,
+) -> list[sqlite3.Row]:
+    """Return every concept using an alias, never silently choosing a row."""
+    alias_slug = make_slug(alias_slug)
+    if not alias_slug:
+        return []
+    identity_namespace = _effective_namespace(namespace, category)
+    rows = conn.execute(
         "SELECT c.* FROM concepts c "
         "JOIN concept_aliases a ON a.concept_id = c.id "
-        "WHERE a.alias_slug = ?",
+        "WHERE a.alias_slug = ? ORDER BY c.id",
         (alias_slug,),
-    ).fetchone()
-    return row
+    ).fetchall()
+    if identity_namespace:
+        rows = [row for row in rows if _scope_matches(row, identity_namespace)]
+    return list(rows)
+
+
+def find_concept_by_alias(
+    conn: sqlite3.Connection,
+    alias_slug: str,
+    *,
+    namespace: str | None = None,
+    category: str | None = None,
+) -> sqlite3.Row | None:
+    """Resolve an alias only when it is unambiguous in the requested scope."""
+    rows = find_concepts_by_alias(
+        conn, alias_slug, namespace=namespace, category=category
+    )
+    if len(rows) != 1:
+        return None
+    # A legacy alias may have been written before another concept claimed the
+    # same normalized name.  Do not let the alias path bypass the canonical
+    # ambiguity guard; scoped callers can still resolve their own concept.
+    canonical = find_concepts_by_base_slug(
+        conn,
+        make_slug(alias_slug),
+        namespace=namespace,
+        category=category,
+    )
+    if any(candidate["id"] != rows[0]["id"] for candidate in canonical):
+        return None
+    return rows[0]
 
 
 def find_concept_by_embedding(
     conn: sqlite3.Connection,
     embedding: list[float],
     threshold: float | None = None,
+    *,
+    namespace: str | None = None,
+    category: str | None = None,
 ) -> tuple[sqlite3.Row, float] | None:
     """임베딩 유사도가 threshold 이상인 가장 가까운 개념을 반환."""
     if threshold is None:
         threshold = settings.graph_dedup_threshold
 
+    identity_namespace = _effective_namespace(namespace, category)
     best: tuple[sqlite3.Row, float] | None = None
     for row in conn.execute("SELECT * FROM concepts WHERE embedding IS NOT NULL"):
+        if identity_namespace and not _scope_matches(row, identity_namespace):
+            continue
         other = _unpack_embedding(row["embedding"])
         score = _cosine(embedding, other)
         if score >= threshold and (best is None or score > best[1]):
@@ -109,6 +250,7 @@ def upsert_concept(
     category: str | None = None,
     embedding: list[float] | None = None,
     *,
+    namespace: str | None = None,
     match_by_alias: bool = True,
     match_by_embedding: bool = True,
 ) -> int:
@@ -119,15 +261,29 @@ def upsert_concept(
     호출마다 +1 하면 같은 청크 재추출이 카운트를 부풀린다.
     """
     name = name.strip()
-    slug = make_slug(name)
-    if not slug:
+    base_slug = make_slug(name)
+    if not base_slug:
         raise ValueError("정규화 후 빈 slug가 되는 개념명은 저장할 수 없습니다.")
+    identity_namespace = _effective_namespace(namespace, category)
     now = _now()
 
-    # 1. slug 일치 → 2. alias slug 일치
-    row = find_concept_by_slug(conn, slug)
+    # 1. slug 일치.  A category/namespace mismatch is a real identity
+    # conflict, not a spelling variant; in that case we continue below and
+    # allocate a deterministic scoped physical slug.
+    row = find_concept_by_slug(conn, base_slug)
+    if row is not None and not _scope_matches(row, identity_namespace):
+        row = None
+    if row is None:
+        scoped_rows = find_concepts_by_base_slug(
+            conn, base_slug, namespace=identity_namespace or None
+        )
+        if len(scoped_rows) == 1:
+            row = scoped_rows[0]
+    # 2. alias slug 일치 (ambiguous aliases deliberately return no row)
     if row is None and match_by_alias:
-        row = find_concept_by_alias(conn, slug)
+        row = find_concept_by_alias(
+            conn, base_slug, namespace=identity_namespace or None
+        )
     if row:
         # 빈 description 채움: 설명 없는 기존 개념에 비어있지 않은 새 설명이 오면
         # description·embedding을 함께 채운다 (비어있지 않은 기존 설명은 보존 — 파괴적 덮어쓰기 없음).
@@ -145,41 +301,214 @@ def upsert_concept(
     # 3. 임베딩 유사도. 대량 자동 추출에서는 약어·동음어 오병합을 피하려고
     # 호출자가 끌 수 있다(DP→Data Parallelism 같은 실제 오병합 방지).
     if embedding and match_by_embedding:
-        match = find_concept_by_embedding(conn, embedding)
+        match = find_concept_by_embedding(
+            conn, embedding, namespace=identity_namespace or None
+        )
         if match:
             existing = match[0]
             # 새 이름을 alias로 추가
-            with contextlib.suppress(sqlite3.IntegrityError):
-                conn.execute(
-                    "INSERT INTO concept_aliases (concept_id, alias, alias_slug) VALUES (?, ?, ?)",
-                    (existing["id"], name, slug),
-                )
+            add_alias(conn, existing["id"], name, _allow_conflict=False)
             conn.execute(
                 "UPDATE concepts SET updated_at = ? WHERE id = ?", (now, existing["id"])
             )
             return existing["id"]
 
-    # 4. 신규 insert
+    # 4. 신규 insert.  ``slug`` is still globally unique for old consumers;
+    # only a scoped collision gets a suffix.  The base name remains searchable
+    # through ``base_slug`` and the namespace column.
+    slug = base_slug
+    if conn.execute("SELECT 1 FROM concepts WHERE slug = ?", (slug,)).fetchone():
+        if identity_namespace:
+            scope_slug = _namespace_slug(identity_namespace)
+            slug = f"{base_slug}--{scope_slug}"
+            suffix = 2
+            while conn.execute(
+                "SELECT 1 FROM concepts WHERE slug = ?", (slug,)
+            ).fetchone():
+                slug = f"{base_slug}--{scope_slug}-{suffix}"
+                suffix += 1
+        else:
+            # A no-context caller is allowed to retain the pre-v2 global
+            # behavior.  This branch is reachable only when an existing row is
+            # scoped and was intentionally bypassed (e.g. match_by_alias=False).
+            slug = f"{base_slug}--global"
+            suffix = 2
+            while conn.execute(
+                "SELECT 1 FROM concepts WHERE slug = ?", (slug,)
+            ).fetchone():
+                slug = f"{base_slug}--global-{suffix}"
+                suffix += 1
     blob = _pack_embedding(embedding) if embedding else None
     cur = conn.execute(
         "INSERT INTO concepts "
-        "(name, slug, category, description, embedding, mention_count, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
-        (name, slug, category, description, blob, now, now),
+        "(name, slug, namespace, base_slug, category, description, embedding, mention_count, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+        (name, slug, identity_namespace, base_slug, category, description, blob, now, now),
     )
     return cur.lastrowid
 
 
-def add_alias(conn: sqlite3.Connection, concept_id: int, alias: str) -> None:
+def _record_alias_conflict(
+    conn: sqlite3.Connection,
+    *,
+    alias: str,
+    alias_slug: str,
+    concept_id: int,
+    existing_concept_id: int | None,
+    reason: str,
+) -> None:
+    """Persist one rejected alias write without modifying either concept."""
+    conn.execute(
+        "INSERT OR IGNORE INTO concept_alias_conflicts "
+        "(alias, alias_slug, concept_id, existing_concept_id, reason, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (alias, alias_slug, concept_id, existing_concept_id, reason, _now()),
+    )
+
+
+def alias_conflicts(
+    conn: sqlite3.Connection,
+    alias: str | None = None,
+) -> list[dict]:
+    """Report both rejected writes and legacy aliases that resolve ambiguously."""
+    alias_slug = make_slug(alias) if alias else None
+    params: tuple[object, ...] = (alias_slug,) if alias_slug else ()
+    where = "WHERE alias_slug = ?" if alias_slug else ""
+    rejected = conn.execute(
+        "SELECT alias, alias_slug, concept_id, existing_concept_id, reason, created_at "
+        "FROM concept_alias_conflicts "
+        f"{where} ORDER BY alias_slug, id",
+        params,
+    ).fetchall()
+    result = [dict(row) for row in rejected]
+
+    # Legacy data may contain duplicate aliases because v1 had only a
+    # per-concept primary key.  Surface those collisions without rewriting the
+    # rows; callers can then curate/merge deliberately.
+    ambiguous = conn.execute(
+        "SELECT a.alias, a.alias_slug, GROUP_CONCAT(DISTINCT a.concept_id) AS concept_ids "
+        "FROM concept_aliases a "
+        f"{where} "
+        "GROUP BY a.alias_slug HAVING COUNT(DISTINCT a.concept_id) > 1 "
+        "ORDER BY a.alias_slug",
+        params,
+    ).fetchall()
+    seen = {(item["alias_slug"], item["concept_id"], item["existing_concept_id"]) for item in result}
+    for row in ambiguous:
+        concept_ids = [int(value) for value in row["concept_ids"].split(",")]
+        # A stable pairwise report makes the ambiguity actionable while keeping
+        # the original alias rows untouched.
+        for concept_id in concept_ids[1:]:
+            key = (row["alias_slug"], concept_ids[0], concept_id)
+            if key in seen:
+                continue
+            result.append(
+                {
+                    "alias": row["alias"],
+                    "alias_slug": row["alias_slug"],
+                    "concept_id": concept_ids[0],
+                    "existing_concept_id": concept_id,
+                    "reason": "ambiguous_legacy_alias",
+                    "created_at": None,
+                }
+            )
+            seen.add(key)
+
+    canonical_collisions = conn.execute(
+        "SELECT a.alias, a.alias_slug, a.concept_id, c.id AS existing_concept_id "
+        "FROM concept_aliases a JOIN concepts c "
+        "ON c.id != a.concept_id AND (c.base_slug = a.alias_slug OR c.slug = a.alias_slug) "
+        f"{where} ORDER BY a.alias_slug, a.concept_id, c.id",
+        params,
+    ).fetchall()
+    for row in canonical_collisions:
+        key = (row["alias_slug"], row["concept_id"], row["existing_concept_id"])
+        if key in seen:
+            continue
+        result.append(
+            {
+                "alias": row["alias"],
+                "alias_slug": row["alias_slug"],
+                "concept_id": row["concept_id"],
+                "existing_concept_id": row["existing_concept_id"],
+                "reason": "canonical_or_alias_collision",
+                "created_at": None,
+            }
+        )
+        seen.add(key)
+    return result
+
+
+# More discoverable alias for callers that prefer a verb phrase.
+find_alias_conflicts = alias_conflicts
+
+
+def add_alias(
+    conn: sqlite3.Connection,
+    concept_id: int,
+    alias: str,
+    *,
+    _allow_conflict: bool = False,
+) -> bool:
+    """Add an alias, rejecting cross-concept/canonical collisions.
+
+    Returns ``True`` when the alias is accepted (inserted or already present)
+    and ``False`` when it is rejected.  The return value is additive; existing
+    callers ignored the old ``None`` result.
+    """
     alias = alias.strip()
     alias_slug = make_slug(alias)
     if not alias_slug:
-        return
-    with contextlib.suppress(sqlite3.IntegrityError):
+        return False
+    owner = conn.execute(
+        "SELECT * FROM concepts WHERE id = ?", (concept_id,)
+    ).fetchone()
+    if owner is None:
+        raise ValueError(f"개념을 찾을 수 없습니다: {concept_id}")
+    # Idempotent re-extraction of the same alias is not a conflict.  Return
+    # True so service-level reporting only mentions rejected cross-concept
+    # writes.
+    if conn.execute(
+        "SELECT 1 FROM concept_aliases WHERE concept_id = ? AND alias_slug = ?",
+        (concept_id, alias_slug),
+    ).fetchone():
+        return True
+
+    if not _allow_conflict:
+        # Aliases must not shadow another concept's canonical name or alias.
+        # Even if their namespaces differ, an unqualified lookup would be
+        # ambiguous; scoped lookups can still use each canonical concept name.
+        canonical_rows = conn.execute(
+            "SELECT * FROM concepts WHERE id != ? AND "
+            "(slug = ? OR base_slug = ?)",
+            (concept_id, alias_slug, alias_slug),
+        ).fetchall()
+        alias_rows = conn.execute(
+            "SELECT c.* FROM concepts c JOIN concept_aliases a ON a.concept_id = c.id "
+            "WHERE c.id != ? AND a.alias_slug = ?",
+            (concept_id, alias_slug),
+        ).fetchall()
+        conflicts = {row["id"]: row for row in [*canonical_rows, *alias_rows]}
+        if conflicts:
+            for existing in conflicts.values():
+                _record_alias_conflict(
+                    conn,
+                    alias=alias,
+                    alias_slug=alias_slug,
+                    concept_id=concept_id,
+                    existing_concept_id=existing["id"],
+                    reason="canonical_or_alias_collision",
+                )
+            return False
+
+    try:
         conn.execute(
             "INSERT INTO concept_aliases (concept_id, alias, alias_slug) VALUES (?, ?, ?)",
             (concept_id, alias, alias_slug),
         )
+    except sqlite3.IntegrityError:
+        return False
+    return True
 
 
 def list_aliases(conn: sqlite3.Connection, concept_id: int) -> list[str]:
@@ -233,6 +562,60 @@ def purge_document(conn: sqlite3.Connection, doc_id: str) -> dict:
     conn.execute("DELETE FROM extracted_chunks WHERE doc_id = ?", (doc_id,))
     recompute_mention_counts(conn, touched)
     return {"mentions_pruned": m, "documents_pruned": d}
+
+
+def rename_document(conn: sqlite3.Connection, old_doc_id: str, new_doc_id: str) -> dict:
+    """Move graph provenance to a new physical document ID.
+
+    Curated file moves should preserve mentions, extraction markers, and edge
+    evidence instead of pruning and re-extracting unchanged content.  The
+    caller owns the transaction; any target collision fails before updates.
+    """
+    old_doc_id = old_doc_id.strip()
+    new_doc_id = new_doc_id.strip()
+    if not old_doc_id or not new_doc_id:
+        raise ValueError("old_doc_id와 new_doc_id는 비어 있을 수 없습니다")
+    tables = (
+        "documents",
+        "concept_mentions",
+        "concept_edge_evidence",
+        "extracted_chunks",
+    )
+    empty = {table: 0 for table in tables}
+    if old_doc_id == new_doc_id:
+        return empty
+
+    source_counts = {
+        table: conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE doc_id = ?",
+            (old_doc_id,),
+        ).fetchone()[0]
+        for table in tables
+    }
+    if not any(source_counts.values()):
+        return empty
+    target_counts = {
+        table: conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE doc_id = ?",
+            (new_doc_id,),
+        ).fetchone()[0]
+        for table in tables
+    }
+    collisions = [table for table, count in target_counts.items() if count]
+    if collisions:
+        raise ValueError(
+            f"그래프 문서 이동 대상이 이미 존재합니다: {new_doc_id} "
+            f"({', '.join(collisions)})"
+        )
+
+    updated: dict[str, int] = {}
+    for table in tables:
+        cursor = conn.execute(
+            f"UPDATE {table} SET doc_id = ? WHERE doc_id = ?",
+            (new_doc_id, old_doc_id),
+        )
+        updated[table] = cursor.rowcount
+    return updated
 
 
 def prune_missing_documents(conn: sqlite3.Connection, existing_doc_ids: set[str]) -> dict:
@@ -627,13 +1010,44 @@ def mentions_for_chunks(
 
 # ---------- Queries ----------
 
-def get_concept(conn: sqlite3.Connection, identifier: str) -> sqlite3.Row | None:
-    """이름/slug/alias로 개념 조회."""
+def get_concept(
+    conn: sqlite3.Connection,
+    identifier: str,
+    *,
+    namespace: str | None = None,
+    category: str | None = None,
+) -> sqlite3.Row | None:
+    """Resolve a name/slug/alias without silently crossing namespaces.
+
+    An unqualified identifier that maps to multiple scoped concepts returns
+    ``None``.  Read tools can then report a clear missing/ambiguous result, and
+    callers with document category context can disambiguate by passing
+    ``category``.
+    """
     slug = make_slug(identifier)
-    row = find_concept_by_slug(conn, slug)
-    if row:
+    if not slug:
+        return None
+    identity_namespace = _effective_namespace(namespace, category)
+
+    # A physical slug remains an exact lookup for compatibility, but an
+    # unqualified base name must first pass the ambiguity guard below.
+    row = find_concept_by_slug(conn, slug, namespace=identity_namespace or None)
+    candidates = find_concepts_by_base_slug(
+        conn, slug, namespace=identity_namespace or None
+    )
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        return None
+    if row is not None and _scope_matches(row, identity_namespace):
         return row
-    return find_concept_by_alias(conn, slug)
+
+    # Alias lookup has the same ambiguity guard.  An alias with the same
+    # normalized text as another concept's canonical name is intentionally not
+    # preferred over the canonical candidate above.
+    return find_concept_by_alias(
+        conn, slug, namespace=identity_namespace or None
+    )
 
 
 def list_concepts(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -968,7 +1382,10 @@ def merge_concepts(
         # ---- aliases 이전: loser name + aliases 전부 winner alias로 ----
         for alias in [loser["name"], *list_aliases(conn, loser_id)]:
             before = conn.total_changes
-            add_alias(conn, winner_id, alias)
+            # The merge command is an explicit operator decision; permit the
+            # loser canonical name to become a winner alias before the loser
+            # row is deleted.  Ordinary extraction writes remain guarded.
+            add_alias(conn, winner_id, alias, _allow_conflict=True)
             if conn.total_changes != before:
                 result["aliases_added"] += 1
 

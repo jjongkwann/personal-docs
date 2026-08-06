@@ -160,6 +160,7 @@ def store_concepts(items_json: str) -> str:
     total_concepts = 0
     total_edges = 0
     total_mentions = 0
+    alias_conflicts: list[tuple[str, str, str | None]] = []
     dropped: list[tuple[str, str, str]] = []
     invalid_concepts: list[str] = []
     processed: list[tuple[str, int]] = []
@@ -226,8 +227,14 @@ def store_concepts(items_json: str) -> str:
                     total_concepts += 1
                     name_to_id[graph_store.make_slug(name)] = concept_id
                     for alias in concept.get("aliases", []) or []:
-                        if isinstance(alias, str) and alias.strip():
-                            graph_store.add_alias(conn, concept_id, alias)
+                        if (
+                            isinstance(alias, str)
+                            and alias.strip()
+                            and not graph_store.add_alias(conn, concept_id, alias)
+                        ):
+                            alias_conflicts.append(
+                                (name, alias.strip(), item.get("category"))
+                            )
                     graph_store.add_mention(
                         conn,
                         concept_id,
@@ -250,10 +257,14 @@ def store_concepts(items_json: str) -> str:
                 src_id = name_to_id.get(graph_store.make_slug(src))
                 dst_id = name_to_id.get(graph_store.make_slug(dst))
                 if not src_id:
-                    row = graph_store.get_concept(conn, src)
+                    row = graph_store.get_concept(
+                        conn, src, category=item.get("category")
+                    )
                     src_id = row["id"] if row else None
                 if not dst_id:
-                    row = graph_store.get_concept(conn, dst)
+                    row = graph_store.get_concept(
+                        conn, dst, category=item.get("category")
+                    )
                     dst_id = row["id"] if row else None
                 if src_id and dst_id:
                     if src_id != dst_id:
@@ -290,6 +301,16 @@ def store_concepts(items_json: str) -> str:
         message += (
             f"\n관계 {len(dropped)}건 미해소: {preview}"
             f" — 누락 개념과 미해소 관계만 담은 items로 재호출하세요"
+        )
+    if alias_conflicts:
+        preview = ", ".join(
+            f"{name}←{alias}"
+            + (f"[{category}]" if category else "")
+            for name, alias, category in alias_conflicts[:10]
+        )
+        message += (
+            f"\n별칭 충돌 {len(alias_conflicts)}건 제외: {preview}"
+            " — 기존 개념의 canonical 이름/별칭과 겹치므로 자동 연결하지 않았습니다"
         )
     if invalid_concepts:
         message += (

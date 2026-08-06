@@ -12,7 +12,7 @@ from pkb.documents import render_document as _render_document
 from pkb.mcp_server import get_document as _get_document
 from pkb.mcp_server import list_documents as _list_documents
 
-# FastMCP @mcp.tool() 데코레이터 호환: 함수가 래핑돼 있으면 .fn 속성으로 접근.
+# MCPServer @mcp.tool() 데코레이터 호환: 함수가 래핑돼 있으면 .fn 속성으로 접근.
 get_document = getattr(_get_document, "fn", _get_document)
 list_documents = getattr(_list_documents, "fn", _list_documents)
 

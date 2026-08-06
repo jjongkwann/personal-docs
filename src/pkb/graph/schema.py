@@ -11,6 +11,11 @@ CREATE TABLE IF NOT EXISTS concepts (
     id              INTEGER PRIMARY KEY,
     name            TEXT NOT NULL,
     slug            TEXT UNIQUE NOT NULL,
+    -- `slug` remains globally unique for SQLite/Obsidian compatibility.  A
+    -- namespace is recorded separately and `base_slug` keeps the normalized
+    -- human name when a scoped slug has to be allocated (e.g. react--ai).
+    namespace       TEXT NOT NULL DEFAULT '',
+    base_slug       TEXT NOT NULL DEFAULT '',
     category        TEXT,
     description     TEXT,
     embedding       BLOB,
@@ -81,7 +86,23 @@ CREATE TABLE IF NOT EXISTS graph_meta (
     value       TEXT NOT NULL
 );
 
+-- Existing databases intentionally keep any pre-existing alias collisions.
+-- New writes are guarded in graph.store, while this table records rejected
+-- attempts so operators can audit/repair old ambiguity without data loss.
+CREATE TABLE IF NOT EXISTS concept_alias_conflicts (
+    id                  INTEGER PRIMARY KEY,
+    alias               TEXT NOT NULL,
+    alias_slug          TEXT NOT NULL,
+    concept_id          INTEGER NOT NULL REFERENCES concepts(id) ON DELETE CASCADE,
+    existing_concept_id INTEGER REFERENCES concepts(id) ON DELETE CASCADE,
+    reason              TEXT NOT NULL,
+    created_at          TEXT NOT NULL,
+    UNIQUE (alias_slug, concept_id, existing_concept_id, reason)
+);
+
 CREATE INDEX IF NOT EXISTS idx_concepts_slug ON concepts(slug);
+CREATE INDEX IF NOT EXISTS idx_concepts_base_slug ON concepts(base_slug);
+CREATE INDEX IF NOT EXISTS idx_concepts_namespace_slug ON concepts(namespace, base_slug);
 CREATE INDEX IF NOT EXISTS idx_concepts_category ON concepts(category);
 CREATE INDEX IF NOT EXISTS idx_concept_edges_src ON concept_edges(src_id);
 CREATE INDEX IF NOT EXISTS idx_concept_edges_dst ON concept_edges(dst_id);
@@ -90,6 +111,7 @@ CREATE INDEX IF NOT EXISTS idx_edge_evidence_src ON concept_edge_evidence(src_id
 CREATE INDEX IF NOT EXISTS idx_edge_evidence_dst ON concept_edge_evidence(dst_id);
 CREATE INDEX IF NOT EXISTS idx_concept_mentions_doc ON concept_mentions(doc_id);
 CREATE INDEX IF NOT EXISTS idx_aliases_slug ON concept_aliases(alias_slug);
+CREATE INDEX IF NOT EXISTS idx_aliases_concept ON concept_aliases(concept_id);
 """
 
 
@@ -122,6 +144,38 @@ def _migrate_extracted_chunks(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE extracted_chunks_old")
 
 
+def _migrate_concept_identity(conn: sqlite3.Connection) -> None:
+    """Additive migration for namespace-aware concept identity.
+
+    ``slug`` deliberately stays UNIQUE: removing that constraint requires a
+    SQLite table rebuild while several foreign-key tables reference
+    ``concepts``.  Instead, scoped collisions receive a deterministic physical
+    slug from :mod:`pkb.graph.store`; the original normalized name is retained
+    in ``base_slug``.  Existing rows are copied in place and therefore remain
+    byte-for-byte intact apart from the two new metadata columns.
+    """
+    cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(concepts)").fetchall()
+    }
+    if not cols:
+        return
+    if "namespace" not in cols:
+        conn.execute(
+            "ALTER TABLE concepts ADD COLUMN namespace TEXT NOT NULL DEFAULT ''"
+        )
+    if "base_slug" not in cols:
+        conn.execute(
+            "ALTER TABLE concepts ADD COLUMN base_slug TEXT NOT NULL DEFAULT ''"
+        )
+    # Legacy concepts have no base_slug.  Do not infer a namespace from the
+    # old category column: category was descriptive metadata in v1, and doing
+    # so would silently change identity for every existing concept.
+    conn.execute(
+        "UPDATE concepts SET base_slug = slug "
+        "WHERE trim(COALESCE(base_slug, '')) = ''"
+    )
+
+
 def _cleanup_invalid_slugs(conn: sqlite3.Connection) -> None:
     """정규화 결과가 빈 레거시 개념을 외래키 cascade로 한 번만 제거."""
     key = "invalid_slug_cleanup_v1"
@@ -138,6 +192,7 @@ def init_schema(db_path: str) -> None:
     # 커밋 후 닫힌다. 없으면 호출마다 FD가 새고 launchd 자식(maxfiles 256)에서
     # Errno 24로 터진다 — graph_connection이 매번 여기를 거치므로 호출당 2개씩 샜다.
     with contextlib.closing(get_connection(db_path)) as conn, conn:
+        _migrate_concept_identity(conn)
         _migrate_extracted_chunks(conn)
         conn.executescript(SCHEMA_SQL)
         # 기존 DB 마이그레이션: 컬럼이 이미 있으면 no-op

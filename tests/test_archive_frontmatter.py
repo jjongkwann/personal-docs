@@ -14,7 +14,7 @@ from pkb.mcp_server import archive_document as _archive_document
 from pkb.mcp_server import restore_document as _restore_document
 from pkb.retrieve import _lifecycle_filter
 
-# FastMCP @mcp.tool() 데코레이터 호환: 함수가 래핑돼 있으면 .fn 속성으로 접근.
+# MCPServer @mcp.tool() 데코레이터 호환: 함수가 래핑돼 있으면 .fn 속성으로 접근.
 archive_document = getattr(_archive_document, "fn", _archive_document)
 restore_document = getattr(_restore_document, "fn", _restore_document)
 

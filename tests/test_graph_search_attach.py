@@ -10,7 +10,7 @@ import pytest
 from pkb.graph import store as gstore
 from pkb.graph.schema import SCHEMA_SQL, get_connection, init_schema
 
-# FastMCP @mcp.tool() 데코레이터 호환: 함수가 래핑돼 있으면 .fn 속성으로 접근.
+# MCPServer @mcp.tool() 데코레이터 호환: 함수가 래핑돼 있으면 .fn 속성으로 접근.
 from pkb.mcp_server import search_knowledge as _search_knowledge
 
 search_knowledge = getattr(_search_knowledge, "fn", _search_knowledge)

@@ -2,18 +2,30 @@
 
 PKB의 기본 인터페이스는 **에이전트 + MCP**입니다. Claude Code·Codex·Gemini CLI가 에이전트 역할을 하고, PKB는 검색/파일 작성/인제스트/그래프 조회 도구를 MCP로 제공합니다.
 
-CLI는 색인·검증·디버깅용 보조 인터페이스입니다. 평소 사용은 에이전트 대화에서 처리합니다.
+CLI는 색인·검증·디버깅용 보조 인터페이스입니다. 평소 사용은 에이전트 대화에서 처리합니다. 이 문서에서
+**에이전트/CLI 세션**은 Claude Code·Codex·Gemini의 대화/프로세스를 뜻하며 MCP 프로토콜 세션과는 다릅니다.
 
 ## 왜 stdio가 아니라 HTTP 공유 서버인가
 
-> **stdio로 등록하지 마세요.** MCP stdio는 **세션마다 서버 프로세스를 새로 띄웁니다.** PKB 서버는
-> 임베딩 모델과 CrossEncoder 리랭커를 올리므로 프로세스 한 개가 약 **4GB**를 씁니다. 세션을 여러 개
-> 열거나 에이전트를 팬아웃하면 세션 수 × 4GB가 되어 머신이 스왑으로 죽습니다.
+> **stdio로 등록하지 마세요.** MCP stdio는 **에이전트/CLI 세션마다 서버 프로세스를 새로 띄웁니다.** PKB 서버는
+> 임베딩 모델과 CrossEncoder 리랭커를 올리므로 프로세스 한 개가 약 **4GB**를 씁니다. 에이전트/CLI 세션을 여러 개
+> 열거나 에이전트를 팬아웃하면 에이전트/CLI 세션 수 × 4GB가 되어 머신이 스왑으로 죽습니다.
 >
 > 그래서 PKB는 **127.0.0.1에 뜬 단일 HTTP 서버**를 모든 클라이언트가 공유합니다. 모델은 한 벌만
-> 상주하고, 세션을 몇 개 열든 메모리는 그대로입니다.
+> 상주하고, 에이전트/CLI 세션을 몇 개 열든 메모리는 그대로입니다.
 
 Streamable HTTP는 여러 클라이언트가 하나의 서버 프로세스를 공유하도록 설계된 전송 방식이라, 이 구조가 명세에도 부합합니다.
+
+## 무상태 Streamable HTTP (MCP 2026-07-28)
+
+2026-07-28 MCP 개정에서는 프로토콜 세션을 제거했습니다. `initialize` 핸드셰이크와
+`Mcp-Session-Id`가 없으며, 각 Streamable HTTP 요청은 독립적으로 처리되고 요청별 메타데이터를
+전달합니다. 클라이언트가 `Mcp-Method`와 `Mcp-Name` 헤더를 자동 처리하므로 사용자가 헤더를 직접
+추가하거나 관리할 필요가 없습니다. 아래 endpoint와 클라이언트 등록 명령은 그대로 사용합니다.
+
+무상태 전송이라고 해서 요청마다 PKB 프로세스를 새로 띄우는 것은 아닙니다. 모든 클라이언트가
+localhost의 단일 HTTP 프로세스(메모리 모델 한 벌)를 계속 공유합니다. 호출 간 애플리케이션 상태는
+Elasticsearch/SQLite에 저장하거나 tool 인자/handle로 명시적으로 전달하며, 프로토콜 세션에 저장하지 않습니다.
 
 ## 사전 요구사항
 
@@ -75,7 +87,8 @@ uv run python -m pkb.mcp_server   # 포그라운드
 
 ## 2. 클라이언트 등록
 
-세 클라이언트 모두 streamable HTTP를 지원합니다. **인자 문법이 서로 다릅니다.**
+세 클라이언트 모두 streamable HTTP를 지원합니다. **인자 문법이 서로 다릅니다.** 아래 명령은 무상태
+전환 후에도 같은 endpoint를 사용하며, 각 클라이언트가 프로토콜 메타데이터와 헤더를 자동 처리합니다.
 
 ```bash
 # Claude Code
@@ -171,8 +184,10 @@ Graph RAG의 MCP-first 흐름은 `graph_list_chunks`로 청크를 읽고, Claude
 
 ```python
 search_knowledge(query, category="", top_k=5, include_archived=False,
-                 include_obsidian=True, query_variants=[])
-write_file(file_path, content, ingest=True)
+                 include_obsidian=True, query_variants=[], profile="all",
+                 canonical_group=True, canonical_boost=0.15)
+write_file(file_path, content, ingest=False, dry_run=False,
+           expected_hash="", strict_policy=True)
 list_documents(category="", include_archived=False, limit=50)
 add_document(file_path, tags="")
 convert_and_ingest(input_path, category, output_name="", ingest=True)
@@ -230,8 +245,10 @@ Claude Code에서 자연스럽게 대화하면 적절한 MCP 도구가 호출됩
 
 ### 파일 생성
 
-- *"방금 검색한 내용을 요약해서 `data/writing/summary.md`에 저장해줘"* → `search_knowledge` + `write_file`
-- *"찾은 내용 기반으로 정리 노트 만들어줘"* → 검색 → 작성 → `write_file` → 자동 인제스트
+- *"정본만 찾아줘"* → `search_knowledge(profile="curated")`
+- *"연구 근거까지 찾아줘"* → `search_knowledge(profile="evidence")`
+- *"찾은 내용 기반으로 정리 노트 만들어줘"* → 검색 → 경로·canonical_id 결정 →
+  `write_file(dry_run=True)` → diff 확인 → `expected_hash`로 적용 → 배치 끝에 동기화
 
 ### 개념 그래프
 
@@ -251,7 +268,7 @@ Claude Code가 사용자 의도와 필요한 근거 판단
     ↓
 PKB MCP 도구 호출
     ├─ search_knowledge      → ES 하이브리드 검색
-    ├─ write_file            → data/ 하위 .md 작성 + 자동 인제스트
+    ├─ write_file            → 정책 검사·diff/hash 미리보기 → data/ 하위 .md 작성
     ├─ add_document          → 청킹 → 임베딩 → ES 인덱싱
     ├─ convert_and_ingest    → md 변환(PDF는 pdfminer 페이지 보존, 그 외 markitdown) → data/ 저장 → ES 인덱싱
     ├─ sync_corpus / sync_obsidian → 원본 재조정 (업서트 + 유령 문서 정리)
@@ -267,7 +284,9 @@ MCP에서는 Claude Code 자체가 도구 선택, 재검색, 요약, 파일 작�
 
 - 데이터 코퍼스의 실제 위치는 `DATA_ROOT`(기본: 프로젝트 내 `data/`)가 결정합니다. 도구 입력 경로와 doc_id는 위치와 무관하게 항상 `data/...` 형식입니다.
 - `write_file`과 `add_document`는 코퍼스(`data/...`) 하위 경로만 허용합니다.
-- `write_file`은 `.md`만 허용하고, 기본값으로 저장 후 즉시 인제스트합니다.
+- `write_file`은 `.md`만 허용하며 MCP 기본은 `ingest=False`입니다. 기존 파일은 먼저
+  `dry_run=True`로 diff와 `previous_hash`를 받고, 적용 호출에 `expected_hash`를 넣어야 합니다.
+- `concepts/`, `guides/`, `research/`, `00_MOC.md` 쓰기는 문서 계약 frontmatter를 강제합니다.
 - `convert_and_ingest`는 원본 파일 위치에 제한이 없지만, 변환 결과는 항상 코퍼스의 `<category>/`에 저장됩니다.
 - `sync_corpus`가 기본 재조정 도구입니다(`data/` 코퍼스 전체 업서트 + 유령 문서 정리). `sync_obsidian`은 `DATA_ROOT` 밖에 남겨둔 볼트 파일이 있을 때만 쓰는 선택 경로로, 외부 Obsidian 볼트를 읽어 ES에만 저장합니다(원본은 복사·수정하지 않음). `DATA_ROOT`가 볼트 안에 있으면 그 서브트리는 크롤에서 제외됩니다(이중 인제스트 방지). 둘 다 원본에서 사라진 문서는 정리(prune)하되, 21개 이상 대량 삭제는 `confirm_prune=True`를 요구합니다.
 - 대규모 Graph RAG 구축은 시간이 들 수 있으므로 특정 카테고리(예: `rag`) 또는 단일 `doc_id`부터 진행합니다.

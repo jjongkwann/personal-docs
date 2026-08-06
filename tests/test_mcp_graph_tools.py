@@ -12,7 +12,7 @@ import pytest
 from pkb.graph import store as gstore
 from pkb.graph.schema import get_connection, init_schema
 
-# FastMCP @mcp.tool() 데코레이터 호환: 함수가 래핑돼 있으면 .fn 속성으로 접근.
+# MCPServer @mcp.tool() 데코레이터 호환: 함수가 래핑돼 있으면 .fn 속성으로 접근.
 from pkb.mcp_server import graph_curate as _graph_curate
 from pkb.mcp_server import graph_list_concepts as _graph_list_concepts
 from pkb.mcp_server import graph_merge as _graph_merge

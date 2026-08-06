@@ -7,7 +7,7 @@ import pytest
 from pkb.mcp_server import _frontmatter_warnings
 from pkb.mcp_server import write_file as _write_file
 
-# FastMCP @mcp.tool() 데코레이터 호환: 함수가 래핑돼 있으면 .fn 속성으로 접근.
+# MCPServer @mcp.tool() 데코레이터 호환: 함수가 래핑돼 있으면 .fn 속성으로 접근.
 write_file = getattr(_write_file, "fn", _write_file)
 
 
@@ -49,3 +49,27 @@ def test_write_file_saves_despite_warnings(in_tmp_data_root):
     assert "저장 완료" in result
     assert "warning: frontmatter 없음" in result
     assert (in_tmp_data_root / "data" / "writing" / "x.md").exists()
+
+
+def test_write_file_requires_dry_run_hash_before_edit(in_tmp_data_root):
+    path = in_tmp_data_root / "data" / "writing" / "x.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("old\n", encoding="utf-8")
+
+    blocked = write_file("data/writing/x.md", "new\n", ingest=False)
+    assert "expected_hash가 필요" in blocked
+    assert path.read_text(encoding="utf-8") == "old\n"
+
+    preview = write_file(
+        "data/writing/x.md", "new\n", ingest=False, dry_run=True
+    )
+    assert "쓰기 미리보기" in preview
+    previous_hash = preview.split("previous_hash: ", 1)[1].splitlines()[0]
+    applied = write_file(
+        "data/writing/x.md",
+        "new\n",
+        ingest=False,
+        expected_hash=previous_hash,
+    )
+    assert "파일 저장 완료" in applied
+    assert path.read_text(encoding="utf-8") == "new\n"

@@ -8,7 +8,8 @@ PKB does **two things**.
    they can be viewed as-is.
 
 100% local — no external API calls, and no `ANTHROPIC_API_KEY` is needed. Concept extraction and
-document writing are both performed by the Claude Code session itself. The one LLM call that does
+document writing are both performed by the Claude Code agent/CLI session itself. Here, an
+agent/CLI session means the client conversation/process, not an MCP protocol session. The one LLM call that does
 exist in the code is optional and stays on the machine: `pkb graph rebuild-evidence-local` posts to
 a local Ollama endpoint (`http://127.0.0.1:11434`, `graph/rebuild.py`) to automate the evidence
 rebuild loop. Nothing else in the codebase talks to a generation model.
@@ -31,7 +32,7 @@ The core architecture has four layers:
   ↓
 [Claude Code]
   ↓ MCP (Streamable HTTP, 127.0.0.1:8787)
-[PKB MCP Server]  src/pkb/mcp_server.py  (22 tools)
+[PKB MCP Server]  src/pkb/mcp_server.py  (23 tools)
   ├─ search_knowledge        → ES hybrid search
   ├─ write_file / add_document / convert_and_ingest  → write/ingest into data/
   ├─ list_documents / get_document / reindex_document
@@ -93,6 +94,23 @@ is a policy choice: keep everything under `data/`, or keep topical material in `
 personal folders elsewhere in the vault, where the optional `obsidian/` crawl described below picks
 them up. Chunk/document counts vary with folder structure, so check `list_documents` for current
 numbers.
+
+For knowledge categories, use layers that carry the same meaning to human navigation and retrieval:
+
+```text
+agent/
+├── 00_MOC.md       # topic entry point
+├── concepts/       # one canonical note per concept
+├── guides/         # reading paths, syntheses, and operating references
+├── research/       # investigation records and evidence
+├── _origin/        # PDFs and other originals (excluded by default)
+└── _archive/       # superseded material (excluded by default)
+```
+
+Notes under `concepts/`, `guides/`, `research/`, plus `00_MOC.md`, require `schema_version`, `title`,
+`doc_type`, `canonical_id`, `status`, `authority`, and `tags` frontmatter. The path is the human
+classification; `canonical_id` is the stable logical identity across moves. `_concepts/` is not this
+canonical layer—it is a generated navigation projection from the SQLite graph.
 
 Excluded from indexing (`ingest.py:EXCLUDED_DIR_NAMES`, `is_concept_path`):
 
@@ -195,10 +213,15 @@ When a document is re-ingested, only changed chunks are re-embedded. Each chunk'
    document can't dominate the top results
 6. Optional: `EXPAND_CONTEXT=N` — attaches N chunks before/after each result as `neighbors`
 
+Four retrieval profiles are available: `all` (includes pre-migration legacy notes), `curated`
+(concept/guide/MOC), `evidence` (curated plus research), and `source` (raw sources). Canonical documents
+can receive a score boost, and physical documents with the same `canonical_id` can be grouped.
+
 The lifecycle filter (`retrieve._lifecycle_filter`) excludes chunks with an `archived_at` value
 and chunks past their `expires_at` by default. `search_knowledge` parameters: `query`, `category`,
 `top_k`, `include_archived`, `include_obsidian` (default True — if False, excludes documents with
-an `obsidian/`-prefixed doc_id, i.e. vault documents outside the corpus).
+an `obsidian/`-prefixed doc_id, i.e. vault documents outside the corpus), `profile`,
+`canonical_group`, and `canonical_boost`.
 
 Search calls are logged as JSONL to `data/.logs/search.jsonl`.
 
@@ -235,6 +258,18 @@ format.
 `src/pkb/mcp_server.py` is PKB's primary interface. It transports over Streamable HTTP, and a
 single server kept always-on via launchd is shared by Claude Code, Codex, and Gemini.
 
+### Stateless Streamable HTTP (MCP 2026-07-28)
+
+The current MCP transport has no protocol sessions: the `initialize` handshake and `Mcp-Session-Id`
+are gone. Every HTTP request is independent and carries per-request metadata. Claude Code, Codex,
+and Gemini automatically send `Mcp-Method` and `Mcp-Name`, so users do not configure those headers
+manually. Their agent/CLI sessions and the client-registration commands are unchanged and continue
+to use `http://127.0.0.1:8787/mcp`.
+
+This does not make PKB's application state disappear. One localhost process still keeps one copy of
+the in-memory models for all clients; cross-call state is in Elasticsearch/SQLite or is supplied
+explicitly through tool arguments/handles, not a protocol session.
+
 ```
 Claude Code / Codex / Gemini → HTTP :8787/mcp → mcp_server.py ─┐
                                                                ├→ operations.py / documents.py
@@ -250,7 +285,7 @@ core is what actually makes the CLI↔MCP parity above true. `tests/test_cli_mcp
 the *surface* by introspection — it fails when a newly registered command or tool isn't declared in
 its capability map or an allowlist — but it never compares behavior; the shared core does that.
 
-22 tools provided:
+23 tools provided:
 
 | Category | Tools |
 |------|------|

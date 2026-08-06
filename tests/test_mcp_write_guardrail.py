@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-# FastMCP @mcp.tool() 데코레이터 호환: 함수가 래핑돼 있으면 .fn 속성으로 접근,
+# MCPServer @mcp.tool() 데코레이터 호환: 함수가 래핑돼 있으면 .fn 속성으로 접근,
 # 아니면 그대로 호출.
 from pkb.mcp_server import convert_and_ingest as _convert_and_ingest
 from pkb.mcp_server import write_file as _write_file

@@ -2,19 +2,30 @@
 
 PKB's primary interface is **agent + MCP**. Claude Code, Codex, and Gemini CLI act as the agent, while PKB exposes search, file-writing, ingestion, and graph-query tools via MCP.
 
-The CLI is a secondary interface for indexing, validation, and debugging. Day-to-day use happens through agent conversations.
+The CLI is a secondary interface for indexing, validation, and debugging. Day-to-day use happens through agent conversations. In this guide, an **agent/CLI session** means a Claude Code, Codex, or Gemini conversation/process; it is not an MCP protocol session.
 
 ## Why a Shared HTTP Server Instead of stdio
 
-> **Do not register PKB via stdio.** MCP stdio spawns **a new server process for every session.**
+> **Do not register PKB via stdio.** MCP stdio spawns **a new server process for every agent/CLI session.**
 > The PKB server loads an embedding model and a CrossEncoder reranker, so a single process uses
-> roughly **4GB**. Open several sessions or fan out across agents, and memory usage becomes
-> session count × 4GB, swapping the machine to death.
+> roughly **4GB**. Open several agent/CLI sessions or fan out across agents, and memory usage becomes
+> agent/CLI session count × 4GB, swapping the machine to death.
 >
 > That's why PKB runs as **a single HTTP server bound to 127.0.0.1**, shared by all clients. Only
-> one copy of the models stays resident, so memory stays flat no matter how many sessions you open.
+> one copy of the models stays resident, so memory stays flat no matter how many agent/CLI sessions you open.
 
 Streamable HTTP is a transport designed for multiple clients to share a single server process, so this setup aligns with the spec.
+
+## Stateless Streamable HTTP (MCP 2026-07-28)
+
+The 2026-07-28 MCP revision removes protocol sessions: there is no `initialize` handshake and no
+`Mcp-Session-Id`. Each Streamable HTTP request is independent and carries its own metadata. Clients
+automatically handle the `Mcp-Method` and `Mcp-Name` headers, so users do not need to add or maintain
+headers manually. The endpoint and client-registration commands below remain unchanged.
+
+Stateless transport does not mean a new PKB process per request. PKB still keeps one localhost HTTP
+process (and one in-memory model set) shared by all clients. Cross-call application state lives in
+Elasticsearch/SQLite or is passed explicitly as tool arguments/handles, never in a protocol session.
 
 ## Prerequisites
 
@@ -77,7 +88,9 @@ uv run python -m pkb.mcp_server   # foreground
 
 ## 2. Registering Clients
 
-All three clients support streamable HTTP. **The argument syntax differs between them.**
+All three clients support streamable HTTP. **The argument syntax differs between them.** The commands
+below use the same endpoint regardless of the stateless transport; each client manages protocol
+metadata and headers automatically.
 
 ```bash
 # Claude Code
@@ -176,8 +189,10 @@ Exact signatures as registered in `src/pkb/mcp_server.py`:
 
 ```python
 search_knowledge(query, category="", top_k=5, include_archived=False,
-                 include_obsidian=True, query_variants=[])
-write_file(file_path, content, ingest=True)
+                 include_obsidian=True, query_variants=[], profile="all",
+                 canonical_group=True, canonical_boost=0.15)
+write_file(file_path, content, ingest=False, dry_run=False,
+           expected_hash="", strict_policy=True)
 list_documents(category="", include_archived=False, limit=50)
 add_document(file_path, tags="")
 convert_and_ingest(input_path, category, output_name="", ingest=True)
@@ -235,8 +250,10 @@ Having a natural conversation in Claude Code triggers the appropriate MCP tool c
 
 ### File Creation
 
-- *"Summarize what we just searched and save it to `data/writing/summary.md`"* → `search_knowledge` + `write_file`
-- *"Create a summary note based on what you found"* → search → draft → `write_file` → auto-ingest
+- *"Find only canonical knowledge"* → `search_knowledge(profile="curated")`
+- *"Include the supporting research"* → `search_knowledge(profile="evidence")`
+- *"Create a summary note based on what you found"* → search → choose path and canonical ID →
+  `write_file(dry_run=True)` → inspect diff → apply with `expected_hash` → sync once after the batch
 
 ### Concept Graph
 
@@ -256,7 +273,7 @@ Claude Code judges user intent and what evidence is needed
     ↓
 Calls PKB MCP tools
     ├─ search_knowledge      → ES hybrid search
-    ├─ write_file            → writes .md under data/ + auto-ingest
+    ├─ write_file            → policy check + diff/hash preview → write .md under data/
     ├─ add_document          → chunking → embedding → ES indexing
     ├─ convert_and_ingest    → convert to md (pdfminer preserves pages for PDF, markitdown for others) → save to data/ → ES indexing
     ├─ sync_corpus / sync_obsidian → reconcile with source (upsert + prune stale documents)
@@ -272,7 +289,9 @@ Within MCP, Claude Code itself handles tool selection, re-search, summarization,
 
 - The data corpus's actual location is determined by `DATA_ROOT` (default: `data/` inside the project). Regardless of that location, tool input paths and doc_id always use the `data/...` format.
 - `write_file` and `add_document` only accept paths under the corpus (`data/...`).
-- `write_file` only accepts `.md` files and, by default, ingests immediately after saving.
+- `write_file` only accepts `.md` files; its MCP default is `ingest=False`. Existing files must first
+  be previewed with `dry_run=True`, then applied using the returned `previous_hash` as `expected_hash`.
+- Writes to `concepts/`, `guides/`, `research/`, and `00_MOC.md` enforce the document-contract frontmatter.
 - `convert_and_ingest` places no restriction on where the source file lives, but the converted output is always saved under the corpus's `<category>/`.
 - `sync_corpus` is the default reconciliation tool (upserts the entire `data/` corpus + prunes stale documents). `sync_obsidian` is an optional path used only when vault files are left outside `DATA_ROOT`: it reads the external Obsidian vault and writes only to ES (the source files are never copied or modified). If `DATA_ROOT` sits inside the vault, that subtree is excluded from the crawl (to avoid double ingestion). Both tools prune documents that have disappeared from the source, but bulk deletions of 21+ documents require `confirm_prune=True`.
 - Large-scale Graph RAG construction can take a while, so start with a specific category (e.g. `rag`) or a single `doc_id`.

@@ -7,7 +7,8 @@ PKB는 **두 가지 일**을 합니다.
    투영된 개념노트(`data/_concepts/`) 둘 다 일반 마크다운 파일이라 그대로 열람됩니다.
 
 100% 로컬입니다 — 외부 API 호출이 없고 `ANTHROPIC_API_KEY`도 필요 없습니다. 개념 추출·문서 작성
-모두 Claude Code 세션 자체가 수행합니다. 코드에 존재하는 유일한 LLM 호출은 선택 기능이며 머신
+모두 Claude Code 에이전트/CLI 세션 자체가 수행합니다. 여기서 에이전트/CLI 세션은 클라이언트의
+대화/프로세스를 뜻하며 MCP 프로토콜 세션과는 다릅니다. 코드에 존재하는 유일한 LLM 호출은 선택 기능이며 머신
 안에 머뭅니다: `pkb graph rebuild-evidence-local`이 근거 재구축 루프를 자동화하려고 로컬 Ollama
 엔드포인트(`http://127.0.0.1:11434`, `graph/rebuild.py`)로 요청을 보냅니다. 그 외에는 코드 어디서도
 생성 모델과 통신하지 않습니다.
@@ -29,7 +30,7 @@ PKB는 **두 가지 일**을 합니다.
   ↓
 [Claude Code]
   ↓ MCP (Streamable HTTP, 127.0.0.1:8787)
-[PKB MCP 서버]  src/pkb/mcp_server.py  (도구 22개)
+[PKB MCP 서버]  src/pkb/mcp_server.py  (도구 23개)
   ├─ search_knowledge        → ES 하이브리드 검색
   ├─ write_file / add_document / convert_and_ingest  → data/ 작성·인제스트
   ├─ list_documents / get_document / reindex_document
@@ -89,6 +90,23 @@ data/                       # = DATA_ROOT. doc_id는 위치 무관하게 항상 
 정책 선택입니다: 전부 `data/` 아래에 두거나, 주제 자료만 `data/`에 두고 개인 폴더는 볼트의 다른
 곳에 남겨 아래 설명하는 선택적 `obsidian/` 크롤로 잡히게 할 수 있습니다. 청크/문서 수는 폴더
 구성에 따라 달라지므로 최신 수치는 `list_documents`로 확인합니다.
+
+지식 카테고리는 사람이 읽는 구조와 검색 의미를 맞추기 위해 다음 하위 레이어를 권장합니다.
+
+```text
+agent/
+├── 00_MOC.md       # 주제 진입점
+├── concepts/       # 개념 하나당 정본 하나
+├── guides/         # 읽기 순서·종합 설명·실무 참조
+├── research/       # 조사 과정과 근거
+├── _origin/        # PDF 등 원본(기본 색인 제외)
+└── _archive/       # 대체된 문서(기본 색인 제외)
+```
+
+`concepts/`, `guides/`, `research/`, `00_MOC.md`에는 `schema_version`, `title`, `doc_type`,
+`canonical_id`, `status`, `authority`, `tags` frontmatter가 필수입니다. 경로는 사람이 탐색하는
+분류이고 `canonical_id`는 이동에도 유지되는 논리 식별자입니다. `_concepts/`는 이 정본 레이어가
+아니라 SQLite 그래프에서 생성한 탐색용 투영본입니다.
 
 색인 제외 대상(`ingest.py:EXCLUDED_DIR_NAMES`, `is_concept_path`):
 
@@ -185,10 +203,14 @@ Docker 컨테이너 `pkb-es`로 실행되며, 기본 인덱스는 `pkb_documents
 5. **문서당 최대 2청크 캡**(`MAX_CHUNKS_PER_DOC`) — 한 문서가 상위권을 독점하지 않도록 다양성 확보
 6. 선택: `EXPAND_CONTEXT=N` — 결과마다 전후 N청크를 `neighbors`로 부착
 
+검색 프로필은 `all`(마이그레이션 전 레거시 포함), `curated`(concept/guide/MOC),
+`evidence`(curated+research), `source`(원본) 네 가지입니다. `canonical_id`가 있는 문서는 점수를
+가산할 수 있고, 같은 `canonical_id`의 여러 물리 문서를 한 결과 그룹으로 묶을 수 있습니다.
+
 생명주기 필터(`retrieve._lifecycle_filter`)가 기본적으로 `archived_at` 존재 청크와
 `expires_at`이 지난 청크를 제외합니다. `search_knowledge` 파라미터: `query`, `category`,
 `top_k`, `include_archived`, `include_obsidian`(기본 True — False면 `obsidian/` 접두 doc_id,
-즉 코퍼스 밖 볼트 직속 문서를 제외).
+즉 코퍼스 밖 볼트 직속 문서를 제외), `profile`, `canonical_group`, `canonical_boost`.
 
 검색 호출은 `data/.logs/search.jsonl`에 JSONL로 기록됩니다.
 
@@ -222,6 +244,18 @@ Graph RAG는 검색을 대체하지 않고 개념 간 관계 질의를 보완합
 `src/pkb/mcp_server.py`가 PKB의 기본 인터페이스입니다. 전송은 Streamable HTTP이며,
 launchd로 상시 기동한 단일 서버를 Claude Code·Codex·Gemini가 공유합니다.
 
+### 무상태 Streamable HTTP (MCP 2026-07-28)
+
+현재 MCP 전송에는 프로토콜 세션이 없습니다. `initialize` 핸드셰이크와 `Mcp-Session-Id`가
+제거되었고, 모든 HTTP 요청은 독립적으로 처리되며 요청별 메타데이터를 전달합니다. Claude Code·Codex·Gemini
+클라이언트가 `Mcp-Method`와 `Mcp-Name`을 자동으로 보내므로 사용자가 이 헤더를 직접 설정할 필요가
+없습니다. 에이전트/CLI 세션과 클라이언트 등록 명령은 바뀌지 않으며
+`http://127.0.0.1:8787/mcp` endpoint를 그대로 사용합니다.
+
+이는 PKB의 애플리케이션 상태가 사라진다는 뜻이 아닙니다. 모든 클라이언트가 localhost의 단일
+프로세스(메모리 모델 한 벌)를 공유하고, 호출 간 상태는 Elasticsearch/SQLite에 있거나 tool 인자/handle로
+명시적으로 전달됩니다. 프로토콜 세션에 상태를 저장하지 않습니다.
+
 ```
 Claude Code / Codex / Gemini → HTTP :8787/mcp → mcp_server.py ─┐
                                                                ├→ operations.py / documents.py
@@ -237,7 +271,7 @@ uv run pkb <command> ───────────────────�
 *표면*을 가드해 — 새로 등록된 명령·도구가 capability 맵이나 allowlist에 선언되지 않으면 실패 —
 동작 자체를 비교하지는 않습니다. 동작 일치는 공유 코어가 담당합니다.
 
-제공 도구 22개:
+제공 도구 23개:
 
 | 범주 | 도구 |
 |------|------|
