@@ -135,7 +135,7 @@ def test_graph_merge_reports_summary_and_skipped(graph_db):
     result = graph_merge("bm25", '["best match 25", "ghost-slug"]')
     assert "merged=1" in result
     assert "ghost-slug" in result
-    assert "sync_concept_notes" in result
+    assert "sync_concept_notes" not in result
 
 
 # ---------- graph_store_concepts 미해소 관계 보고 ----------

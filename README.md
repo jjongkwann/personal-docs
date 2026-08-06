@@ -21,7 +21,7 @@ your hand-picked Markdown, PDF, and Office documents locally. It searches **only
 curate** — not the whole web — and keeps the documents under `DATA_ROOT` as the source of truth.
 
 From Claude Code, Codex, or Gemini you can search, write, and ingest through MCP tools, while you
-read and edit the same originals and concept notes directly in Obsidian. PKB never calls an
+read and edit the same originals directly in Obsidian. PKB never calls an
 external LLM API and needs no API key — the only LLM call in the codebase is optional and targets a
 local Ollama endpoint (`pkb graph rebuild-evidence-local`). Your documents, the Elasticsearch index,
 and the concept graph all stay on your machine.
@@ -32,10 +32,10 @@ and the concept graph all stay on your machine.
 | --- | --- |
 | Local first | Personal documents and the search index stay local; no LLM API key required. |
 | Hybrid search | Combines nori BM25 with dense vector kNN (BGE-M3) via RRF. CrossEncoder reranking is optional. |
-| MCP-first interface | Search, file writing, conversion, sync, document management, and native graph traversal via 23 MCP tools. |
+| MCP-first interface | Search, file writing, conversion, sync, document management, and native graph traversal via 22 MCP tools. |
 | Broad document ingestion | Chunks Markdown, text, PDF, DOCX, PPTX, XLSX, and HTML, re-embedding only what changed. |
-| Obsidian integration | Keep the corpus inside your vault and manage originals, backlinks, and auto-generated concept notes together. |
-| Graph RAG | Stores concepts and evidence in SQLite, supports native explain/path/subgraph traversal, projects wikilink notes, and renders an offline Evidence Map. |
+| Obsidian integration | Keep the corpus inside your vault and manage original Markdown and backlinks directly. |
+| Graph RAG | Stores concepts and evidence in SQLite, supports native explain/path/subgraph traversal, and renders an offline Evidence Map. |
 | Safe operations | Pre-sync cleanup previews, document archive/restore, health checks, and search quality evaluation. |
 
 ## How It Works
@@ -47,18 +47,15 @@ flowchart LR
     M <--> G["SQLite<br/>concept graph"]
     D["DATA_ROOT<br/>Markdown · PDF · Office"] --> I["parse · chunk · embed"] --> E
     M -->|write · convert · sync| D
-    G --> C["data/_concepts/<br/>concept notes"]
     O["Obsidian"] <--> D
-    O <--> C
 ```
 
-- Documents under `DATA_ROOT` are the originals. Elasticsearch and the concept notes are derived
+- Documents under `DATA_ROOT` are the originals. Elasticsearch and the SQLite concept graph are derived
   data that can always be rebuilt from them.
 - Search merges BM25 and vector results with RRF. CrossEncoder reranking can be enabled via
   `RERANK_ENABLED` and is off by default (in-house benchmarks showed it worse than no reranking on
   both quality and latency).
-- Concept extraction is done by the MCP client's agent; PKB stores the results in SQLite and
-  projects them as Obsidian notes.
+- Concept extraction is done by the MCP client's agent; PKB stores the results in SQLite.
 
 See the [architecture document](docs/architecture.md) for the detailed design and data flow.
 
@@ -98,8 +95,7 @@ data/
 ├── study/       # study notes, papers
 ├── career/      # work history, tech stack, projects
 ├── writing/     # drafts, summary notes
-├── about/       # self-introduction, interests
-└── _concepts/   # concept notes projected from SQLite (excluded from the search index)
+└── about/       # self-introduction, interests
 ```
 
 Drop documents into the category folder of your choice, then ingest and search.
@@ -190,13 +186,12 @@ uv run pkb reindex
 uv run pkb archive data/career/old_resume.md --reason outdated
 uv run pkb restore data/career/old_resume.md
 
-# Concept graph stats, queries, and note sync
+# Concept graph stats and queries
 uv run pkb graph stats
 uv run pkb graph explain "BM25"
 uv run pkb graph path "BM25" "RRF"
 uv run pkb graph query "how do lexical and vector retrieval connect?"
 uv run pkb graph map --concept "BM25" --open   # offline Evidence Map HTML
-uv run pkb graph sync-notes
 
 # Swap the read alias to a new physical index (e.g. after an embedding model change)
 uv run pkb index-switch pkb_documents_v2
@@ -235,8 +230,8 @@ application default applies.
 | `GRAPH_DEDUP_THRESHOLD` | `0.88` | Auto-merge threshold for similar concepts |
 | `MCP_PORT` | `8787` | Shared HTTP MCP server port |
 
-Point `DATA_ROOT` at a subfolder of your Obsidian vault and the originals, agent-written documents,
-and concept notes all appear in the vault directly. Add `OBSIDIAN_PATH` only when you also need to
+Point `DATA_ROOT` at a subfolder of your Obsidian vault and the originals and agent-written documents
+appear in the vault directly. Add `OBSIDIAN_PATH` only when you also need to
 search the rest of the vault.
 
 ## Project Structure
@@ -253,7 +248,7 @@ personal-docs/
 │   ├── rerank.py       # CrossEncoder reranking
 │   ├── store.py        # Elasticsearch store
 │   ├── config.py       # settings, overridable via environment variables
-│   └── graph/          # SQLite concept graph, read queries, note projection, Evidence Map
+│   └── graph/          # SQLite concept graph, read queries, Evidence Map
 ├── tests/              # unit and integration tests
 ├── docs/               # architecture, MCP, CLI, Graph RAG docs
 ├── Dockerfile.es       # Elasticsearch with the nori plugin
@@ -263,10 +258,10 @@ personal-docs/
 
 ## Documentation
 
-- [MCP integration guide](docs/mcp.md) — running the server, client registration, the 23 tools with examples
+- [MCP integration guide](docs/mcp.md) — running the server, client registration, the 22 tools with examples
 - [Architecture](docs/architecture.md) — components, data flow, sync responsibilities
 - [CLI usage](docs/usage.md) — ingestion, search, document management, evaluation and operations
-- [Graph RAG](docs/graph-rag.md) — concept extraction, graph storage, Obsidian note projection
+- [Graph RAG](docs/graph-rag.md) — concept extraction, graph storage, and native queries
 
 ## Development & Contributing
 

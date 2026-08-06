@@ -42,8 +42,7 @@ data/
 Excluded from indexing: `_review/`, `_trash/`, `_materials/`, `_archive/` (pending review, discarded,
 duplicates, archived originals), `_origin/` (external source archive — only the digested notes are
 indexed, the originals are for provenance checks only), any folder starting with `.` (tool
-artifacts), `data/_concepts/` (concept notes — projected from SQLite to notes, so not double-indexed
-in ES).
+artifacts), and the retired `_concepts/` path if a legacy backup is restored.
 
 ---
 
@@ -55,8 +54,6 @@ Rules Claude Code follows before saving a new document with `write_file`.
 - Placement decisions: (1) prefer an existing topic folder (check with `list_documents`) (2) one-off
   research goes to `data/study/daily-research/` (3) only create a new folder for a planned series
   (4) promote to a folder once 2-3 items on the same topic pile up. Dates go in frontmatter, not the filename.
-- Concept notes (`data/_concepts/`) are auto-generated from the SQLite concept graph — only edit
-  below the `auto:end` marker directly (anything above the marker gets overwritten on the next sync).
 
 ---
 
@@ -216,7 +213,7 @@ start (`~/.claude/settings.json`, replace `<repo-path>` with this repo's absolut
 
 ## Graph RAG Operations CLI
 
-Building the concept graph is done directly by Claude Code via MCP's `graph_list_chunks`/`graph_store_concepts` (no API calls). The CLI covers stats, the four read queries, the Evidence Map snapshot, evidence rebuild, and note sync.
+Building the concept graph is done directly by Claude Code via MCP's `graph_list_chunks`/`graph_store_concepts` (no API calls). The CLI covers stats, the four read queries, the Evidence Map snapshot, and evidence rebuild.
 
 ```bash
 # Current graph stats
@@ -244,10 +241,6 @@ uv run pkb graph rebuild-evidence-local --yes
 
 # After manually processing all graph_list_chunks → graph_store_concepts, atomically switch over once pending=0
 uv run pkb graph finalize-evidence --yes
-
-# Sync the SQLite concept graph to data/_concepts/<slug>.md notes
-uv run pkb graph sync-notes
-uv run pkb graph sync-notes --yes   # skip confirmation for large cleanups
 ```
 
 ---

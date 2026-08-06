@@ -32,10 +32,10 @@ Claude Code·Codex·Gemini에서는 MCP 도구로 검색·작성·인제스트�
 | --- | --- |
 | 로컬 우선 | 개인 문서와 검색 인덱스를 로컬에 보관하며 별도의 LLM API 키가 필요하지 않습니다. |
 | 하이브리드 검색 | nori BM25와 dense vector kNN(BGE-M3)을 RRF로 결합합니다. CrossEncoder 재순위는 옵션. |
-| MCP-first 인터페이스 | 검색, 파일 작성, 변환, 동기화, 문서 관리, 그래프 순회를 23개 MCP 도구로 수행합니다. |
+| MCP-first 인터페이스 | 검색, 파일 작성, 변환, 동기화, 문서 관리, 그래프 순회를 22개 MCP 도구로 수행합니다. |
 | 다양한 문서 인제스트 | Markdown, 텍스트, PDF, DOCX, PPTX, XLSX, HTML을 청킹하고 변경분만 다시 임베딩합니다. |
-| Obsidian 연동 | 코퍼스를 볼트 안에 두고 원본, 백링크, 자동 생성된 개념 노트를 함께 관리합니다. |
-| Graph RAG | 개념과 근거를 SQLite에 저장하고 explain/path/subgraph 순회, 위키링크 노트 투영, 오프라인 Evidence Map 렌더를 지원합니다. |
+| Obsidian 연동 | 코퍼스를 볼트 안에 두고 원본 Markdown과 백링크를 직접 관리합니다. |
+| Graph RAG | 개념과 근거를 SQLite에 저장하고 explain/path/subgraph 순회와 오프라인 Evidence Map 렌더를 지원합니다. |
 | 안전한 운영 | 동기화 전 정리 후보 확인, 문서 아카이브·복구, 상태 점검, 검색 품질 평가를 지원합니다. |
 
 ## 동작 구조
@@ -47,17 +47,14 @@ flowchart LR
     M <--> G["SQLite<br/>개념 그래프"]
     D["DATA_ROOT<br/>Markdown · PDF · Office"] --> I["파싱 · 청킹 · 임베딩"] --> E
     M -->|작성 · 변환 · 동기화| D
-    G --> C["data/_concepts/<br/>개념 노트"]
     O["Obsidian"] <--> D
-    O <--> C
 ```
 
-- `DATA_ROOT`의 문서가 원본입니다. Elasticsearch와 개념 노트는 원본에서 다시 만들 수 있는 파생
+- `DATA_ROOT`의 문서가 원본입니다. Elasticsearch와 SQLite 개념 그래프는 원본에서 다시 만들 수 있는 파생
   데이터입니다.
 - 검색은 BM25와 벡터 검색 결과를 RRF로 합칩니다. CrossEncoder 재순위는 `RERANK_ENABLED`로
   켤 수 있으며 기본 비활성입니다 (자체 벤치에서 무재순위 대비 품질·지연 모두 열위).
-- 개념 추출은 MCP 클라이언트의 에이전트가 수행하고, PKB는 결과를 SQLite에 저장해 Obsidian 노트로
-  투영합니다.
+- 개념 추출은 MCP 클라이언트의 에이전트가 수행하고, PKB는 결과를 SQLite에 저장합니다.
 
 자세한 설계와 데이터 흐름은 [아키텍처 문서](docs/ko/architecture.md)에서 확인할 수 있습니다.
 
@@ -96,8 +93,7 @@ data/
 ├── study/       # 공부 노트, 논문
 ├── career/      # 경력, 기술 스택, 프로젝트
 ├── writing/     # 초안, 정리 노트
-├── about/       # 자기소개, 관심사
-└── _concepts/   # SQLite에서 투영한 개념 노트 (검색 색인 제외)
+└── about/       # 자기소개, 관심사
 ```
 
 문서를 원하는 카테고리 폴더에 넣은 뒤 인제스트하고 검색합니다.
@@ -187,13 +183,12 @@ uv run pkb reindex
 uv run pkb archive data/career/old_resume.md --reason outdated
 uv run pkb restore data/career/old_resume.md
 
-# 개념 그래프 상태·조회·노트 동기화
+# 개념 그래프 상태·조회
 uv run pkb graph stats
 uv run pkb graph explain "BM25"
 uv run pkb graph path "BM25" "RRF"
 uv run pkb graph query "키워드 검색과 벡터 검색은 어떻게 연결돼?"
 uv run pkb graph map --concept "BM25" --open   # 오프라인 Evidence Map HTML
-uv run pkb graph sync-notes
 
 # 읽기 alias를 새 물리 인덱스로 전환 (예: 임베딩 모델 변경 후)
 uv run pkb index-switch pkb_documents_v2
@@ -232,7 +227,7 @@ uv run pkb index-switch pkb_documents_v2
 | `GRAPH_DEDUP_THRESHOLD` | `0.88` | 유사 개념 자동 병합 임계값 |
 | `MCP_PORT` | `8787` | 공유 HTTP MCP 서버 포트 |
 
-`DATA_ROOT`를 Obsidian 볼트 하위 폴더로 지정하면 원본, 에이전트가 작성한 문서, 개념 노트가 볼트에
+`DATA_ROOT`를 Obsidian 볼트 하위 폴더로 지정하면 원본과 에이전트가 작성한 문서가 볼트에
 바로 나타납니다. 볼트의 나머지 문서까지 검색해야 할 때만 `OBSIDIAN_PATH`를 추가하세요.
 
 ## 프로젝트 구조
@@ -249,7 +244,7 @@ personal-docs/
 │   ├── rerank.py       # CrossEncoder 재순위
 │   ├── store.py        # Elasticsearch 저장소
 │   ├── config.py       # 설정 (환경 변수로 오버라이드)
-│   └── graph/          # SQLite 개념 그래프, 조회 질의, 노트 투영, Evidence Map
+│   └── graph/          # SQLite 개념 그래프, 조회 질의, Evidence Map
 ├── tests/              # 단위·통합 테스트
 ├── docs/               # 아키텍처, MCP, CLI, Graph RAG 문서
 ├── Dockerfile.es       # nori 플러그인을 포함한 Elasticsearch
@@ -259,10 +254,10 @@ personal-docs/
 
 ## 문서
 
-- [MCP 연동 가이드](docs/ko/mcp.md) — 서버 실행, 클라이언트 등록, 23개 도구와 사용 예시
+- [MCP 연동 가이드](docs/ko/mcp.md) — 서버 실행, 클라이언트 등록, 22개 도구와 사용 예시
 - [아키텍처](docs/ko/architecture.md) — 구성 요소, 데이터 흐름, 동기화 책임
 - [CLI 사용법](docs/ko/usage.md) — 인제스트, 검색, 문서 관리, 평가와 운영
-- [Graph RAG](docs/ko/graph-rag.md) — 개념 추출, 그래프 저장, Obsidian 노트 투영
+- [Graph RAG](docs/ko/graph-rag.md) — 개념 추출, 그래프 저장, 네이티브 질의
 
 ## 개발 및 기여
 

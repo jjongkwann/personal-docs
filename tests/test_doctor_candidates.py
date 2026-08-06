@@ -187,7 +187,7 @@ def test_report_omits_purge_hint_when_no_candidates(doctor_env):
     assert "pkb purge-archived" not in report
 
 
-def test_report_marks_orphan_with_leftover_note(doctor_env, monkeypatch, tmp_path):
+def test_report_lists_orphan_concepts(doctor_env, monkeypatch, tmp_path):
     db_path = str(tmp_path / "graph.sqlite")
     monkeypatch.setattr("pkb.config.settings.graph_db_path", db_path)
     monkeypatch.setattr("pkb.config.settings.data_root", str(tmp_path / "data"))
@@ -196,20 +196,15 @@ def test_report_marks_orphan_with_leftover_note(doctor_env, monkeypatch, tmp_pat
     conn = get_connection(db_path)
     kept = gstore.upsert_concept(conn, name="bm25")
     gstore.add_mention(conn, kept, "data/rag/x.md", 0)
-    gstore.upsert_concept(conn, name="rrf")  # 고아 + 노트 잔존
-    gstore.upsert_concept(conn, name="kNN")  # 고아 + 노트 없음
+    gstore.upsert_concept(conn, name="rrf")
+    gstore.upsert_concept(conn, name="kNN")
     conn.commit()
     conn.close()
 
-    concepts_dir = tmp_path / "data" / "_concepts"
-    concepts_dir.mkdir(parents=True)
-    (concepts_dir / "rrf.md").write_text("---\nslug: rrf\n---\n", encoding="utf-8")
-
     report = build_health_report(_FakeES())
     assert "고아 개념(멘션 0): 2" in report
-    assert "- rrf (노트 잔존)" in report
+    assert "- rrf" in report
     assert "- knn" in report
-    assert "- knn (노트 잔존)" not in report
 
 
 def test_pending_chunks_query_shape_and_count(doctor_env, monkeypatch, tmp_path):

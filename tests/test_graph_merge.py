@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from pkb.graph import store as gstore
-from pkb.graph.notes import sync_concept_notes
 from pkb.graph.schema import get_connection, init_schema
 
 
@@ -18,16 +17,6 @@ def conn(tmp_path):
     connection.close()
 
 
-@pytest.fixture
-def data_root(monkeypatch, tmp_path):
-    """CWD를 tmp_path로 바꾸고 tmp_path/data를 코퍼스 루트로 강제 (.env의 DATA_ROOT 무시)."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("pkb.config.settings.data_root", "data")
-    root = tmp_path / "data"
-    root.mkdir()
-    return root
-
-
 def _seed_variants(conn):
     """표기변형 2개(loser) + 본체 1개(winner) 시드: a2a / a2a agent2agent protocol / a2aagent2agent protocol.
 
@@ -36,7 +25,7 @@ def _seed_variants(conn):
     - mention 겹침: winner, loser1 둘 다 x.md/chunk0 — 병합 시 dedup.
     - loser2 고유 mention(y.md/chunk0) — winner로 재지정.
     - prose는 loser2에만 (winner는 prose 없음) — 병합 시 winner로 승계.
-    - 셋 다 real 큐레이션(엣지 보유로 투영 조건도 만족).
+    - 셋 다 real 큐레이션(기본 그래프 탐색 대상).
     """
     winner_id = gstore.upsert_concept(conn, name="a2a agent2agent protocol", description="본체 설명")
     loser1_id = gstore.upsert_concept(conn, name="a2a", description="")
@@ -194,7 +183,7 @@ def test_merge_edge_conflict_null_confidence_stays_null(conn):
 def test_merge_carries_label_when_winner_uncurated(conn):
     """winner 미큐레이션 + loser에 prose 없는 label만 있어도 큐레이션(real 판정) 승계.
 
-    유실되면 winner가 미큐레이션으로 남아 다음 sync에서 노트가 prune된다.
+    유실되면 winner가 미큐레이션으로 남아 기본 그래프 탐색에서 제외될 수 있다.
     """
     gstore.upsert_concept(conn, name="본체")
     gstore.upsert_concept(conn, name="변형")
@@ -211,25 +200,3 @@ def test_merge_carries_label_when_winner_uncurated(conn):
     assert row is not None
     assert row["label"] == "real"
     assert row["prose"] is None
-
-
-def test_merge_then_sync_prunes_loser_notes(conn, data_root):
-    """병합 후 sync_concept_notes 재실행 시 loser 노트가 orphan prune 후보로 잡혀 정리된다."""
-    _seed_variants(conn)
-    winner_slug = gstore.make_slug("a2a agent2agent protocol")
-    loser1_slug = gstore.make_slug("a2a")
-    loser2_slug = gstore.make_slug("a2aagent2agent protocol")
-
-    sync_concept_notes(conn)  # 병합 전: winner/loser1/loser2 모두 real+엣지 有 → 노트 생성
-    concepts_dir = data_root / "_concepts"
-    assert (concepts_dir / f"{loser1_slug}.md").exists()
-    assert (concepts_dir / f"{loser2_slug}.md").exists()
-
-    gstore.merge_concepts(conn, winner_slug, [loser1_slug, loser2_slug])
-    conn.commit()
-
-    result = sync_concept_notes(conn)
-    assert result["pruned"] == 2
-    assert not (concepts_dir / f"{loser1_slug}.md").exists()
-    assert not (concepts_dir / f"{loser2_slug}.md").exists()
-    assert (concepts_dir / f"{winner_slug}.md").exists()

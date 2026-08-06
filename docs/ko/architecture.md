@@ -3,8 +3,8 @@
 PKB는 **두 가지 일**을 합니다.
 
 1. **Claude Code가 MCP로 개인 지식을 검색·작성**한다 (Elasticsearch 하이브리드 검색).
-2. **사람이 Obsidian에서 마크다운을 읽는다** — 코퍼스 원본(`data/`)과, SQLite 개념 그래프에서
-   투영된 개념노트(`data/_concepts/`) 둘 다 일반 마크다운 파일이라 그대로 열람됩니다.
+2. **사람이 Obsidian에서 코퍼스 Markdown을 읽고**, 개념 관계는 MCP/CLI로 SQLite를 직접
+   조회하거나 오프라인 Evidence Map으로 확인합니다.
 
 100% 로컬입니다 — 외부 API 호출이 없고 `ANTHROPIC_API_KEY`도 필요 없습니다. 개념 추출·문서 작성
 모두 Claude Code 에이전트/CLI 세션 자체가 수행합니다. 여기서 에이전트/CLI 세션은 클라이언트의
@@ -18,7 +18,7 @@ PKB는 **두 가지 일**을 합니다.
 1. **`data/`** — 개인 문서 원본 (Source of Truth). 위치는 `DATA_ROOT`로 지정하며, Obsidian 볼트
    하위(예: `<vault>/PKB`)로 두는 것을 권장합니다.
 2. **Elasticsearch** — 청크 단위 검색 인덱스 (nori BM25 + dense_vector kNN)
-3. **SQLite Graph DB** — 개념/관계 그래프. `data/_concepts/`로 단방향 투영
+3. **SQLite Graph DB** — 개념·관계·큐레이션·근거의 원본 저장소
 4. **MCP 서버** — Claude Code가 호출하는 기본 인터페이스. CLI는 운영·검증용 보조 경로
 
 ---
@@ -37,11 +37,11 @@ PKB는 **두 가지 일**을 합니다.
   ├─ sync_corpus / sync_obsidian     → 원본↔ES 재조정(유령 문서 정리)
   ├─ archive_document / restore_document → 소프트 삭제/복구
   ├─ doctor                  → 상태 점검
-  └─ graph_*(어휘·청크·저장·큐레이션·병합) / sync_concept_notes → 개념 그래프
+  └─ graph_*(어휘·청크·저장·큐레이션·병합·조회·지도) → SQLite 개념 그래프
 
 [사람]
   ↓ Obsidian로 직접 열람
-  data/ 원본 + data/_concepts/*.md 투영 노트
+  data/ 원본
 ```
 
 ### 데이터 흐름
@@ -55,7 +55,7 @@ PKB는 **두 가지 일**을 합니다.
 
 [그래프]  src/pkb/graph/
   ES 청크 → graph_list_chunks → Claude Code 셀프추출 → graph_store_concepts
-    → data/.graph/pkb_graph.sqlite 저장 → sync_concept_notes → data/_concepts/<slug>.md 투영
+    → data/.graph/pkb_graph.sqlite 저장 → graph_explain/query/path/map
 ```
 
 보조 인터페이스: `src/pkb/cli.py` (`pkb init/reindex/sync/query/graph …`). CLI와 MCP 도구는
@@ -68,7 +68,7 @@ PKB는 **두 가지 일**을 합니다.
 
 실제 위치는 `DATA_ROOT`(기본: 프로젝트 내 `data/`)로 지정합니다. **Obsidian 볼트 하위 폴더로
 지정하는 것을 권장**합니다(예: `<vault>/PKB`) — 코퍼스 자체가 볼트 안에 있어 Obsidian으로 바로
-열람·편집·백링크할 수 있고, `write_file`/`sync_concept_notes` 산출물도 볼트에 그대로 나타납니다.
+열람·편집·백링크할 수 있고, `write_file` 산출물도 볼트에 그대로 나타납니다.
 doc_id는 위치와 무관하게 항상 `data/<상대경로>`로 고정됩니다.
 
 **최상위 폴더명이 곧 카테고리이며 동적입니다** — 코드가 카테고리 목록을 강제하지 않으므로,
@@ -81,7 +81,6 @@ data/                       # = DATA_ROOT. doc_id는 위치 무관하게 항상 
 ├── writing/
 ├── about/
 ├── ...                     # 폴더 추가 = 카테고리 추가 (news, journal, agent, backend…)
-├── _concepts/              # 개념노트 (SQLite→노트 단방향 투영, ES 미색인)
 ├── .logs/                  # 검색 로그 JSONL (search_log.py)
 └── .graph/                 # 그래프 SQLite (GRAPH_DB_PATH)
 ```
@@ -105,17 +104,16 @@ agent/
 
 `concepts/`, `guides/`, `research/`, `00_MOC.md`에는 `schema_version`, `title`, `doc_type`,
 `canonical_id`, `status`, `authority`, `tags` frontmatter가 필수입니다. 경로는 사람이 탐색하는
-분류이고 `canonical_id`는 이동에도 유지되는 논리 식별자입니다. `_concepts/`는 이 정본 레이어가
-아니라 SQLite 그래프에서 생성한 탐색용 투영본입니다.
+분류이고 `canonical_id`는 이동에도 유지되는 논리 식별자입니다.
 
-색인 제외 대상(`ingest.py:EXCLUDED_DIR_NAMES`, `is_concept_path`):
+색인 제외 대상(`ingest.py:EXCLUDED_DIR_NAMES`):
 
 | 대상 | 이유 |
 |---|---|
 | `_review/`, `_trash/`, `_materials/`, `_archive/` | 검토 대기·폐기·중복·보관 원본 |
 | `_origin/` | 외부 원본 보관소 — 소화 노트만 색인, 원본은 근거 확인용 |
 | `.`으로 시작하는 폴더 전체 | 도구 산출물 (`.obsidian` 등) |
-| `data/_concepts/` | 개념노트는 SQLite→노트 투영본이라 ES 중복 색인 금지 |
+| `_concepts/` | 더 이상 생성하지 않는 레거시 투영 경로. 복원되더라도 색인에서 제외 |
 
 지원 포맷:
 
@@ -230,10 +228,9 @@ Graph RAG는 검색을 대체하지 않고 개념 간 관계 질의를 보완합
 1. `graph_list_chunks(category|doc_id, offset, limit)`로 청크를 페이지 단위로 읽음
 2. Claude Code가 청크 내용에서 개념/관계를 추출
 3. `graph_store_concepts(items_json)`로 SQLite에 저장 (정규화·alias·mention·edge 반영)
-4. `sync_concept_notes(confirm_prune)`로 `data/_concepts/<slug>.md` 노트에 단방향 투영 (+ `_concepts/index.md` MOC 렌더)
-5. `graph_explain`, `graph_path`, `graph_query`, `graph_affected`로 SQLite를 직접 조회 — 반환 엣지마다
+4. `graph_explain`, `graph_path`, `graph_query`, `graph_affected`로 SQLite를 직접 조회 — 반환 엣지마다
    confidence와 제한된 출처 청크 evidence 포함
-6. 투영 노트는 사람이 읽는 Obsidian 뷰로 사용하고, 원문 내용은 `search_knowledge`로 조회
+5. 시각 탐색이 필요하면 `graph_map`으로 사람이 읽는 오프라인 HTML 지도를 생성
 
 상세 설계·정규화 규칙·노트 렌더링 형식은 [docs/graph-rag.md](graph-rag.md) 참조.
 
@@ -279,7 +276,7 @@ uv run pkb <command> ───────────────────�
 | 파일/문서 | `write_file`, `list_documents`, `add_document`, `convert_and_ingest`, `get_document`, `reindex_document`, `sync_corpus`, `sync_obsidian` |
 | 생명주기 | `archive_document`, `restore_document` |
 | 상태 | `doctor` |
-| Graph RAG | `graph_explain`, `graph_path`, `graph_query`, `graph_affected`, `graph_list_concepts`, `graph_list_chunks`, `graph_store_concepts`, `graph_curate`, `graph_merge`, `sync_concept_notes` |
+| Graph RAG | `graph_explain`, `graph_path`, `graph_query`, `graph_affected`, `graph_list_concepts`, `graph_list_chunks`, `graph_store_concepts`, `graph_curate`, `graph_merge` |
 
 각 도구의 파라미터와 사용 예시는 [docs/mcp.md](mcp.md) 참조.
 
@@ -296,9 +293,9 @@ MCP 서버가 지키는 경계:
 
 `src/pkb/cli.py`는 운영과 검증에 사용합니다. 최상위 명령 19개: `init`, `reindex`, `index-switch`,
 `sync`, `convert`, `add`, `write`, `show`, `reindex-doc`, `list`, `query`, `delete`, `archive`,
-`restore`, `doctor`, `eval`, `purge-archived`, `stale`, `watch`. 여기에 `graph` 하위 명령 10개:
+`restore`, `doctor`, `eval`, `purge-archived`, `stale`, `watch`. 여기에 `graph` 하위 명령 9개:
 `stats`, `explain`, `path`, `query`, `affected`, `map`, `reset-evidence`, `finalize-evidence`,
-`rebuild-evidence-local`, `sync-notes`.
+`rebuild-evidence-local`.
 
 대부분의 능력은 CLI와 MCP 양쪽에 있습니다(`sync` ↔ `sync_corpus`, `show` ↔ `get_document`,
 `graph explain` ↔ `graph_explain`, `graph map` ↔ `graph_map` 등). CLI 전용: `init`, `reindex`,
@@ -339,7 +336,7 @@ MCP 서버 프로세스에 `PKB_MCP_PROFILE=core`를 주면 전체 23개 대신 
 |---|---|
 | 파일 하나를 직접 수정(에디터/Obsidian에서 편집) | `pkb reindex-doc <doc_id>` / MCP `reindex_document` |
 | 파일 다수 추가·이동·삭제(대량 변경) | `pkb sync` / MCP `sync_corpus`(+ 필요 시 `sync_obsidian`) |
-| 개념 그래프를 최신 내용으로 갱신 | Claude 셀프추출(`graph_list_chunks`→`graph_store_concepts`) 후 `pkb graph sync-notes` / MCP `sync_concept_notes` |
+| 개념 그래프를 최신 내용으로 갱신 | Claude 셀프추출(`graph_list_chunks`→`graph_store_concepts`) 후 갱신된 SQLite 그래프를 직접 조회 |
 | 매핑 스키마 변경·인덱스 상태가 꼬임 | `pkb reindex --yes` (전체 삭제 후 재구축) |
 
 ---

@@ -984,12 +984,12 @@ def mentions_for_chunks(
     """(doc_id, chunk_index) 쌍들에 언급된 개념을 단일 SELECT로 조회.
 
     반환: {(doc_id, chunk_index): [{"name": ..., "slug": ...}, ...]}
-    projected_slugs가 None이면 전 개념 포함(큐레이션 테이블이 비면 전량 투영과 동일),
-    set이면 투영된 개념(교집합)만.
+    curated_connected_slugs가 None이면 전 개념 포함(큐레이션 테이블이 비어 있음),
+    set이면 real로 큐레이션되고 관계가 있는 개념만 포함.
     """
     if not pairs:
         return {}
-    allowed = projected_slugs(conn)
+    allowed = curated_connected_slugs(conn)
     where = " OR ".join(["(m.doc_id = ? AND m.chunk_index = ?)"] * len(pairs))
     params = [v for pair in pairs for v in pair]
     rows = conn.execute(
@@ -1204,13 +1204,13 @@ def set_curation(
     )
 
 
-def projected_slugs(conn: sqlite3.Connection) -> set[str] | None:
+def curated_connected_slugs(conn: sqlite3.Connection) -> set[str] | None:
     """label='real'이고 관계(엣지)를 1개 이상 보유(src 또는 dst)한 slug 집합.
 
-    고아(관계 0) 개념노트는 연결 가치가 없어 투영 제외 — 검토(2026-07-10) 관찰:
-    품질 판별력은 mention수보다 관계 유무.
+    검색 결과에 붙이는 관련 개념의 품질 판별력은 mention수보다 관계 유무가 높다는
+    검토(2026-07-10) 결과에 따라 고아(관계 0) 개념은 제외한다.
 
-    큐레이션 테이블이 비어있으면 None (v1 전량 투영).
+    큐레이션 테이블이 비어있으면 None (전 개념 포함).
     """
     if conn.execute("SELECT 1 FROM concept_curation LIMIT 1").fetchone() is None:
         return None
@@ -1401,8 +1401,8 @@ def merge_concepts(
             "SELECT label, prose FROM concept_curation WHERE slug = ?", (loser_slug,)
         ).fetchone()
         if loser_curation and winner_curation is None:
-            # prose 없는 label만 있어도 승계 — real 판정이 유실되면 다음 sync에서
-            # winner 노트가 prune된다.
+            # prose 없는 label만 있어도 승계 — real 판정이 유실되면 winner가 기본
+            # 그래프 탐색에서 제외될 수 있다.
             set_curation(conn, winner_slug, loser_curation["label"], prose=loser_curation["prose"])
         elif loser_curation and loser_curation["prose"] and not (
             winner_curation and winner_curation["prose"]

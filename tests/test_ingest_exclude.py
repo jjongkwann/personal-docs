@@ -1,4 +1,4 @@
-"""find_ingestable_files 제외 규칙: _review/_trash/_materials/_archive/_origin 디렉터리, dot-폴더."""
+"""find_ingestable_files 제외 규칙: 예약 디렉터리와 dot-폴더."""
 
 from __future__ import annotations
 
@@ -61,7 +61,9 @@ def test_archive_single_file_add_excluded(tmp_path):
     assert find_ingestable_files(f) == []
 
 
-@pytest.mark.parametrize("reserved", ["_review", "_trash", "_archive", "_origin"])
+@pytest.mark.parametrize(
+    "reserved", ["_review", "_trash", "_archive", "_origin", "_concepts"]
+)
 def test_process_file_rejects_reserved_dirs(tmp_path, monkeypatch, reserved):
     """탐색을 우회하는 직접 인제스트(write_file/add_document)도 예약 디렉터리는 차단.
 

@@ -4,13 +4,13 @@
 
 **목적**: *"내 자료 전체의 개념이 어떻게 연결돼 있나"* 수준의 질문에 답한다. 기존 RRF+리랭커 검색이 잘 못하는 영역을 **보완**한다 — 대체가 아니다.
 
-**핵심 설계**: 개념 레이어는 100% Claude Code 셀프추출이다 — API 호출도 LLM 비용도 없다. Claude Code가 `graph_list_chunks`로 청크를 읽고, 스스로 개념/관계를 추출해 `graph_store_concepts`로 SQLite에 저장한다. `graph_explain`, `graph_path`, `graph_query`, `graph_affected`는 SQLite 그래프를 직접 조회하고, `sync_concept_notes`는 이를 `data/_concepts/<slug>.md` 볼트 노트로 투영해 사람이 열람하게 한다.
+**핵심 설계**: 개념 레이어는 100% Claude Code 셀프추출이다 — API 호출도 LLM 비용도 없다. Claude Code가 `graph_list_chunks`로 청크를 읽고, 스스로 개념/관계를 추출해 `graph_store_concepts`로 SQLite에 저장한다. `graph_explain`, `graph_path`, `graph_query`, `graph_affected`는 SQLite 그래프를 직접 조회하고, 필요하면 `graph_map`이 사람이 읽는 오프라인 HTML 지도를 만든다.
 
 | | 기존 (ES + RRF + 리랭커) | 그래프 RAG |
 |---|---|---|
 | 잘하는 것 | "DI란?", "BM25 공식은?" 같은 **구체 질의** | "DI·IoC·Bean·Container가 어떻게 얽혀?" 같은 **관계/전역 질의** |
 | 데이터 단위 | 청크 (500토큰) | 개념(entity) + 관계(relation) |
-| 응답 재료 | 본문 청크 | `data/_concepts/` 노트 (산문 + 관계 링크 + 출처) |
+| 응답 재료 | 본문 청크 | SQLite 개념·관계·큐레이션 산문·출처 근거 |
 | 빌드 시점 | 인제스트 즉시 | MCP `graph_list_chunks`/`graph_store_concepts`로 명시 실행 |
 
 **안 하는 것**: 자동 전체 그래프 빌드(opt-in만), Neo4j 등 풀 그래프 DB, GNN 임베딩, 대화 히스토리 기반 자동 업데이트.
@@ -53,15 +53,14 @@
 
 dedup을 통과해 이미 별도 노드로 쪼개진 중복(표기 변형 등)은 `store.merge_concepts(conn,
 winner_slug, loser_slugs)`로 사후 병합한다 — 엣지·mention·별칭·산문을 승자로 승계하고
-loser 노트는 다음 `sync_concept_notes`에서 orphan으로 정리된다. 주의: "MCP Server"처럼
+loser 행은 같은 SQLite 트랜잭션에서 삭제한다. 주의: "MCP Server"처럼
 상위 개념의 **구성요소**는 표기 변형이 아니므로 병합 금지.
 
-### 노트 투영 기준
-`sync_concept_notes`는 전 개념이 아니라 **`concept_curation.label='real'`(실개념 분류)
-이면서 관계(엣지)를 1개 이상 가진 개념**만 노트로 투영한다 — 고아(관계 0) 개념은 연결
-가치가 없어 제외하되 SQLite에는 남는다(`store.projected_slugs`). 큐레이션 테이블이
-비어 있으면 전량 투영으로 폴백. 미투영 개념을 가리키는 관계·산문 링크는 평문으로
-렌더되어 깨진 위키링크가 생기지 않는다.
+### 큐레이션 기준
+검색 결과에 붙이는 관련 개념은 **`concept_curation.label='real'`이면서 관계(엣지)를 1개
+이상 가진 개념**을 우선한다. 고아(관계 0) 개념은 SQLite에 남지만 탐색 가치가 낮아 부착
+대상에서 제외하며, `vocab` 개념도 기본 그래프 시드에서 제외한다. 큐레이션 테이블이
+비어 있으면 전 개념으로 폴백한다.
 
 ### 관계 엣지 집계
 - 같은 청크의 (src, dst, relation) 재호출 → evidence 멱등 upsert (count 불변)
@@ -70,7 +69,7 @@ loser 노트는 다음 `sync_concept_notes`에서 orphan으로 정리된다. 주
 
 ---
 
-## 파이프라인: 셀프추출 → 저장 → 노트 투영
+## 파이프라인: 셀프추출 → 저장 → 네이티브 조회
 
 ### 1. `graph_list_chunks(category|doc_id, offset, limit, pending_only)`
 ES 청크를 페이지 단위 JSON으로 반환. `pending_only=True`면 미추출·내용 변경 청크만 반환한다(증분 추출). Claude Code가 이 결과를 직접 읽고 아래 규칙으로 개념/관계를 추출한다. 추출 전 `graph_list_concepts`로 기존 어휘를 확인해 겹치는 개념은 기존 name/slug를 재사용한다.
@@ -82,14 +81,11 @@ ES 청크를 페이지 단위 JSON으로 반환. `pending_only=True`면 미추�
 ### 2. `graph_store_concepts(items_json)`
 추출한 개념/관계 JSON을 SQLite에 upsert (정규화·alias·mention·edge 포함).
 
-### 3. `sync_concept_notes(confirm_prune)`
-SQLite → `data/_concepts/<slug>.md` 노트로 단방향 투영 (결정적·멱등). 개념 엣지를 `[[위키링크]]`로 되써서 Obsidian 그래프뷰가 개념그래프를 그리게 한다. 링크 타깃은 doc_id가 아니라 **볼트 물리 경로**(예: `[[PKB/_concepts/slug|이름]]`) — `DATA_ROOT`가 볼트 밖이면 파일명 링크로 폴백한다. 미투영(vocab) 개념으로의 관계는 평문으로 표시된다. `<!-- pkb:auto:start/end -->` 마커 사이만 재생성하므로 마커 밖 사용자 산문은 보존된다. 노트→SQLite 역승격은 없음(SQLite가 항상 SSOT). 투영 대상 개념을 category별로 묶은 `_concepts/index.md` MOC도 함께 렌더한다 — 개념 어휘 카탈로그 진입점. 구현: `src/pkb/graph/notes.py`.
-
-### 4. 조회와 열람
+### 3. 조회와 열람
 단일 개념은 `graph_explain`, 최단 연결은 `graph_path`, 자연어 관계 질문은 의미 시드 기반
 `graph_query`, 저장 방향 기준 하위 범위는 `graph_affected`로 조회한다. 모든 엣지에는 confidence와
-제한된 `doc_id`/`chunk_index` evidence가 포함된다. `data/_concepts/<slug>.md` 노트는 사람이 읽는
-Obsidian 뷰로 유지한다. 원문 내용이 필요한 질문은 `search_knowledge`를 사용한다.
+제한된 `doc_id`/`chunk_index` evidence가 포함된다. 사람이 보는 그래프는 `graph_map`으로
+오프라인 HTML을 만들고, 원문 내용이 필요한 질문은 `search_knowledge`를 사용한다.
 
 ---
 
@@ -105,8 +101,6 @@ uv run pkb graph map --concept "BM25"   # 오프라인 Evidence Map HTML 스냅�
 uv run pkb graph reset-evidence --yes  # 기존 그래프 유지, staging evidence·마커 초기화
 uv run pkb graph rebuild-evidence-local --yes  # Ollama 로컬 모델로 pending 전량 추출
 uv run pkb graph finalize-evidence --yes  # 전량 추출 확인 후 staging 그래프로 원자 전환
-uv run pkb graph sync-notes   # SQLite → data/_concepts/ 노트 동기화
-uv run pkb graph sync-notes --yes   # 대량 정리(21개 이상) 확인 생략
 ```
 
 구버전 append-only 엣지를 evidence 기반으로 전환할 때는 먼저 `reset-evidence --yes`를 한 번
@@ -146,7 +140,7 @@ uv run pkb graph map --path BM25 RAG                     # 두 개념 사이 최
 `src/pkb/graph/viewmap.py`.
 
 일괄 API 빌드나 export CLI는 없다. 구축은 MCP-first로 유지하고, 조회는 SQLite 네이티브 그래프 도구,
-CLI, Obsidian 투영 노트를 함께 제공한다.
+CLI, 오프라인 Evidence Map을 함께 제공한다.
 
 ---
 

@@ -3,9 +3,8 @@
 PKB does **two things**.
 
 1. **Claude Code searches and writes personal knowledge via MCP** (Elasticsearch hybrid search).
-2. **Humans read markdown in Obsidian** — both the corpus originals (`data/`) and the concept
-   notes projected from the SQLite concept graph (`data/_concepts/`) are plain markdown files, so
-   they can be viewed as-is.
+2. **Humans read corpus Markdown in Obsidian**, while concept relationships are queried directly
+   from SQLite through MCP/CLI or rendered as an offline Evidence Map.
 
 100% local — no external API calls, and no `ANTHROPIC_API_KEY` is needed. Concept extraction and
 document writing are both performed by the Claude Code agent/CLI session itself. Here, an
@@ -19,7 +18,7 @@ The core architecture has four layers:
 1. **`data/`** — the personal document source of truth. Its location is set via `DATA_ROOT`, and
    placing it under an Obsidian vault (e.g. `<vault>/PKB`) is recommended.
 2. **Elasticsearch** — chunk-level search index (nori BM25 + dense_vector kNN)
-3. **SQLite Graph DB** — concept/relationship graph, one-way projected into `data/_concepts/`
+3. **SQLite Graph DB** — source of truth for concepts, relationships, curation, and evidence
 4. **MCP server** — the primary interface Claude Code calls. The CLI is a secondary path for
    operations and verification.
 
@@ -39,11 +38,11 @@ The core architecture has four layers:
   ├─ sync_corpus / sync_obsidian     → reconcile source↔ES (clean up ghost documents)
   ├─ archive_document / restore_document → soft delete/restore
   ├─ doctor                  → health check
-  └─ graph_*(vocabulary/chunks/storage/curation/merge) / sync_concept_notes → concept graph
+  └─ graph_*(vocabulary/chunks/storage/curation/merge/query/map) → SQLite concept graph
 
 [Human]
   ↓ view directly via Obsidian
-  data/ originals + data/_concepts/*.md projected notes
+  data/ originals
 ```
 
 ### Data Flow
@@ -57,7 +56,7 @@ The core architecture has four layers:
 
 [Graph]  src/pkb/graph/
   ES chunks → graph_list_chunks → Claude Code self-extraction → graph_store_concepts
-    → store in data/.graph/pkb_graph.sqlite → sync_concept_notes → project into data/_concepts/<slug>.md
+    → store in data/.graph/pkb_graph.sqlite → graph_explain/query/path/map
 ```
 
 Secondary interface: `src/pkb/cli.py` (`pkb init/reindex/sync/query/graph …`). Parity between the
@@ -71,7 +70,7 @@ command/tool without a mapping will be caught by this test.
 The actual location is set via `DATA_ROOT` (default: `data/` inside the project). **Placing it as
 a subfolder under an Obsidian vault is recommended** (e.g. `<vault>/PKB`) — since the corpus
 itself lives inside the vault, it can be viewed, edited, and backlinked directly in Obsidian, and
-`write_file`/`sync_concept_notes` output also shows up in the vault as-is. Regardless of location,
+`write_file` output also shows up in the vault as-is. Regardless of location,
 doc_id is always fixed as `data/<relative-path>`.
 
 **The top-level folder name is the category, and it's dynamic** — the code doesn't enforce a fixed
@@ -84,7 +83,6 @@ data/                       # = DATA_ROOT. doc_id is always data/… regardless 
 ├── writing/
 ├── about/
 ├── ...                     # adding a folder = adding a category (news, journal, agent, backend…)
-├── _concepts/              # concept notes (one-way SQLite→note projection, not indexed in ES)
 ├── .logs/                  # search log JSONL (search_log.py)
 └── .graph/                 # graph SQLite (GRAPH_DB_PATH)
 ```
@@ -109,17 +107,16 @@ agent/
 
 Notes under `concepts/`, `guides/`, `research/`, plus `00_MOC.md`, require `schema_version`, `title`,
 `doc_type`, `canonical_id`, `status`, `authority`, and `tags` frontmatter. The path is the human
-classification; `canonical_id` is the stable logical identity across moves. `_concepts/` is not this
-canonical layer—it is a generated navigation projection from the SQLite graph.
+classification; `canonical_id` is the stable logical identity across moves.
 
-Excluded from indexing (`ingest.py:EXCLUDED_DIR_NAMES`, `is_concept_path`):
+Excluded from indexing (`ingest.py:EXCLUDED_DIR_NAMES`):
 
 | Target | Reason |
 |---|---|
 | `_review/`, `_trash/`, `_materials/`, `_archive/` | pending review, discarded, duplicate, or archived originals |
 | `_origin/` | external source archive — only digested notes are indexed; originals are for evidence-checking only |
 | any folder starting with `.` | tool output (`.obsidian`, etc.) |
-| `data/_concepts/` | concept notes are a SQLite→note projection, so they must not be double-indexed in ES |
+| `_concepts/` | reserved legacy projection directory; no longer generated, but excluded if restored |
 
 Supported formats:
 
@@ -242,10 +239,9 @@ Build pipeline (entirely Claude Code self-extraction, no API calls):
 2. Claude Code extracts concepts/relationships from the chunk content
 3. Store into SQLite with `graph_store_concepts(items_json)` (reflects normalization, aliases,
    mentions, edges)
-4. One-way project into `data/_concepts/<slug>.md` notes with `sync_concept_notes(confirm_prune)`
-   (+ render the `_concepts/index.md` MOC)
-5. Query SQLite directly with `graph_explain`, `graph_path`, `graph_query`, or `graph_affected`;
+4. Query SQLite directly with `graph_explain`, `graph_path`, `graph_query`, or `graph_affected`;
    each returned edge carries confidence and bounded source-chunk evidence
+5. Render a human-readable offline HTML graph with `graph_map` when visual exploration is needed
 6. Read projected notes as the human-facing Obsidian view; use `search_knowledge` for source text
 
 See [docs/graph-rag.md](graph-rag.md) for detailed design, normalization rules, and note rendering
@@ -293,7 +289,7 @@ its capability map or an allowlist — but it never compares behavior; the share
 | File/document | `write_file`, `list_documents`, `add_document`, `convert_and_ingest`, `get_document`, `reindex_document`, `sync_corpus`, `sync_obsidian` |
 | Lifecycle | `archive_document`, `restore_document` |
 | Status | `doctor` |
-| Graph RAG | `graph_explain`, `graph_path`, `graph_query`, `graph_affected`, `graph_list_concepts`, `graph_list_chunks`, `graph_store_concepts`, `graph_curate`, `graph_merge`, `sync_concept_notes` |
+| Graph RAG | `graph_explain`, `graph_path`, `graph_query`, `graph_affected`, `graph_list_concepts`, `graph_list_chunks`, `graph_store_concepts`, `graph_curate`, `graph_merge` |
 
 See [docs/mcp.md](mcp.md) for each tool's parameters and usage examples.
 
@@ -311,9 +307,9 @@ Boundaries the MCP server enforces:
 
 `src/pkb/cli.py` is used for operations and verification. 19 top-level commands: `init`, `reindex`,
 `index-switch`, `sync`, `convert`, `add`, `write`, `show`, `reindex-doc`, `list`, `query`, `delete`,
-`archive`, `restore`, `doctor`, `eval`, `purge-archived`, `stale`, `watch`. Plus 10 `graph`
+`archive`, `restore`, `doctor`, `eval`, `purge-archived`, `stale`, `watch`. Plus 9 `graph`
 subcommands: `stats`, `explain`, `path`, `query`, `affected`, `map`, `reset-evidence`,
-`finalize-evidence`, `rebuild-evidence-local`, `sync-notes`.
+`finalize-evidence`, `rebuild-evidence-local`.
 
 Most capabilities exist on both the CLI and MCP sides (`sync` ↔ `sync_corpus`, `show` ↔
 `get_document`, `graph explain` ↔ `graph_explain`, `graph map` ↔ `graph_map`, etc.). CLI-only:
@@ -355,7 +351,7 @@ Deleted      ─ delete_document      → hard delete (irreversible) / purge-arc
 |---|---|
 | Directly editing a single file (editor/Obsidian) | `pkb reindex-doc <doc_id>` / MCP `reindex_document` |
 | Adding/moving/deleting many files (bulk changes) | `pkb sync` / MCP `sync_corpus` (+ `sync_obsidian` if needed) |
-| Updating the concept graph with the latest content | Claude self-extraction (`graph_list_chunks`→`graph_store_concepts`), then `pkb graph sync-notes` / MCP `sync_concept_notes` |
+| Updating the concept graph with the latest content | Claude self-extraction (`graph_list_chunks`→`graph_store_concepts`); query the updated SQLite graph directly |
 | Mapping schema changed or index state got tangled | `pkb reindex --yes` (delete everything and rebuild) |
 
 ---

@@ -989,31 +989,5 @@ def graph_rebuild_evidence_local(
         )
 
 
-@graph_app.command("sync-notes")
-def graph_sync_notes(
-    yes: bool = typer.Option(False, "--yes", "-y", help="대량 정리 확인 생략"),
-):
-    """SQLite 개념그래프를 data/_concepts/<slug>.md 볼트 노트로 동기화 (단방향, ES 미색인).
-    mcp sync_concept_notes과 동일.
-    """
-    from pkb.graph.notes import sync_concept_notes
-    from pkb.graph.schema import graph_connection
-
-    with graph_connection(settings.graph_db_path) as conn:
-        result = sync_concept_notes(conn, confirm_prune=yes)
-
-    typer.echo(
-        f"개념 노트 동기화: created={result['created']} updated={result['updated']} "
-        f"skipped={result['skipped']} failed={result['failed']} pruned={result['pruned']}"
-    )
-    if result["pending_prune"]:
-        typer.echo(f"정리 보류 {len(result['pending_prune'])}개 (대량이라 확인 필요):")
-        for p in result["pending_prune"][:10]:
-            typer.echo(f"  - {p}")
-        if len(result["pending_prune"]) > 10:
-            typer.echo(f"  ... 외 {len(result['pending_prune']) - 10}개")
-        typer.echo("삭제하려면 --yes로 재호출하세요.")
-
-
 if __name__ == "__main__":
     app()

@@ -4,13 +4,13 @@
 
 **Purpose**: answer questions at the level of *"how are the concepts across my whole corpus connected?"*. It **complements** the existing RRF + reranker search where that search is weak — it does not replace it.
 
-**Core design**: the concept layer is 100% self-extracted by Claude Code — no API calls, no LLM cost. Claude Code reads chunks with `graph_list_chunks`, extracts concepts/relations itself, and stores them in SQLite via `graph_store_concepts`. Native `graph_explain`, `graph_path`, `graph_query`, and `graph_affected` queries read that SQLite graph directly, while `sync_concept_notes` projects it into `data/_concepts/<slug>.md` vault notes for human browsing.
+**Core design**: the concept layer is 100% self-extracted by Claude Code — no API calls, no LLM cost. Claude Code reads chunks with `graph_list_chunks`, extracts concepts/relations itself, and stores them in SQLite via `graph_store_concepts`. Native `graph_explain`, `graph_path`, `graph_query`, and `graph_affected` queries read that SQLite graph directly; `graph_map` renders a human-readable offline HTML view when needed.
 
 | | Existing (ES + RRF + reranker) | Graph RAG |
 |---|---|---|
 | Good at | **Specific queries** like "what is DI?", "what's the BM25 formula?" | **Relational/global queries** like "how are DI, IoC, Bean, and Container tangled together?" |
 | Data unit | Chunk (500 tokens) | Concept (entity) + relation |
-| Response material | Body chunks | `data/_concepts/` notes (prose + relation links + sources) |
+| Response material | Body chunks | SQLite concepts, relations, curated prose, and source evidence |
 | Build trigger | Immediately on ingest | Explicit run via MCP `graph_list_chunks`/`graph_store_concepts` |
 
 **Not doing**: automatic full-graph builds (opt-in only), a full graph DB like Neo4j, GNN embeddings, automatic updates driven by conversation history.
@@ -56,17 +56,15 @@ Schema definitions live in `src/pkb/graph/schema.py`, CRUD in `src/pkb/graph/sto
 
 Duplicates that passed dedup but still ended up split into separate nodes (notation variants,
 etc.) are merged after the fact with `store.merge_concepts(conn, winner_slug, loser_slugs)` —
-edges, mentions, aliases, and prose are transferred to the winner, and loser notes are cleaned up
-as orphans on the next `sync_concept_notes`. Note: **components** of a broader concept, like "MCP
+edges, mentions, aliases, and prose are transferred to the winner, and loser rows are deleted in
+the same SQLite transaction. Note: **components** of a broader concept, like "MCP
 Server", are not notation variants and must not be merged.
 
-### Note Projection Criteria
-`sync_concept_notes` doesn't project every concept into a note — only concepts that are
-**`concept_curation.label='real'` (classified as a real concept) and have at least one relation
-(edge)** get a note. Orphan concepts (zero relations) have no connective value and are excluded,
-though they remain in SQLite (`store.projected_slugs`). If the curation table is empty, it falls
-back to projecting everything. Relations and prose links pointing to unprojected concepts render
-as plain text so they don't produce broken wikilinks.
+### Curation Criteria
+Search-result concept attachments prefer concepts that are **`concept_curation.label='real'` and
+have at least one relation (edge)**. Orphan concepts remain in SQLite but are omitted from those
+attachments because they add little navigational value. `vocab` concepts are also excluded from
+default graph seeding. If the curation table is empty, the system falls back to all concepts.
 
 ### Relation Edge Aggregation
 - Re-running the same chunk's (src, dst, relation) → evidence upsert is idempotent (count unchanged)
@@ -75,7 +73,7 @@ as plain text so they don't produce broken wikilinks.
 
 ---
 
-## Pipeline: Self-Extraction → Storage → Note Projection
+## Pipeline: Self-Extraction → Storage → Native Query
 
 ### 1. `graph_list_chunks(category|doc_id, offset, limit, pending_only)`
 Returns ES chunks as paginated JSON. With `pending_only=True`, only unextracted or content-changed chunks are returned (incremental extraction). Claude Code reads this result directly and extracts concepts/relations using the rules below. Before extracting, check the existing vocabulary with `graph_list_concepts` and reuse existing names/slugs for overlapping concepts.
@@ -87,15 +85,12 @@ Returns ES chunks as paginated JSON. With `pending_only=True`, only unextracted 
 ### 2. `graph_store_concepts(items_json)`
 Upserts the extracted concept/relation JSON into SQLite (including normalization, aliases, mentions, edges).
 
-### 3. `sync_concept_notes(confirm_prune)`
-One-way, deterministic, idempotent projection from SQLite to `data/_concepts/<slug>.md` notes. Concept edges are rewritten as `[[wikilinks]]` so Obsidian's graph view can render the concept graph. Link targets are **vault physical paths**, not doc_ids (e.g. `[[PKB/_concepts/slug|name]]`) — if `DATA_ROOT` is outside the vault, it falls back to filename-only links. Relations to unprojected (vocab) concepts are shown as plain text. Only the region between `<!-- pkb:auto:start/end -->` markers is regenerated, so user prose outside the markers is preserved. There's no note-to-SQLite promotion path (SQLite is always the SSOT). It also renders `_concepts/index.md`, a MOC that groups projected concepts by category — the entry point into the concept vocabulary catalog. Implementation: `src/pkb/graph/notes.py`.
-
-### 4. Querying and Reading
+### 3. Querying and Reading
 Use `graph_explain` for one concept, `graph_path` for a shortest path, `graph_query` for a
 semantic-seeded bounded subgraph, and `graph_affected` for stored-direction downstream traversal.
-Every returned edge includes confidence and bounded `doc_id`/`chunk_index` evidence. The projected
-`data/_concepts/<slug>.md` notes remain the human-readable Obsidian view. Concept notes aren't indexed
-in ES, so use `search_knowledge` when the answer requires source text rather than graph structure.
+Every returned edge includes confidence and bounded `doc_id`/`chunk_index` evidence. Use
+`graph_map` for a human-readable offline HTML view and `search_knowledge` when the answer requires
+source text rather than graph structure.
 
 ---
 
@@ -111,8 +106,6 @@ uv run pkb graph map --concept "BM25"   # offline Evidence Map HTML snapshot
 uv run pkb graph reset-evidence --yes  # keep the existing graph, reset staging evidence/markers
 uv run pkb graph rebuild-evidence-local --yes  # extract all pending with a local Ollama model
 uv run pkb graph finalize-evidence --yes  # after confirming full extraction, atomically switch to the staging graph
-uv run pkb graph sync-notes   # sync SQLite → data/_concepts/ notes
-uv run pkb graph sync-notes --yes   # skip confirmation for bulk cleanup (21+ items)
 ```
 
 To migrate legacy append-only edges to evidence-based ones, first run `reset-evidence --yes` once,
@@ -154,7 +147,7 @@ embeds the text, so it loads the embedding model; `--concept` and `--path` read 
 Implementation: `src/pkb/graph/viewmap.py`.
 
 There's no batch API build or export CLI. Building remains MCP-first; reading is available through
-native SQLite graph queries, the CLI, and projected Obsidian notes.
+native SQLite graph queries, the CLI, and the offline Evidence Map.
 
 ---
 

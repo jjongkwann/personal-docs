@@ -41,7 +41,7 @@ data/
 
 색인 제외: `_review/`, `_trash/`, `_materials/`, `_archive/`(검토 대기·폐기·중복·보관 원본),
 `_origin/`(외부 원본 보관소 — 소화 노트만 색인, 원본은 근거 확인용), `.`으로 시작하는
-폴더 전체(도구 산출물), `data/_concepts/`(개념노트 — SQLite→노트 투영본이라 ES 중복 색인 안 함).
+폴더 전체(도구 산출물), 레거시 백업을 복원했을 때의 폐기된 `_concepts/` 경로.
 
 ---
 
@@ -52,8 +52,6 @@ Claude Code가 `write_file`로 새 문서를 저장하기 전에 지키는 규�
 - 저장 전 내용을 다듬으세요 — 읽을 수 있는 산문(제텔카스텐 톤), frontmatter(title·tags·필요시 expires_at) 포함.
 - 배치 결정: ① 기존 주제 폴더 우선 (`list_documents`로 확인) ② 단발 조사는 `data/study/daily-research/`
   ③ 계획된 시리즈만 새 폴더 ④ 같은 주제가 2~3건 쌓이면 폴더로 승격. 날짜는 파일명이 아니라 frontmatter에.
-- 개념노트(`data/_concepts/`)는 SQLite 개념그래프의 자동 생성물입니다 — 직접 편집은 `auto:end` 마커
-  아래에만 하세요 (마커 위는 다음 동기화 시 덮어씌워집니다).
 
 ---
 
@@ -211,7 +209,7 @@ Claude Code `SessionStart` 훅으로 등록하면 세션 시작 시 sync 필요 
 
 ## Graph RAG 운영 CLI
 
-개념 그래프 구축은 Claude Code가 MCP의 `graph_list_chunks`/`graph_store_concepts`로 직접 추출·저장합니다(API 호출 없음). CLI는 통계·조회 질의 4종·Evidence Map 스냅샷·evidence 재구축·노트 동기화를 제공합니다.
+개념 그래프 구축은 Claude Code가 MCP의 `graph_list_chunks`/`graph_store_concepts`로 직접 추출·저장합니다(API 호출 없음). CLI는 통계·조회 질의 4종·Evidence Map 스냅샷·evidence 재구축을 제공합니다.
 
 ```bash
 # 현재 그래프 통계
@@ -239,10 +237,6 @@ uv run pkb graph rebuild-evidence-local --yes
 
 # 수동 graph_list_chunks → graph_store_concepts 전량 처리 후 pending=0일 때 원자 전환
 uv run pkb graph finalize-evidence --yes
-
-# SQLite 개념그래프를 data/_concepts/<slug>.md 노트로 동기화
-uv run pkb graph sync-notes
-uv run pkb graph sync-notes --yes   # 대량 정리 확인 생략
 ```
 
 ---

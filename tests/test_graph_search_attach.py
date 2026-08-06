@@ -48,19 +48,19 @@ def test_mentions_for_chunks_empty_curation_includes_all(conn):
     gstore.add_mention(conn, a, "data/study/x.md", 0)
     gstore.add_mention(conn, b, "data/study/x.md", 0)
 
-    # 큐레이션 테이블 비어있음 → projected_slugs=None → 전량 포함
+    # 큐레이션 테이블 비어있음 → curated_connected_slugs=None → 전량 포함
     result = gstore.mentions_for_chunks(conn, [("data/study/x.md", 0)])
     assert {c["slug"] for c in result[("data/study/x.md", 0)]} == {"bm25", "rrf"}
 
 
-def test_mentions_for_chunks_filters_by_projected_slugs(conn):
+def test_mentions_for_chunks_filters_by_curated_connected_slugs(conn):
     a = gstore.upsert_concept(conn, name="BM25")
     b = gstore.upsert_concept(conn, name="RRF")
     orphan = gstore.upsert_concept(conn, name="고아개념")
     gstore.add_edge(conn, a, b, "related_to")
     for cid in (a, b, orphan):
         gstore.add_mention(conn, cid, "data/study/x.md", 0)
-    # 큐레이션 존재 → real+엣지 보유(bm25/rrf)만 투영, vocab은 제외
+    # 큐레이션 존재 → real+엣지 보유(bm25/rrf)만 부착, vocab은 제외
     gstore.set_curation(conn, "bm25", "real")
     gstore.set_curation(conn, "rrf", "real")
     gstore.set_curation(conn, "고아개념", "vocab")
@@ -138,7 +138,8 @@ def test_search_knowledge_attaches_concepts_and_vocab(graph_db, monkeypatch):
 
     result = search_knowledge("bm25란?")
     assert result.startswith("코퍼스 개념 어휘: BM25(Best Match 25)")
-    assert "관련 개념: [BM25](data/_concepts/bm25.md)" in result
+    assert "관련 개념: BM25" in result
+    assert "data/_concepts" not in result
     assert embed_calls == [["bm25란?"]]  # 하이브리드 검색과 그래프 어휘가 한 벡터 공유
 
 

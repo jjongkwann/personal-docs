@@ -179,9 +179,8 @@ For each client, verify the connection with `claude` → `/mcp`, `codex mcp list
 | `graph_store_concepts` | Stores the concept/relation JSON extracted by Claude Code into the SQLite graph DB |
 | `graph_curate` | Concept curation — lists uncurated concepts, saves real/vocab labels and prose |
 | `graph_merge` | Merges notation-variant concepts into a canonical concept (carrying over edges, mentions, and aliases) |
-| `sync_concept_notes` | Projects the SQLite concept graph into `data/_concepts/<slug>.md` vault notes and renders `_concepts/index.md` as a MOC (the concept vocabulary catalog entry point) |
 
-Graph RAG's MCP-first workflow: read chunks with `graph_list_chunks`, have Claude Code extract concepts and relations directly, and store them with `graph_store_concepts`. After storing, label real/vocab with `graph_curate`, merge notation variants with `graph_merge`, and project the result with `sync_concept_notes`. Query SQLite directly with `graph_explain`/`graph_path`/`graph_query`/`graph_affected`; use projected notes as the human-readable Obsidian view.
+Graph RAG's MCP-first workflow: read chunks with `graph_list_chunks`, have Claude Code extract concepts and relations directly, and store them with `graph_store_concepts`. After storing, label real/vocab with `graph_curate` and merge notation variants with `graph_merge`. Query SQLite directly with `graph_explain`/`graph_path`/`graph_query`/`graph_affected`, or render an offline HTML view with `graph_map`.
 
 ### Parameter Reference
 
@@ -214,7 +213,6 @@ graph_list_chunks(category="", doc_id="", offset=0, limit=20, pending_only=False
 graph_store_concepts(items_json)
 graph_curate(items_json="")
 graph_merge(winner_slug, loser_slugs_json)
-sync_concept_notes(confirm_prune=False)
 ```
 
 `add_document(tags=...)` takes a comma-separated string, while the graph tools take
@@ -258,7 +256,6 @@ Having a natural conversation in Claude Code triggers the appropriate MCP tool c
 ### Concept Graph
 
 - *"Build the concept graph for the rag material, 20 chunks at a time"* → repeated `graph_list_chunks(category="rag", limit=20)` + `graph_store_concepts`
-- *"Sync the concept notes to the vault"* → `sync_concept_notes()`
 - *"Explain Dependency Injection and show its evidence"* → `graph_explain(concept="Dependency Injection")`
 - *"What is the shortest relationship path from DI to Container?"* → `graph_path(source="DI", target="Container")`
 - *"How are DI, IoC, Bean, and Container connected?"* → `graph_query(query="How are DI, IoC, Bean, and Container connected?")`

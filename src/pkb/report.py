@@ -283,14 +283,9 @@ def build_health_report_status(es) -> HealthReport:
                         "— `pkb graph reset-evidence --yes` 후 전량 재추출 필요"
                     )
                 if orphans:
-                    from pkb.config import data_dir
-                    from pkb.ingest import CONCEPTS_DIR_NAME
-
-                    concepts_dir = data_dir() / CONCEPTS_DIR_NAME
                     lines.append(f"  고아 개념(멘션 0): {len(orphans)}")
                     for slug in orphans[:10]:  # ES 측 후보 나열과 동일한 10건 캡
-                        note = " (노트 잔존)" if (concepts_dir / f"{slug}.md").exists() else ""
-                        lines.append(f"    - {slug}{note}")
+                        lines.append(f"    - {slug}")
                     if len(orphans) > 10:
                         lines.append(f"    ... 외 {len(orphans) - 10}개")
 

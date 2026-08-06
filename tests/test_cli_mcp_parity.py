@@ -45,7 +45,6 @@ CAPABILITY: dict[str, dict[str, str]] = {
     "graph_query": {"cli": "graph query", "mcp": "graph_query"},
     "graph_affected": {"cli": "graph affected", "mcp": "graph_affected"},
     "graph_map": {"cli": "graph map", "mcp": "graph_map"},
-    "concept_notes": {"cli": "graph sync-notes", "mcp": "sync_concept_notes"},
 }
 
 # 비가역/무거운 admin·API 벌크 — CLI 전용이 의도된 것.

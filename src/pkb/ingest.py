@@ -559,30 +559,6 @@ def _extract_title(text: str, file_path: Path) -> str:
     return cleaned or file_path.stem
 
 
-# 개념 원자노트 디렉터리. SQLite 개념그래프의 투영본이므로 ES 중복색인을 막는다.
-# "_" 접두로 일반 노트 사이에서 사람 눈에 덜 띄게 강등(자동 생성물 표시).
-CONCEPTS_DIR_NAME = "_concepts"
-
-
-def is_concept_path(rel_or_path: str | Path) -> bool:
-    """경로(또는 doc_id)가 개념노트 디렉터리(data/_concepts/) 하위인지 판정.
-
-    doc_id 형식("data/_concepts/x.md")과 절대경로 양쪽을 처리한다.
-    """
-    from pkb.config import data_dir
-
-    p = Path(rel_or_path)
-    if p.is_absolute():
-        try:
-            p = p.relative_to(data_dir())
-        except ValueError:
-            return False
-    parts = p.parts
-    if parts and parts[0] == "data":
-        parts = parts[1:]
-    return bool(parts) and parts[0] == CONCEPTS_DIR_NAME
-
-
 def process_file(
     file_path: Path,
     base_dir: Path,
@@ -912,7 +888,14 @@ def _realign_graph(relayouts: list[tuple[str, dict[int, str], dict[int, str]]]) 
 # _materials: 강의 PDF 원본 — 같은 폴더 _extracted md가 전량(72/72) 존재해 이중 색인만
 # 유발 (2026-07-10 실측).
 # _origin: 외부 원본 보관소 — 소화 노트만 색인하고 원본은 근거 확인용으로만 둔다.
-EXCLUDED_DIR_NAMES = {"_review", "_trash", "_materials", "_archive", "_origin"}
+EXCLUDED_DIR_NAMES = {
+    "_review",
+    "_trash",
+    "_materials",
+    "_archive",
+    "_origin",
+    "_concepts",  # 제거된 레거시 투영 폴더가 복원돼도 중복 색인하지 않음
+}
 
 
 def _has_dot_segment(path: Path) -> bool:
@@ -921,15 +904,11 @@ def _has_dot_segment(path: Path) -> bool:
 
 
 def is_excluded_path(path: Path) -> bool:
-    """색인 제외 경로인지 — 개념노트/예약 디렉터리/숨김 성분.
+    """색인 제외 경로인지 — 예약 디렉터리/숨김 성분.
 
     탐색(find_ingestable_files)과 직접 인제스트(process_file) 양쪽이 같은 판정을 쓴다.
     """
-    return (
-        is_concept_path(path)
-        or _has_dot_segment(path)
-        or not EXCLUDED_DIR_NAMES.isdisjoint(path.parts)
-    )
+    return _has_dot_segment(path) or not EXCLUDED_DIR_NAMES.isdisjoint(path.parts)
 
 
 def find_ingestable_files(path: Path, exclude: Path | None = None) -> list[Path]:
@@ -938,7 +917,6 @@ def find_ingestable_files(path: Path, exclude: Path | None = None) -> list[Path]
     경로에 _review/_trash/_materials/_archive/_origin 성분이 있으면 검토 큐·중복·보관·외부
     원본으로 보고 제외한다.
     "."으로 시작하는 경로 성분(.obsidian 등 도구 산출물)도 제외한다.
-    data/_concepts/ 하위 개념노트도 제외한다 (SQLite→노트 단방향 투영본, ES 미색인).
     exclude가 주어지면 그 서브트리는 건너뛴다 (예: 볼트 크롤 시 data 코퍼스 중복 방지).
     """
     if path.is_file():
