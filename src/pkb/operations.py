@@ -112,6 +112,8 @@ _REQUIRED_CURATED_METADATA = (
     "tags",
 )
 _RESERVED_PATH_PARTS = frozenset({"_origin", "_archive"})
+# 레거시 인박스: 신규 저장은 strict 모드에서 거부, 기존 파일 편집은 허용.
+_LEGACY_INBOX_DIRS = frozenset({"daily-research"})
 
 # Public read-only views for MCP/CLI surfaces and migration tooling.
 CURATED_DOCUMENT_TYPES = _CURATED_DOCUMENT_TYPES
@@ -278,6 +280,19 @@ def resolve_document_policy(
     root = data_dir()
     document_type = derive_document_type(file_path)
     curated = document_type in _CURATED_DOCUMENT_TYPES
+    # 레거시 인박스 신규 저장 차단.  strict는 원래 curated 경로에만 적용되지만,
+    # 인박스에 새 문서가 계속 쌓이는 것은 마이그레이션 자체를 되돌리므로 예외로 막는다.
+    # 기존 파일 편집(아카이브 frontmatter, 이관 등)은 그대로 허용.
+    if strict and not full_path.exists():
+        parts = _normalised_relative_parts(file_path, full_path)
+        if parts and parts[0] in _LEGACY_INBOX_DIRS:
+            raise DocumentPolicyError(
+                f"{parts[0]}/는 레거시 인박스라 새 문서를 만들 수 없습니다. "
+                "list_documents(limit=0)로 기존 주제 폴더를 확인한 뒤 "
+                "<주제>/research/ 같은 curated 경로에 frontmatter"
+                "(schema_version, title, doc_type, canonical_id, status, authority, tags)를 "
+                "포함해 저장하세요. 기존 파일 편집은 허용됩니다."
+            )
     if content is None:
         if full_path.exists():
             try:

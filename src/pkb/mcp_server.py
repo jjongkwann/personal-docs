@@ -32,7 +32,8 @@ _WRITE_WORKFLOW = """새 문서를 작성할 때는 다음 순서를 반드시 �
 3. 관련 문서가 있으면 get_document로 읽고 가장 적절한 기존 정본을 편집합니다. 검색 결과가
    없을 때만 기존 구조의 concepts/guides/research/_origin 아래에 새 파일을 만듭니다.
 4. concepts는 개념 정본, guides는 종합 설명, research는 조사·근거, _origin은 원본에 사용합니다.
-   번호 폴더나 새 분류는 기존 경로로 표현할 수 없을 때만 만듭니다.
+   번호 폴더나 새 분류는 기존 경로로 표현할 수 없을 때만 만듭니다. daily-research/ 같은
+   날짜 인박스는 레거시라 새 문서를 만들 수 없습니다(기존 파일 편집만 허용).
 5. 편집·작성은 write_file(dry_run=True)로 먼저 검토하고, 기존 파일은 반환된 previous_hash를
    expected_hash로 전달해 적용합니다. 여러 파일을 바꾼 뒤 마지막에 한 번만 동기화합니다."""
 
@@ -213,7 +214,8 @@ def write_file(
     새 파일을 만듭니다. 정리된 카테고리는 concepts/(개념 정본), guides/(종합 설명),
     research/(조사 근거), _origin/(원본)으로 나눕니다.
     concepts/guides/research/00_MOC.md에는 schema_version, title, doc_type, canonical_id, status,
-    authority, tags frontmatter가 필수입니다. 기존 문서는 dry_run=True → diff/hash 확인 →
+    authority, tags frontmatter가 필수입니다. daily-research/는 레거시 인박스라 새 문서를
+    만들 수 없습니다(기존 파일 편집만 허용). 기존 문서는 dry_run=True → diff/hash 확인 →
     expected_hash를 넣은 적용 순서를 사용합니다.
 
     Args:

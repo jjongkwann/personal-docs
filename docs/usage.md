@@ -52,8 +52,10 @@ Rules Claude Code follows before saving a new document with `write_file`.
 
 - Polish the content before saving — readable prose (Zettelkasten tone), with frontmatter (title, tags, `expires_at` if needed).
 - Placement decisions: (1) prefer an existing topic folder (check with `list_documents`) (2) one-off
-  research goes to `data/study/daily-research/` (3) only create a new folder for a planned series
-  (4) promote to a folder once 2-3 items on the same topic pile up. Dates go in frontmatter, not the filename.
+  research goes to `<topic>/research/` under the matching topic with curated frontmatter (3) only
+  create a new folder for a planned series (4) promote to a folder once 2-3 items on the same topic
+  pile up. Dates go in frontmatter, not the filename. `daily-research/` is a legacy inbox: new
+  documents are rejected in strict mode; editing existing files is still allowed.
 
 ---
 

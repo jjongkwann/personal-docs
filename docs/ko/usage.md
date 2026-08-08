@@ -50,8 +50,10 @@ data/
 Claude Code가 `write_file`로 새 문서를 저장하기 전에 지키는 규칙입니다.
 
 - 저장 전 내용을 다듬으세요 — 읽을 수 있는 산문(제텔카스텐 톤), frontmatter(title·tags·필요시 expires_at) 포함.
-- 배치 결정: ① 기존 주제 폴더 우선 (`list_documents`로 확인) ② 단발 조사는 `data/study/daily-research/`
-  ③ 계획된 시리즈만 새 폴더 ④ 같은 주제가 2~3건 쌓이면 폴더로 승격. 날짜는 파일명이 아니라 frontmatter에.
+- 배치 결정: ① 기존 주제 폴더 우선 (`list_documents`로 확인) ② 단발 조사는 해당 주제의
+  `<주제>/research/`에 curated frontmatter 포함 저장 ③ 계획된 시리즈만 새 폴더 ④ 같은 주제가
+  2~3건 쌓이면 폴더로 승격. 날짜는 파일명이 아니라 frontmatter에. `daily-research/`는 레거시
+  인박스입니다: strict 모드에서 신규 저장은 거부되고, 기존 파일 편집만 허용됩니다.
 
 ---
 

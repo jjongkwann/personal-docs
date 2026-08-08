@@ -59,6 +59,38 @@ def test_write_file_creates_parents(in_tmp_data_root):
     assert (in_tmp_data_root / "data" / "new_cat" / "sub" / "nested.md").exists()
 
 
+def test_write_file_rejects_new_file_in_legacy_inbox(in_tmp_data_root):
+    # strict_policy 기본값(True)에서 daily-research/ 신규 저장은 교육적 에러로 거부
+    result = _call("data/daily-research/2026-08-08-note.md", "content", ingest=False)
+    assert "오류" in result
+    assert "레거시 인박스" in result
+    assert "research/" in result  # 에러가 올바른 경로를 안내해야 함
+    assert not (in_tmp_data_root / "data" / "daily-research" / "2026-08-08-note.md").exists()
+
+
+def test_write_file_dry_run_also_rejects_legacy_inbox(in_tmp_data_root):
+    # 미리보기 단계에서 먼저 배우도록 dry_run에서도 동일하게 거부
+    result = _call("data/daily-research/x.md", "content", dry_run=True)
+    assert "오류" in result
+    assert "레거시 인박스" in result
+
+
+def test_write_file_allows_editing_existing_legacy_inbox_file(in_tmp_data_root):
+    # 기존 파일 편집(이관·아카이브 등)은 허용
+    target = in_tmp_data_root / "data" / "daily-research" / "old.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("old", encoding="utf-8")
+    preview = _call("data/daily-research/old.md", "updated", dry_run=True)
+    assert "오류" not in preview
+    assert "쓰기 미리보기" in preview
+
+
+def test_write_file_legacy_inbox_allowed_when_strict_off(in_tmp_data_root):
+    # 호환 모드(strict_policy=False)는 기존 동작 유지
+    result = _call("data/daily-research/compat.md", "x", strict_policy=False)
+    assert "저장 완료" in result
+
+
 def test_write_file_ingest_appends_graph_nudge(in_tmp_data_root, monkeypatch):
     monkeypatch.setattr(
         "pkb.ingest.ingest_files",
