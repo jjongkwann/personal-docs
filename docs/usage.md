@@ -329,7 +329,8 @@ Other tuning options in `pkb.config.Settings` (overridable via environment varia
 | `GRAPH_DB_PATH` | `data/.graph/pkb_graph.sqlite` | SQLite concept graph file |
 | `GRAPH_DEDUP_THRESHOLD` | `0.88` | Embedding similarity threshold for concept merging |
 | `DEFAULT_TOP_K` | `5` | Default result count for `pkb query` and `search_knowledge` |
-| `MCP_PORT` | `8787` | Shared HTTP MCP server port (always bound to `127.0.0.1`) |
+| `MCP_PORT` | `8787` | Shared HTTP MCP server port |
+| `MCP_HOST` | `127.0.0.1` | Bind address. Set to `0.0.0.0` only to reach the server from another machine over a trusted LAN/VPN — there is no authentication and `write_file` can write anywhere in the vault. |
 | `WARMUP_ON_START` | `false` | Preload the models when the MCP server starts. Left off, the server idles at ~50MB until the first search |
 
 ## Chunking Strategy

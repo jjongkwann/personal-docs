@@ -131,6 +131,22 @@ Claude Desktop만 HTTP를 직접 못 붙습니다. `claude_desktop_config.json`�
 
 포트를 바꾸려면 `.env`의 `MCP_PORT`를 고치고 위 URL들도 같이 바꾸세요.
 
+### 다른 머신에서 돌리기 (LAN / VPN)
+
+서버를 항상 켜져 있는 머신에 두고 노트북에서 붙이려면 바인딩 주소를 엽니다. 서버 쪽 `.env`에
+`MCP_HOST=0.0.0.0`을 넣거나, launchd plist의 `EnvironmentVariables`에 같은 값을 넣습니다
+(환경변수가 `.env`보다 우선하므로 `.env`를 건드리지 않아도 됩니다). 클라이언트는 URL의 호스트만
+서버 IP로 바꿉니다.
+
+```bash
+claude mcp add --transport http pkb http://192.168.0.5:8787/mcp -s user
+```
+
+Elasticsearch는 `network.host: 127.0.0.1`로 두세요. MCP 서버만 열면 됩니다.
+
+> ⚠️ MCP 서버에는 인증이 없고 `write_file` 툴이 볼트 어디에나 쓸 수 있습니다. 홈 LAN이나 본인이
+> 운영하는 VPN 안에서만 여세요. 이 포트를 공유기에서 인터넷으로 포트포워딩하면 안 됩니다.
+
 ## 3. 확인
 
 ```bash

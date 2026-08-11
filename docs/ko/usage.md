@@ -323,7 +323,8 @@ GRAPH_DEDUP_THRESHOLD=0.88
 | `GRAPH_DB_PATH` | `data/.graph/pkb_graph.sqlite` | SQLite 개념 그래프 파일 |
 | `GRAPH_DEDUP_THRESHOLD` | `0.88` | 개념 병합 임베딩 유사도 임계값 |
 | `DEFAULT_TOP_K` | `5` | `pkb query`·`search_knowledge` 기본 결과 수 |
-| `MCP_PORT` | `8787` | 공유 HTTP MCP 서버 포트 (항상 `127.0.0.1`에 바인딩) |
+| `MCP_PORT` | `8787` | 공유 HTTP MCP 서버 포트 |
+| `MCP_HOST` | `127.0.0.1` | 바인딩 주소. 서버를 다른 머신에 두고 신뢰하는 LAN/VPN에서 붙을 때만 `0.0.0.0`으로. 인증이 없고 `write_file`이 볼트 어디든 쓸 수 있음. |
 | `WARMUP_ON_START` | `false` | MCP 서버 기동 시 모델 예열. 끄면 첫 검색까지 서버가 ~50MB로 유휴 |
 
 ## 청킹 전략

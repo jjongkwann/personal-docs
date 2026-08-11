@@ -1239,13 +1239,14 @@ if __name__ == "__main__":
     if _settings.warmup_on_start:
         threading.Thread(target=_warmup_background, daemon=True).start()
 
-    # 단일 HTTP 서버를 launchd로 상시 띄우고 Claude/Codex/Gemini가 http://127.0.0.1:8787/mcp 로 붙는다.
+    # 단일 HTTP 서버를 launchd로 상시 띄우고 Claude/Codex/Gemini가 http://<MCP_HOST>:8787/mcp 로 붙는다.
+    # 기본은 127.0.0.1. 별도 머신에서 돌려 LAN/VPN으로 붙일 땐 MCP_HOST=0.0.0.0 (인증 없으니 신뢰망 한정).
     # stdio였을 땐 클라이언트 연결마다 프로세스가 떠서 연결 수 × 4.1GB(모델 두 벌)를 먹었다.
     # MCP 2026-07-28은 요청별 메타데이터를 쓰는 무세션 프로토콜이다. stateless_http=True로
     # Mcp-Session-Id 없이 각 POST를 독립 처리하고, 응답 스트림이 필요 없는 PKB는 JSON으로 답한다.
     mcp.run(
         transport="streamable-http",
-        host="127.0.0.1",
+        host=_settings.mcp_host,
         port=_settings.mcp_port,
         **_HTTP_TRANSPORT_OPTIONS,
     )

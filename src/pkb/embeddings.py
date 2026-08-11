@@ -24,5 +24,9 @@ def get_model() -> SentenceTransformer:
 def embed(texts: list[str]) -> list[list[float]]:
     """텍스트 리스트를 벡터로 변환."""
     model = get_model()
-    vectors = model.encode(texts, show_progress_bar=False)
+    vectors = model.encode(
+        texts,
+        batch_size=settings.embedding_batch_size,
+        show_progress_bar=False,
+    )
     return vectors.tolist()

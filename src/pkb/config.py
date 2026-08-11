@@ -9,12 +9,14 @@ class Settings(BaseSettings):
     embedding_model: str = "BAAI/bge-m3"  # 2026-07 매트릭스 실측 채택 (KURE-v1·MiniLM 대비 우위)
     embedding_dims: int = 1024
     embedding_device: str = "auto"  # auto | cpu | mps | cuda
+    embedding_batch_size: int = 32  # sentence-transformers 기본값. RAM 8GB 머신의 대량 색인에선 8까지 낮출 것
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
     # 2026-07 벤치: BGE-M3 후보 풀에서 bge/qwen3 리랭커 모두 no-rerank(MRR 0.517)보다 낮아 기본 off
     rerank_enabled: bool = False
     rerank_device: str = "auto"  # auto | cpu | mps | cuda
     rerank_batch_size: int = 8  # MPS에선 작은 배치가 더 빠름 (bench_rerank_models.py 결과)
-    mcp_port: int = 8787  # 공유 HTTP MCP 서버 포트 (127.0.0.1 고정)
+    mcp_host: str = "127.0.0.1"  # 바인딩 주소. LAN/VPN에 노출하려면 0.0.0.0 (인증 없음 — 신뢰망에서만)
+    mcp_port: int = 8787  # 공유 HTTP MCP 서버 포트
     warmup_on_start: bool = False  # 기동 시 모델 예열. 끄면 첫 검색까지 서버가 ~50MB로 유휴
     candidate_k: int = 20  # 기본 경로(rerank=on)에서 ck=50 대비 latency 2.4x↓, 품질 동일. RRF-only도 nDCG 미세 우위.
     expand_context: int = 0  # N>0이면 각 검색 결과의 ±N 청크를 neighbors로 부착

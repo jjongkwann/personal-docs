@@ -134,6 +134,22 @@ belongs to the single shared HTTP server. Restart Desktop after configuring this
 
 To change the port, update `MCP_PORT` in `.env` and update the URLs above accordingly.
 
+### Running on a Separate Machine (LAN / VPN)
+
+To keep the server on an always-on machine and connect from a laptop, open the bind address. Set
+`MCP_HOST=0.0.0.0` in the server's `.env`, or put the same value in the launchd plist's
+`EnvironmentVariables` (environment variables take precedence over `.env`, so you can leave `.env`
+untouched). On the client, only the host part of the URL changes.
+
+```bash
+claude mcp add --transport http pkb http://192.168.0.5:8787/mcp -s user
+```
+
+Leave Elasticsearch on `network.host: 127.0.0.1`. Only the MCP server needs to be reachable.
+
+> ⚠️ The MCP server has no authentication and its `write_file` tool can write anywhere in the vault.
+> Open it only inside a home LAN or a VPN you operate. Do not port-forward it to the internet.
+
 ## 3. Verification
 
 ```bash
