@@ -67,6 +67,14 @@ API 키가 필요 없습니다 — 에이전트가 LLM 역할을 하는 100% 로
     <string>/tmp/pkb-mcp.out.log</string>
     <key>StandardErrorPath</key>
     <string>/tmp/pkb-mcp.err.log</string>
+    <!-- launchd 기본 fd 소프트 상한은 256이다. torch + MPS만으로도 dylib과 Metal 셰이더
+         캐시로 220개 가까이 상주 점유하므로, 장시간 가동한 서버는 EMFILE에 걸려
+         코퍼스 파일과 그래프 SQLite를 열지 못한다. -->
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
 </dict>
 </plist>
 ```
@@ -74,6 +82,12 @@ API 키가 필요 없습니다 — 에이전트가 LLM 역할을 하는 100% 로
 ```bash
 launchctl load ~/Library/LaunchAgents/dev.jongkwan.pkb-mcp.plist
 ```
+
+`NumberOfFiles`를 빼면 fd 고갈이 서로 무관해 보이는 두 오류로 나타납니다. `write_file`은
+존재하는 파일에 대해 `기존 파일을 읽을 수 없습니다: <경로>`를 반환하고,
+`search_knowledge`·`doctor`는 `OperationalError: unable to open database file`을 반환합니다.
+권한 문제를 의심하기 전에 열린 fd 수를 먼저 세십시오.
+`for PID in $(pgrep -f pkb.mcp_server); do lsof -p $PID | wc -l; done`
 
 로그인할 때 자동으로 뜨고, 죽으면 `KeepAlive`가 되살립니다. `RunAtLoad`+`KeepAlive` 조합이라
 **`pkill`로는 멈추지 않습니다** — 멈추려면 `launchctl unload`를 쓰세요.

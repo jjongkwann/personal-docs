@@ -67,6 +67,14 @@ No API key is required — the agent acts as the LLM, so the entire setup runs 1
     <string>/tmp/pkb-mcp.out.log</string>
     <key>StandardErrorPath</key>
     <string>/tmp/pkb-mcp.err.log</string>
+    <!-- launchd's default soft limit is 256 fds. torch + MPS alone keep ~220 dylibs and
+         Metal shader caches open, so a long-lived server hits EMFILE and then fails to
+         open corpus files or the graph SQLite. -->
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
 </dict>
 </plist>
 ```
@@ -74,6 +82,12 @@ No API key is required — the agent acts as the LLM, so the entire setup runs 1
 ```bash
 launchctl load ~/Library/LaunchAgents/dev.jongkwan.pkb-mcp.plist
 ```
+
+Without the `NumberOfFiles` limit, fd exhaustion shows up as two unrelated-looking errors:
+`write_file` reports `기존 파일을 읽을 수 없습니다: <path>` for a file that exists, and
+`search_knowledge`/`doctor` report `OperationalError: unable to open database file`. Count the
+open descriptors before suspecting permissions:
+`for PID in $(pgrep -f pkb.mcp_server); do lsof -p $PID | wc -l; done`.
 
 It starts automatically at login, and `KeepAlive` restarts it if it dies. Because of the
 `RunAtLoad`+`KeepAlive` combination, **`pkill` won't stop it** — use `launchctl unload` instead.
