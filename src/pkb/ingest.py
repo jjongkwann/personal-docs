@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -495,6 +496,15 @@ def _detect_language(text: str) -> str:
     return "ko" if korean_chars > 10 else "en"
 
 
+def _nfc(text: str) -> str:
+    """macOS 파일시스템이 돌려주는 NFD 경로 문자열을 NFC로 통일.
+
+    doc_id·category가 NFC/NFD 두 벌로 갈라져 색인이 중복되는 것을 막는다
+    — 경로에서 파생되는 모든 문자열은 저장 전에 반드시 여길 거친다.
+    """
+    return unicodedata.normalize("NFC", text)
+
+
 def _extract_category(file_path: Path, base_dir: Path) -> str:
     """파일 경로에서 카테고리 추출 — 코퍼스 최상위 폴더명이 곧 카테고리 (동적).
 
@@ -506,7 +516,7 @@ def _extract_category(file_path: Path, base_dir: Path) -> str:
         return "misc"
     if len(rel.parts) < 2 or rel.parts[0].startswith("."):
         return "misc"
-    return rel.parts[0]
+    return _nfc(rel.parts[0])
 
 
 _NUM_PREFIX_RE = re.compile(r"^\d+(?:\.\d+)*[_\s\-\.]*")
@@ -546,7 +556,7 @@ def derive_section_path_from_path(file_path: Path, base_dir: Path) -> str:
     if len(cleaned) > 2:
         # 첫 두 단계(카테고리 + 서브루트, 예: study > rag-v2)는 section으로서 가치 낮음
         cleaned = cleaned[2:]
-    return " > ".join(cleaned)
+    return _nfc(" > ".join(cleaned))
 
 
 def _extract_title(text: str, file_path: Path) -> str:
@@ -556,7 +566,7 @@ def _extract_title(text: str, file_path: Path) -> str:
         if line.startswith("# ") and not line.startswith("## "):
             return line[2:].strip()
     cleaned = _clean_path_name(file_path.stem)
-    return cleaned or file_path.stem
+    return _nfc(cleaned or file_path.stem)
 
 
 def process_file(
@@ -600,7 +610,7 @@ def process_file(
         if derived:
             chunks_with_path = [(derived, c) for _, c in chunks_with_path]
 
-    rel = str(file_path.relative_to(base_dir))
+    rel = _nfc(str(file_path.relative_to(base_dir)))
     doc_id = f"{doc_id_prefix}{rel}" if doc_id_prefix else rel
     category = category_override or _extract_category(file_path, base_dir)
 
@@ -973,7 +983,7 @@ def reconcile(
     scan_ts = datetime.now(UTC).isoformat()
     files = find_ingestable_files(root, exclude=exclude)
     stats = ingest_files(files, base_dir=root, doc_id_prefix=prefix, category_override=category_override)
-    expected = {f"{prefix}{f.relative_to(root)}" for f in files}
+    expected = {f"{prefix}{_nfc(str(f.relative_to(root)))}" for f in files}
     stale = sorted(list_doc_ids(es, prefix) - expected)
 
     write_sync_marker(scan_ts)
