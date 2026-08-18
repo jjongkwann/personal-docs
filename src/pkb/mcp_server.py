@@ -35,7 +35,10 @@ _WRITE_WORKFLOW = """새 문서를 작성할 때는 다음 순서를 반드시 �
    번호 폴더나 새 분류는 기존 경로로 표현할 수 없을 때만 만듭니다. daily-research/ 같은
    날짜 인박스는 레거시라 새 문서를 만들 수 없습니다(기존 파일 편집만 허용).
 5. 편집·작성은 write_file(dry_run=True)로 먼저 검토하고, 기존 파일은 반환된 previous_hash를
-   expected_hash로 전달해 적용합니다. 여러 파일을 바꾼 뒤 마지막에 한 번만 동기화합니다."""
+   expected_hash로 전달해 적용합니다. 기존 문서의 일부만 고칠 때는 read_file로 원문·hash를
+   받고 patch_file(old, new, expected_hash)로 부분 치환합니다(전체 재전송 금지).
+   검토가 끝나지 않은 문서는 status: draft로 두면 curated/evidence 검색에서 제외됩니다.
+   여러 파일을 바꾼 뒤 마지막에 한 번만 동기화합니다."""
 
 mcp = MCPServer(
     "pkb",
@@ -217,6 +220,9 @@ def write_file(
     authority, tags frontmatter가 필수입니다. daily-research/는 레거시 인박스라 새 문서를
     만들 수 없습니다(기존 파일 편집만 허용). 기존 문서는 dry_run=True → diff/hash 확인 →
     expected_hash를 넣은 적용 순서를 사용합니다.
+    검토 전 문서는 frontmatter `status: draft`로 씁니다 — draft는 색인돼도 curated/evidence
+    검색에서 제외되므로 색인 여부가 아니라 status가 검토 게이트입니다. 승인 후 active로 바꿉니다.
+    기존 문서의 일부만 고칠 때는 patch_file을 쓰세요(전체 재전송 불필요).
 
     Args:
         file_path: 저장할 파일 경로 (예: data/writing/note.md)
@@ -267,6 +273,74 @@ def write_file(
             f'graph_store_concepts 순으로 호출하세요.'
         )
     return result
+
+
+@mcp.tool()
+@_tool_guard
+def read_file(file_path: str) -> str:
+    """디스크의 문서 원문을 그대로 읽습니다 (get_document는 ES 청크라 원문 복원이 안 됨).
+
+    반환: content_hash(SHA-256, patch_file/write_file의 expected_hash로 사용) + 원문.
+
+    Args:
+        file_path: data/ 하위 .md 경로 (예: data/backend/research/x.md)
+    """
+    from pkb.operations import content_hash
+
+    target = _resolve_data_path(file_path)
+    if target is None or target.suffix != ".md":
+        return f"오류: data/ 하위 .md 경로만 읽을 수 있습니다. (입력: {file_path})"
+    if not target.is_file():
+        return f"오류: 파일 없음: {file_path}"
+    text = target.read_text(encoding="utf-8")
+    return f"content_hash: {content_hash(text)} | {len(text)}자\n{text}"
+
+
+@mcp.tool()
+@_tool_guard
+def patch_file(
+    file_path: str,
+    old: str,
+    new: str,
+    expected_hash: str = "",
+    ingest: bool = False,
+    dry_run: bool = False,
+    strict_policy: bool = True,
+) -> str:
+    """기존 문서에서 `old`(정확히 1회 등장)를 `new`로 치환합니다. 부분 편집용.
+
+    read_file로 원문·content_hash를 얻고, dry_run=True로 diff를 본 뒤 expected_hash를
+    넣어 적용합니다. 정책 검증·낙관적 잠금은 write_file과 동일.
+
+    Args:
+        file_path: data/ 하위 기존 .md 경로
+        old: 치환할 원문 조각. 파일에 정확히 한 번만 있어야 함(0회·2회 이상이면 거부).
+        new: 대체 문자열
+        expected_hash: read_file/dry_run이 돌려준 content_hash. 실제 적용 시 필수.
+        ingest: True면 저장 후 바로 인제스트. 기본 False.
+        dry_run: True면 diff/hash만 반환.
+        strict_policy: curated 경로의 문서 계약 강제. 기본 True.
+    """
+    target = _resolve_data_path(file_path)
+    if target is None or target.suffix != ".md":
+        return f"오류: data/ 하위 .md 경로만 편집할 수 있습니다. (입력: {file_path})"
+    if not target.is_file():
+        return f"오류: 파일 없음: {file_path} (신규 작성은 write_file)"
+    if not old:
+        return "오류: old가 비어 있습니다."
+    text = target.read_text(encoding="utf-8")
+    count = text.count(old)
+    if count != 1:
+        return f"오류: old가 파일에 {count}회 등장합니다 (정확히 1회여야 함). 더 넓은 문맥을 주세요."
+    fn = getattr(write_file, "fn", write_file)
+    return fn(
+        file_path,
+        text.replace(old, new, 1),
+        ingest=ingest,
+        dry_run=dry_run,
+        expected_hash=expected_hash,
+        strict_policy=strict_policy,
+    )
 
 
 @mcp.tool()
@@ -537,13 +611,17 @@ def sync_obsidian(path: str = "", confirm_prune: bool = False) -> str:
 def sync_corpus(confirm_prune: bool = False) -> str:
     """data/ 코퍼스 재조정+유령정리: 업서트 + 코퍼스에 없는 문서 정리.
 
+    삭제는 confirm_prune=True일 때만 한다. 코퍼스가 여러 기기에 복제돼 있으면(Syncthing)
+    한쪽에서 막 쓴 파일이 다른 쪽에는 아직 없어 "원본에 없는 문서"로 보이므로, 소량이라도
+    자동 삭제하지 않는다 — 먼저 목록을 보고 판단한다.
+
     Args:
-        confirm_prune: 대량 정리(21개 이상 삭제) 승인. 소량 정리는 자동.
+        confirm_prune: True면 원본에 없는 문서를 삭제. 기본 False = 목록만 보고.
     """
     from pkb.config import data_dir
     from pkb.ingest import format_delta_stats
     from pkb.operations import OperationError, prune_documents, sync_tree
-    from pkb.store import PRUNE_CONFIRM_THRESHOLD, get_client
+    from pkb.store import get_client
 
     es = get_client()
     root = data_dir()
@@ -561,11 +639,13 @@ def sync_corpus(confirm_prune: bool = False) -> str:
 
     if not stale:
         return _finish(result)
-    if len(stale) > PRUNE_CONFIRM_THRESHOLD and not confirm_prune:
-        preview = "\n".join(f"  - {d}" for d in stale[:10])
-        return (
-            f"{result}\n원본에 없는 문서 {len(stale)}개 — 대량이라 삭제 보류:\n{preview}"
-            f"\n  ...\n삭제하려면 confirm_prune=True로 재호출하세요. (경로 오설정 여부 먼저 확인)"
+    if not confirm_prune:
+        preview = "\n".join(f"  - {d}" for d in stale[:20])
+        more = f"\n  ... 외 {len(stale) - 20}개" if len(stale) > 20 else ""
+        return _finish(
+            f"{result}\n원본에 없는 문서 {len(stale)}개 — 삭제 보류(기본):\n{preview}{more}"
+            f"\n삭제하려면 confirm_prune=True로 재호출하세요. "
+            f"(경로 오설정·다른 기기 동기화 지연 여부 먼저 확인)"
         )
     prune_documents(es, stale)
     return _finish(f"{result}\n정리: 원본에 없는 문서 {len(stale)}개 삭제")
@@ -1188,6 +1268,8 @@ CORE_TOOLS = frozenset(
         "doctor",  # 3회
         "sync_corpus",  # 3회
         "write_file",  # 서버 instructions가 파일 작성 경로로 지정
+        "read_file",  # 원문 읽기 — 원격 MCP에서 디스크를 볼 유일한 경로
+        "patch_file",  # 부분 편집 — 대형 문서 병합 시 전체 재전송 회피
         "graph_explain",  # 그래프 읽기 최소 2종 — 07-24 추가라 호출 이력이 짧다
         "graph_query",
         "graph_map",  # 그래프를 눈으로 보는 유일한 경로. 없으면 CLI로 나가야 한다

@@ -155,7 +155,7 @@ MCP가 연결된 에이전트에게 자연어로 요청할 수 있습니다.
 | 작업 | 도구 |
 | --- | --- |
 | 검색 | `search_knowledge` |
-| 작성·추가 | `write_file`, `add_document`, `convert_and_ingest` |
+| 작성·추가 | `write_file`, `read_file`, `patch_file`, `add_document`, `convert_and_ingest` |
 | 조회·재색인 | `list_documents`, `get_document`, `reindex_document` |
 | 동기화 | `sync_corpus`, `sync_obsidian` |
 | 생명주기 | `archive_document`, `restore_document` |

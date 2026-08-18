@@ -286,7 +286,7 @@ its capability map or an allowlist — but it never compares behavior; the share
 | Category | Tools |
 |------|------|
 | Search | `search_knowledge` |
-| File/document | `write_file`, `list_documents`, `add_document`, `convert_and_ingest`, `get_document`, `reindex_document`, `sync_corpus`, `sync_obsidian` |
+| File/document | `write_file`, `read_file`, `patch_file`, `list_documents`, `add_document`, `convert_and_ingest`, `get_document`, `reindex_document`, `sync_corpus`, `sync_obsidian` |
 | Lifecycle | `archive_document`, `restore_document` |
 | Status | `doctor` |
 | Graph RAG | `graph_explain`, `graph_path`, `graph_query`, `graph_affected`, `graph_list_concepts`, `graph_list_chunks`, `graph_store_concepts`, `graph_curate`, `graph_merge` |
@@ -323,7 +323,7 @@ loop), `sync_obsidian` (vault-only reconciliation). This mapping is guarded by
 
 ### Tool profile (`PKB_MCP_PROFILE`)
 
-Set `PKB_MCP_PROFILE=core` on the MCP server process to expose only the 9 tools in
+Set `PKB_MCP_PROFILE=core` on the MCP server process to expose only the 11 tools in
 `CORE_TOOLS` (`mcp_server.py`) instead of all 23 — the ones that actually get called, plus
 `graph_map` so the graph stays viewable without dropping to the CLI. Default is `full`.
 The server `instructions` adapt to the profile so they never advertise a pruned tool;

@@ -184,11 +184,13 @@ For each client, verify the connection with `claude` → `/mcp`, `codex mcp list
 | Tool | Description |
 |------|------|
 | `search_knowledge` | Hybrid search over the personal knowledge base. Runs BM25 and kNN in a single msearch request and combines them with RRF (CrossEncoder reranking is disabled by default), capped at 2 chunks per document. When a concept graph exists, each hit is annotated with related concept links and a concept vocabulary for follow-up searches. Pass `include_obsidian=False` to exclude documents outside the corpus (vault-only, `obsidian/`-prefixed doc_id). If the default search comes up thin, add `query_variants` (up to 3 RAG-Fusion query rewrites) to search the variants together and merge results with RRF |
-| `write_file` | Writes `.md` files under `data/`. By default, auto-ingests immediately after writing |
+| `write_file` | Writes `.md` files under `data/`. MCP default is `ingest=False`; a batch is indexed once with `sync_corpus`. Documents still under review carry `status: draft` (excluded from `curated`/`evidence` search) |
+| `read_file` | Returns the on-disk source of a `data/**.md` file plus its `content_hash` (`get_document` serves ES chunks, which cannot be reassembled into the original) |
+| `patch_file` | Replaces one exact occurrence of `old` with `new` in an existing document — partial edits without resending the whole file. Same policy check and optimistic lock (`expected_hash`) as `write_file` |
 | `list_documents` | Lists documents stored in ES. Shows the top `limit` (default 50) sorted by `date_modified` descending. Set `limit<=0` to list everything |
 | `add_document` | Ingests a file under `data/` (md/txt/pdf/docx/pptx/xlsx/html) |
 | `convert_and_ingest` | Converts an external PDF/DOCX/PPTX/XLSX/HTML file to `.md`, saves it under `data/<category>/`, and ingests it. The converted file's frontmatter records provenance (`source`, `converted_from`, `converted_at`); PDFs keep page markers (`## p.N`) |
-| `sync_corpus` | Reconciles the `data/` corpus with ES: upserts plus pruning of documents no longer in the corpus (`confirm_prune=True` approves bulk deletions) |
+| `sync_corpus` | Reconciles the `data/` corpus with ES: upserts, then lists documents no longer in the corpus. Nothing is deleted unless `confirm_prune=True` — with a Syncthing-replicated corpus a freshly written file may not have arrived yet |
 | `sync_obsidian` | Reconciles the Obsidian vault with ES: upserts plus pruning of documents no longer in the vault. Categories are derived dynamically from the vault's top-level folder name (same rule as `data/`). If `OBSIDIAN_PATH` isn't set, it proposes pruning all remaining `obsidian/*` documents (`confirm_prune=True` required) |
 | `get_document` | Fetches a document. By default (`include_content=False`), returns only metadata (title, category, modified date) plus a chunk table of contents. Use `chunk_range` (e.g. `"3-7"`) to get the full text of that range, or `include_content=True` for the full text |
 | `reindex_document` | Re-reads a specific source document and re-ingests it into ES |
@@ -220,6 +222,8 @@ Exact signatures as registered in `src/pkb/mcp_server.py`:
 search_knowledge(query, category="", top_k=5, include_archived=False,
                  include_obsidian=True, query_variants=[], profile="all",
                  canonical_group=True, canonical_boost=0.15)
+read_file(file_path)
+patch_file(file_path, old, new, expected_hash="", ingest=False, dry_run=False, strict_policy=True)
 write_file(file_path, content, ingest=False, dry_run=False,
            expected_hash="", strict_policy=True)
 list_documents(category="", include_archived=False, limit=50)
@@ -264,7 +268,7 @@ Having a natural conversation in Claude Code triggers the appropriate MCP tool c
 
 - *"Add this PDF paper to the study category: `~/Downloads/paper.pdf`"* → `convert_and_ingest(category="study")`
 - *"Convert `~/Documents/notes.docx` and add it to the writing category"* → `convert_and_ingest(category="writing")`
-- *"Bring the data corpus up to date"* → `sync_corpus()` (upsert + prune stale documents)
+- *"Bring the data corpus up to date"* → `sync_corpus()` (upsert; stale documents are only listed — pass `confirm_prune=True` to delete them)
 - *"Also sync the vault files left outside the corpus"* → `sync_obsidian()` (uses OBSIDIAN_PATH from .env)
 
 `category` is required for `convert_and_ingest`. Claude Code infers it from the filename, user instructions, or content context. Category = the corpus's top-level folder name (dynamic); existing categories are reused when possible, and a new name creates a new category folder. You can also specify a subfolder path like `study/payments` (the category is the first folder).
@@ -301,9 +305,10 @@ Claude Code judges user intent and what evidence is needed
 Calls PKB MCP tools
     ├─ search_knowledge      → ES hybrid search
     ├─ write_file            → policy check + diff/hash preview → write .md under data/
+    ├─ read_file / patch_file → read on-disk source + hash / replace one exact span (same policy + lock as write_file)
     ├─ add_document          → chunking → embedding → ES indexing
     ├─ convert_and_ingest    → convert to md (pdfminer preserves pages for PDF, markitdown for others) → save to data/ → ES indexing
-    ├─ sync_corpus / sync_obsidian → reconcile with source (upsert + prune stale documents)
+    ├─ sync_corpus / sync_obsidian → reconcile with source (upsert; sync_corpus only deletes with confirm_prune=True)
     ├─ get_document          → look up chunks/section_path per document
     └─ graph_*               → query/store the SQLite concept graph
     ↓
@@ -320,5 +325,5 @@ Within MCP, Claude Code itself handles tool selection, re-search, summarization,
   be previewed with `dry_run=True`, then applied using the returned `previous_hash` as `expected_hash`.
 - Writes to `concepts/`, `guides/`, `research/`, and `00_MOC.md` enforce the document-contract frontmatter.
 - `convert_and_ingest` places no restriction on where the source file lives, but the converted output is always saved under the corpus's `<category>/`.
-- `sync_corpus` is the default reconciliation tool (upserts the entire `data/` corpus + prunes stale documents). `sync_obsidian` is an optional path used only when vault files are left outside `DATA_ROOT`: it reads the external Obsidian vault and writes only to ES (the source files are never copied or modified). If `DATA_ROOT` sits inside the vault, that subtree is excluded from the crawl (to avoid double ingestion). Both tools prune documents that have disappeared from the source, but bulk deletions of 21+ documents require `confirm_prune=True`.
+- `sync_corpus` is the default reconciliation tool (upserts the entire `data/` corpus + prunes stale documents). `sync_obsidian` is an optional path used only when vault files are left outside `DATA_ROOT`: it reads the external Obsidian vault and writes only to ES (the source files are never copied or modified). If `DATA_ROOT` sits inside the vault, that subtree is excluded from the crawl (to avoid double ingestion). `sync_corpus` never deletes without `confirm_prune=True` (it lists stale documents instead); `sync_obsidian` prunes small sets automatically and requires `confirm_prune=True` for 21+ deletions.
 - Large-scale Graph RAG construction can take a while, so start with a specific category (e.g. `rag`) or a single `doc_id`.

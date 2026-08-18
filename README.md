@@ -158,7 +158,7 @@ The main MCP tools:
 | Task | Tools |
 | --- | --- |
 | Search | `search_knowledge` |
-| Write / add | `write_file`, `add_document`, `convert_and_ingest` |
+| Write / add | `write_file`, `read_file`, `patch_file`, `add_document`, `convert_and_ingest` |
 | Inspect / reindex | `list_documents`, `get_document`, `reindex_document` |
 | Sync | `sync_corpus`, `sync_obsidian` |
 | Lifecycle | `archive_document`, `restore_document` |

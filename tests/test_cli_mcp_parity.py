@@ -72,7 +72,11 @@ ALLOWLIST_CLI_ONLY = {
 
 # Claude 루프 셀프추출·큐레이션·병합(graph_*) + obsidian 전용 재조정.
 # "graph_list_concepts"는 추출 전 기존 어휘 재사용 유도용 — graph_list_chunks와 같은 Claude 루프 전용.
+# "read_file"/"patch_file"은 원격 MCP에서 디스크 원문을 읽고 부분 편집하는 경로 — 로컬 CLI는
+#   cat/sed로 충분하므로 CLI 대응 없음.
 ALLOWLIST_MCP_ONLY = {
+    "read_file",
+    "patch_file",
     "graph_list_concepts",
     "graph_list_chunks",
     "graph_store_concepts",
