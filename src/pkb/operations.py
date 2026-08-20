@@ -240,11 +240,13 @@ def _canonical_id_conflicts(
     if not root.exists() or not canonical_id:
         return ()
     conflicts: list[Path] = []
-    target = target.resolve()
+    target_exists = target.exists()
     for candidate in root.rglob("*"):
         if not candidate.is_file() or candidate.suffix.lower() not in {".md", ".markdown"}:
             continue
-        if candidate.resolve() == target or _is_reserved_path(candidate, root):
+        # Path 문자열 비교는 한글 파일명의 NFC/NFD 차이로 자기 자신을 "다른 문서"로 오인한다
+        # (APFS는 조회 시 정규화 무시, 보존 시 원형 유지). inode 비교(samefile)로 같은 파일을 건너뛴다.
+        if (target_exists and candidate.samefile(target)) or _is_reserved_path(candidate, root):
             continue
         try:
             metadata = _parse_frontmatter(candidate.read_text(encoding="utf-8"))

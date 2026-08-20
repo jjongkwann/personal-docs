@@ -94,6 +94,20 @@ def test_canonical_id_conflict_is_detected_without_es(data_root):
         )
 
 
+def test_same_file_in_other_unicode_form_is_not_a_conflict(data_root):
+    import unicodedata
+
+    # 디스크에는 NFD 이름, 요청은 NFC 이름 — 같은 파일이 자기 자신과 충돌하면 안 된다
+    nfd = unicodedata.normalize("NFD", "평가방법론.md")
+    nfc = unicodedata.normalize("NFC", "평가방법론.md")
+    target = data_root / "research" / nfd
+    target.parent.mkdir(parents=True)
+    target.write_text(_curated("research", "self-id"), encoding="utf-8")
+
+    policy = resolve_document_policy(f"data/research/{nfc}", strict=True)
+    assert policy.conflicts == ()
+
+
 def test_dry_run_returns_diff_without_creating_or_ingesting(data_root, monkeypatch):
     def fail_ingest(*args, **kwargs):  # pragma: no cover - should never execute
         raise AssertionError("dry-run must not ingest")
