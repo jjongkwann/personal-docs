@@ -889,10 +889,10 @@ def realign_doc_chunks(
     # 마커도 전량 재작성 — 제자리 UPDATE는 슬롯이 밀릴 때 서로 덮어쓴다(0→1이 기존 1을 밀어냄)
     gone_hashes = {old_hashes[i] for i in gone}
     marks = conn.execute(
-        "SELECT chunk_index, content_hash, extracted_at FROM extracted_chunks WHERE doc_id = ?",
+        "SELECT chunk_index, content_hash, input_hash, extracted_at FROM extracted_chunks WHERE doc_id = ?",
         (doc_id,),
     ).fetchall()
-    keep: dict[int, tuple[str, str]] = {}
+    keep: dict[int, tuple[str, str | None, str]] = {}
     legacy: dict[str, str] = {}
     for r in marks:
         idx = r["chunk_index"]
@@ -901,13 +901,13 @@ def realign_doc_chunks(
             if r["content_hash"] not in gone_hashes:
                 legacy[r["content_hash"]] = r["extracted_at"]
         elif idx not in gone:
-            keep[moved.get(idx, idx)] = (r["content_hash"], r["extracted_at"])
+            keep[moved.get(idx, idx)] = (r["content_hash"], r["input_hash"], r["extracted_at"])
     conn.execute("DELETE FROM extracted_chunks WHERE doc_id = ?", (doc_id,))
     conn.executemany(
-        "INSERT INTO extracted_chunks (doc_id, chunk_index, content_hash, extracted_at) "
-        "VALUES (?, ?, ?, ?)",
-        [(doc_id, idx, h, at) for idx, (h, at) in keep.items()]
-        + [(doc_id, None, h, at) for h, at in legacy.items()],
+        "INSERT INTO extracted_chunks (doc_id, chunk_index, content_hash, input_hash, extracted_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [(doc_id, idx, h, ih, at) for idx, (h, ih, at) in keep.items()]
+        + [(doc_id, None, h, None, at) for h, at in legacy.items()],
     )
     recompute_mention_counts(conn, touched)
     return {"moved": len(moved), "dropped": dropped}
@@ -943,33 +943,26 @@ def extracted_markers(
     return by_idx, legacy
 
 
-def is_pending(
-    source: dict,
-    by_idx: dict[tuple[str, int], str],
-    legacy: set[tuple[str, str]],
-) -> bool:
-    """ES 청크 소스(doc_id/chunk_index/content_hash)가 (재)추출 대상인지.
-
-    (doc_id, chunk_index)의 마커 해시가 현재 해시와 같아야 추출 완료 —
-    청크가 이동하거나 내용이 바뀌면 pending이 되어 멘션이 올바른 인덱스로 갱신된다.
-    content_hash 없는 구청크는 항상 pending.
-    """
-    h = source.get("content_hash")
-    if not h:
-        return True
-    if by_idx.get((source["doc_id"], source["chunk_index"])) == h:
-        return False
-    return (source["doc_id"], h) not in legacy
+def extracted_input_markers(conn: sqlite3.Connection) -> dict[tuple[str, int], str]:
+    """Only markers tied to a known extraction input count as current."""
+    return {
+        (r["doc_id"], r["chunk_index"]): r["input_hash"]
+        for r in conn.execute(
+            "SELECT doc_id, chunk_index, input_hash FROM extracted_chunks "
+            "WHERE chunk_index IS NOT NULL AND input_hash IS NOT NULL"
+        )
+    }
 
 
 def record_extraction(
-    conn: sqlite3.Connection, doc_id: str, chunk_index: int, content_hash: str, now: str
+    conn: sqlite3.Connection, doc_id: str, chunk_index: int, content_hash: str, now: str,
+    input_hash: str | None = None,
 ) -> None:
     """추출 완료 마커 기록. 같은 내용의 레거시(해시-only) 마커는 함께 정리."""
     conn.execute(
         "INSERT OR REPLACE INTO extracted_chunks "
-        "(doc_id, chunk_index, content_hash, extracted_at) VALUES (?, ?, ?, ?)",
-        (doc_id, chunk_index, content_hash, now),
+        "(doc_id, chunk_index, content_hash, input_hash, extracted_at) VALUES (?, ?, ?, ?, ?)",
+        (doc_id, chunk_index, content_hash, input_hash, now),
     )
     conn.execute(
         "DELETE FROM extracted_chunks "

@@ -299,6 +299,8 @@ def _storage_payload(batch: ExtractedBatch, chunks: list[dict]) -> str:
             {
                 "doc_id": extracted.doc_id,
                 "chunk_index": extracted.chunk_index,
+                "content_hash": chunk.get("content_hash"),
+                "input_hash": chunk.get("input_hash"),
                 "section_path": chunk.get("section_path", ""),
                 "category": chunk.get("category"),
                 "title": chunk.get("title"),
@@ -401,7 +403,7 @@ def rebuild_with_ollama(
                         "기존 멘션을 보호하기 위해 저장하지 않습니다."
                     )
                 storage_result = store_concepts(_storage_payload(extracted, chunks))
-                if storage_result.startswith("오류:"):
+                if storage_result.startswith("오류:") or "저장 거부" in storage_result:
                     raise RuntimeError(storage_result)
                 duration = round((response.get("total_duration") or 0) / 1_000_000_000, 2)
                 record = {

@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS extracted_chunks (
     doc_id          TEXT NOT NULL,
     chunk_index     INTEGER,            -- NULL = 구마커 (doc_id, content_hash로만 기록)
     content_hash    TEXT,
+    input_hash      TEXT,
     extracted_at    TEXT,
     PRIMARY KEY (doc_id, chunk_index)
 );
@@ -128,12 +129,15 @@ def get_connection(db_path: str) -> sqlite3.Connection:
 def _migrate_extracted_chunks(conn: sqlite3.Connection) -> None:
     """구 마커((doc_id, content_hash) PK)를 chunk_index 키 테이블로 이관.
 
-    구 행은 chunk_index=NULL로 남긴다 — 해시만 아는 레거시 마커로서 fallback 매칭에만
-    쓰이고, 해당 청크 내용이 바뀌면 자연 소멸한다. 통째로 버리면 이미 구축된 그래프
-    전량이 pending으로 돌아가 재추출(사람·LLM 루프)을 강요하게 된다.
+    기존 행과 개념 근거는 보존한다. input_hash가 없는 마커는 추출 입력을 검증할 수
+    없으므로 pending이 되며, 재추출 후 새 입력 해시로 교체된다.
     """
     cols = [r[1] for r in conn.execute("PRAGMA table_info(extracted_chunks)")]
-    if not cols or "chunk_index" in cols:
+    if not cols:
+        return
+    if "chunk_index" in cols:
+        if "input_hash" not in cols:
+            conn.execute("ALTER TABLE extracted_chunks ADD COLUMN input_hash TEXT")
         return
     conn.execute("ALTER TABLE extracted_chunks RENAME TO extracted_chunks_old")
     conn.executescript(SCHEMA_SQL)

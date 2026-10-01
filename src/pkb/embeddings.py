@@ -20,6 +20,7 @@ def get_model() -> SentenceTransformer:
                 _model = SentenceTransformer(
                     settings.embedding_model,
                     device=resolve_device(settings.embedding_device),
+                    **({"revision": settings.embedding_revision} if settings.embedding_revision else {}),
                 )
     return _model
 

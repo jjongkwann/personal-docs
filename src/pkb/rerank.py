@@ -20,16 +20,26 @@ def get_reranker() -> CrossEncoder:
                     settings.rerank_model,
                     max_length=512,
                     device=resolve_device(settings.rerank_device),
+                    **({"revision": settings.rerank_revision} if settings.rerank_revision else {}),
                 )
     return _reranker
 
 
-def rerank(query: str, candidates: list[dict], top_k: int = 5) -> list[dict]:
+def rerank(
+    query: str, candidates: list[dict], top_k: int = 5, include_context: bool = False
+) -> list[dict]:
     """후보 청크를 CrossEncoder로 재순위. candidates는 hybrid_search 결과."""
     if not candidates:
         return []
 
-    pairs = [(query, c.get("content", "")) for c in candidates]
+    pairs = [
+        (
+            query,
+            "\n".join(p for p in (c.get("title"), c.get("section_path"), c.get("content", "")) if p)
+            if include_context else c.get("content", ""),
+        )
+        for c in candidates
+    ]
     scores = get_reranker().predict(
         pairs,
         show_progress_bar=False,

@@ -1,131 +1,273 @@
-"""검색 품질 평가 하니스 (pkb eval).
-
-data/.eval/gold.jsonl의 (query, doc_id) 골드셋을 4개 검색 모드
-(bm25 단독 / knn 단독 / rrf / rrf+rerank)로 돌려 recall@k와 MRR을 비교한다.
-순위 산출·지표 계산은 ES 없이 단위 테스트 가능한 순수 함수로 분리.
-"""
-
+"""Operational retrieval evaluation with versioned multi-relevance gold rows."""
 from __future__ import annotations
 
+import hashlib
 import json
+import subprocess
+from math import isfinite, log2
 from pathlib import Path
+from time import perf_counter
 
 from elasticsearch import Elasticsearch
 
 from pkb.config import settings
+from pkb.retrieve import RETRIEVAL_PROFILES, hybrid_search
 
-TOP_K = 10  # 문서 단위 평가 컷오프 (recall@10까지 산출)
-# 모드별로 가져올 청크 수. 모든 모드가 같은 깊이·같은 선택 규칙(_cap_per_doc)으로 후보를
-# 만들어야 문서 단위 recall 비교가 공정하다 — 모드별로 다르면 랭킹 품질이 아니라 후보
-# 구성 차이를 재게 된다. dedupe 후 문서 10개를 채우기 위해 TOP_K보다 넉넉히 잡는다.
-FETCH_K = 40
-RECALL_KS = (1, 3, 5, 10)
-MODES = ("bm25", "knn", "rrf", "rrf+rerank")
+TOP_K = settings.default_top_k
+SEARCH_OPTIONS = {
+    "candidate_k", "rerank", "expand_context", "profile", "canonical_group",
+    "canonical_boost", "fusion", "lexical_weight", "rerank_context",
+    "exclude_doc_prefix", "include_archived",
+}
 
-
-# ---------- 순수 함수 (ES 불필요) ----------
 
 def load_gold(path: Path) -> list[dict]:
-    """gold.jsonl 로드 — 라인당 {"query": str, "doc_id": str}. 빈 줄 무시."""
-    return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    """Read v2 JSONL. Legacy rows require explicit migration."""
+    rows = []
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+            if not isinstance(row, dict) or row.get("version") != 2:
+                raise ValueError("version 2 row required; run migrate_legacy_gold first")
+            if not isinstance(row.get("query"), str) or not row["query"].strip():
+                raise ValueError("query must be a nonempty string")
+            if not isinstance(row.get("query_type"), str) or not row["query_type"].strip():
+                raise ValueError("query_type must be a nonempty string")
+            if not isinstance(row.get("answerable"), bool):
+                raise ValueError("answerable must be boolean")
+            relevant = row.get("relevant")
+            if not isinstance(relevant, list) or bool(relevant) != row["answerable"]:
+                raise ValueError("relevant must be nonempty iff answerable is true")
+            variants = row.get("variants", [])
+            if not isinstance(variants, list) or any(not isinstance(v, str) for v in variants):
+                raise ValueError("variants must be a list of strings")
+            seen = set()
+            for item in relevant:
+                if not isinstance(item, dict):
+                    raise ValueError("relevant items must be objects")
+                for key in ("doc_id", "canonical_id"):
+                    if key in item and (not isinstance(item[key], str) or not item[key].strip()):
+                        raise ValueError(f"{key} must be a nonempty string")
+                if not (item.get("doc_id") or item.get("canonical_id")):
+                    raise ValueError("relevant item needs doc_id or canonical_id")
+                if "chunk_index" in item and (type(item["chunk_index"]) is not int or item["chunk_index"] < 0):
+                    raise ValueError("chunk_index must be a nonnegative integer")
+                if "chunk_index" in item and not item.get("doc_id"):
+                    raise ValueError("chunk_index requires doc_id")
+                relevance = item.get("relevance", 1)
+                if (isinstance(relevance, bool) or not isinstance(relevance, (int, float))
+                        or not isfinite(relevance) or relevance <= 0):
+                    raise ValueError("relevance must be a positive finite number")
+                key = ("doc_id", item["doc_id"], item.get("chunk_index")) if item.get("doc_id") else (
+                    "canonical_id", item["canonical_id"], None
+                )
+                if key in seen:
+                    raise ValueError("duplicate relevant item")
+                seen.add(key)
+            rows.append(row)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"{path}:{number}: {exc}") from exc
+    return rows
+
+
+def migrate_legacy_gold(source: Path, destination: Path) -> int:
+    """Convert one-document rows into a new v2 file without changing source."""
+    converted = []
+    for number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+            if not isinstance(row, dict) or set(row) != {"query", "doc_id"}:
+                raise ValueError("expected legacy query/doc_id row")
+            if not all(isinstance(row[key], str) and row[key].strip() for key in ("query", "doc_id")):
+                raise ValueError("query and doc_id must be nonempty strings")
+            converted.append({"version": 2, "query": row["query"], "query_type": "legacy",
+                              "answerable": True, "relevant": [{"doc_id": row["doc_id"]}]})
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"{source}:{number}: {exc}") from exc
+    with destination.open("x", encoding="utf-8") as output:
+        for row in converted:
+            output.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return len(converted)
 
 
 def doc_ranking(hits: list[dict]) -> list[str]:
-    """청크 히트 목록을 doc_id 첫 등장 순서로 dedupe한 문서 순위 리스트로 변환."""
-    return list(dict.fromkeys(h["doc_id"] for h in hits))
+    return list(dict.fromkeys(hit["doc_id"] for hit in hits))
 
 
-def eval_query(gold_doc_id: str, hits: list[dict]) -> dict:
-    """단일 쿼리 평가 — rank는 골드 문서의 1-기반 순위(순위 밖이면 None),
-    top1은 miss 리포트용 실제 1위 doc_id(결과 없으면 None)."""
-    ranking = doc_ranking(hits)
-    rank = ranking.index(gold_doc_id) + 1 if gold_doc_id in ranking else None
-    return {"rank": rank, "top1": ranking[0] if ranking else None}
+def _matches(item: dict, hit: dict) -> bool:
+    if item.get("doc_id"):
+        return item["doc_id"] == hit.get("doc_id")
+    return item["canonical_id"] == hit.get("canonical_id")
 
 
-def recall_at_k(ranks: list[int | None], k: int) -> float:
-    """골드 문서가 상위 k 안에 든 쿼리 비율. miss(None)는 실패로 계산."""
-    if not ranks:
-        return 0.0
-    return sum(1 for r in ranks if r is not None and r <= k) / len(ranks)
+def eval_query(row: dict, hits: list[dict], k: int = TOP_K) -> dict:
+    """Score returned hits; evidence requires the exact chunk when labeled."""
+    if not row["answerable"]:
+        return {"rank": None, "recall_at_k": None, "ndcg_at_k": None,
+                "evidence_recall_at_k": None, "noanswer_false_positive": bool(hits),
+                "top1": hits[0].get("doc_id") if hits else None}
+    selected = hits[:k]
+    first_hits = []
+    seen_docs = set()
+    for hit in selected:
+        if hit["doc_id"] not in seen_docs:
+            seen_docs.add(hit["doc_id"])
+            first_hits.append(hit)
+    # Several evidence chunks of one document contribute one document gain.
+    documents = {}
+    for item in row["relevant"]:
+        key = ("doc_id", item["doc_id"]) if item.get("doc_id") else ("canonical_id", item["canonical_id"])
+        if key not in documents or item.get("relevance", 1) > documents[key].get("relevance", 1):
+            documents[key] = item
+    relevant = list(documents.values())
+    matched = [next((i + 1 for i, hit in enumerate(first_hits) if _matches(item, hit)), None) for item in relevant]
+    credited = set()
+    gains = []
+    for hit in first_hits:
+        uncredited = [(i, item.get("relevance", 1)) for i, item in enumerate(relevant)
+                      if i not in credited and _matches(item, hit)]
+        if uncredited:
+            index, gain = max(uncredited, key=lambda pair: pair[1])
+            credited.add(index)
+            gains.append(gain)
+        else:
+            gains.append(0)
+    dcg = sum(gain / log2(i + 2) for i, gain in enumerate(gains))
+    ideal = sorted((item.get("relevance", 1) for item in relevant), reverse=True)[:k]
+    idcg = sum(gain / log2(i + 2) for i, gain in enumerate(ideal))
+    evidence = [item for item in row["relevant"] if "chunk_index" in item]
+    evidence_found = sum(any(_matches(item, hit) and item["chunk_index"] == hit.get("chunk_index")
+                             for hit in selected) for item in evidence)
+    return {"rank": min((rank for rank in matched if rank is not None), default=None),
+            "recall_at_k": sum(rank is not None for rank in matched) / len(relevant),
+            "ndcg_at_k": dcg / idcg if idcg else 0.0,
+            "evidence_recall_at_k": evidence_found / len(evidence) if evidence else None,
+            "noanswer_false_positive": None,
+            "top1": first_hits[0]["doc_id"] if first_hits else None}
 
 
 def mrr(ranks: list[int | None]) -> float:
-    """Mean Reciprocal Rank. miss(None)는 0으로 계산."""
-    if not ranks:
-        return 0.0
-    return sum(1.0 / r for r in ranks if r is not None) / len(ranks)
+    return sum(1 / rank for rank in ranks if rank is not None) / len(ranks) if ranks else 0.0
 
 
-def format_report(ranks_by_mode: dict[str, list[int | None]], misses: list[str]) -> str:
-    """모드×지표 표 + miss 목록을 문자열로 렌더."""
-    header = f"{'모드':<12}" + "".join(f"{f'R@{k}':>8}" for k in RECALL_KS) + f"{'MRR':>8}"
-    lines = [header, "-" * len(header)]
-    for mode, ranks in ranks_by_mode.items():
-        row = f"{mode:<12}"
-        for k in RECALL_KS:
-            row += f"{recall_at_k(ranks, k):>8.3f}"
-        row += f"{mrr(ranks):>8.3f}"
-        lines.append(row)
-    if misses:
-        lines.append("")
-        lines.append(f"miss {len(misses)}건 (gold가 top{TOP_K} 밖):")
-        lines.extend(misses)
-    return "\n".join(lines)
+def _percentile(values: list[float], percentile: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    pos = (len(ordered) - 1) * percentile
+    low = int(pos)
+    return round(ordered[low] + (ordered[min(low + 1, len(ordered) - 1)] - ordered[low]) * (pos - low), 2)
 
 
-# ---------- 검색 실행 (ES 필요) ----------
-
-def _run_modes(es: Elasticsearch, query_text: str) -> dict[str, list[dict]]:
-    """한 쿼리를 4개 모드로 검색해 모드별 히트(청크 source) 리스트 반환.
-
-    네 모드 모두 FETCH_K개 청크를 같은 다양성 캡으로 선택한다 — 이후 doc_ranking이
-    문서 단위로 dedupe하므로 후보 풀 구성이 모드 간 동일해진다.
-    """
-    from pkb.embeddings import embed
-    from pkb.retrieve import _bm25_query, _cap_per_doc, _knn_query, hybrid_search
-
-    bm25 = es.search(
-        index=settings.es_index,
-        query=_bm25_query(query_text, None),
-        size=FETCH_K,
-        source_excludes=["embedding"],
-    )
-    knn = es.search(
-        index=settings.es_index,
-        knn=_knn_query(embed([query_text])[0], FETCH_K, None),
-        size=FETCH_K,
-        source_excludes=["embedding"],
-    )
+def _summary(rows: list[dict]) -> dict:
+    answerable = [row for row in rows if row["answerable"]]
+    noanswer = [row for row in rows if not row["answerable"]]
+    evidence = [row["evidence_recall_at_k"] for row in answerable if row["evidence_recall_at_k"] is not None]
     return {
-        "bm25": _cap_per_doc([h["_source"] for h in bm25["hits"]["hits"]], FETCH_K),
-        "knn": _cap_per_doc([h["_source"] for h in knn["hits"]["hits"]], FETCH_K),
-        "rrf": hybrid_search(
-            es, query_text, top_k=FETCH_K, candidate_k=FETCH_K, rerank=False, log=False
+        "queries": len(rows), "answerable_queries": len(answerable), "noanswer_queries": len(noanswer),
+        "evidence_queries": len(evidence),
+        "mrr_at_k": mrr([row["rank"] for row in answerable]) if answerable else None,
+        "final_recall_at_k": sum(row["recall_at_k"] for row in answerable) / len(answerable) if answerable else None,
+        "ndcg_at_k": sum(row["ndcg_at_k"] for row in answerable) / len(answerable) if answerable else None,
+        "evidence_recall_at_k": sum(evidence) / len(evidence) if evidence else None,
+        "noanswer_false_positive_rate": (
+            sum(row["noanswer_false_positive"] for row in noanswer) / len(noanswer) if noanswer else None
         ),
-        "rrf+rerank": hybrid_search(
-            es, query_text, top_k=FETCH_K, candidate_k=FETCH_K, rerank=True, log=False
-        ),
+        "latency_p50_ms": _percentile([row["latency_ms"] for row in rows], 0.5),
+        "latency_p95_ms": _percentile([row["latency_ms"] for row in rows], 0.95),
     }
 
 
-def evaluate(es: Elasticsearch, gold: list[dict]) -> str:
-    """골드셋 전체를 4개 모드로 평가해 리포트 문자열 반환."""
-    # ponytail: 쿼리당 4회 순차 검색 — 수십 개 골드셋 규모엔 충분, 느려지면 임베딩 배치화
-    ranks_by_mode: dict[str, list[int | None]] = {m: [] for m in MODES}
-    misses: list[str] = []
-    for row in gold:
-        hits_by_mode = _run_modes(es, row["query"])
-        for mode in MODES:
-            result = eval_query(row["doc_id"], hits_by_mode[mode])
-            ranks_by_mode[mode].append(result["rank"])
-            if result["rank"] is None or result["rank"] > TOP_K:
-                misses.append(
-                    f"  [{mode}] {row['query']} → gold {row['doc_id']}, "
-                    f"실제 1위: {result['top1'] or '(결과 없음)'}"
-                )
-    return format_report(ranks_by_mode, misses)
+def _git_revision() -> dict:
+    root = Path(__file__).resolve().parents[2]
+    revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=False)
+    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True, check=False)
+    return {"commit": revision.stdout.strip() if revision.returncode == 0 else None,
+            "dirty": bool(dirty.stdout.strip()) if dirty.returncode == 0 else None}
+
+
+def evaluate(es: Elasticsearch, gold: list[dict], *, configurations: dict[str, dict] | None = None,
+             top_k: int = TOP_K) -> dict:
+    """Benchmark named settings through hybrid_search, with only gold-supplied variants."""
+    if type(top_k) is not int or top_k < 1 or not gold:
+        raise ValueError("top_k must be positive and gold nonempty")
+    defaults = {"candidate_k": settings.candidate_k, "rerank": settings.rerank_enabled,
+                "expand_context": settings.expand_context, "profile": "all", "canonical_group": True,
+                "canonical_boost": 0.15, "fusion": "rrf", "lexical_weight": 0.5,
+                "rerank_context": False, "exclude_doc_prefix": None, "include_archived": False}
+    if configurations is None:
+        configurations = {"operational": {}}
+    if not isinstance(configurations, dict) or not configurations:
+        raise ValueError("configurations must be a nonempty mapping")
+    prepared = {}
+    for name, overrides in configurations.items():
+        if not isinstance(name, str) or not name.strip() or not isinstance(overrides, dict):
+            raise ValueError("configuration names must be nonempty strings and values must be objects")
+        unknown = set(overrides) - SEARCH_OPTIONS
+        if unknown:
+            raise ValueError(f"unknown search options for {name}: {sorted(unknown)}")
+        options = {**defaults, **overrides}
+        for key in ("candidate_k", "expand_context"):
+            minimum = 1 if key == "candidate_k" else 0
+            if type(options[key]) is not int or options[key] < minimum:
+                raise ValueError(f"{name}.{key} must be an integer >= {minimum}")
+        for key in ("rerank", "canonical_group", "rerank_context", "include_archived"):
+            if type(options[key]) is not bool:
+                raise ValueError(f"{name}.{key} must be boolean")
+        for key in ("canonical_boost", "lexical_weight"):
+            value = options[key]
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not isfinite(value) or value < 0 or (key == "lexical_weight" and value > 1)
+                    or (key == "canonical_boost" and value >= 1)):
+                raise ValueError(f"{name}.{key} must be a finite number in range")
+        if not isinstance(options["profile"], str) or options["profile"] not in RETRIEVAL_PROFILES:
+            raise ValueError(f"{name}.profile must be one of {sorted(RETRIEVAL_PROFILES)}")
+        if not isinstance(options["fusion"], str) or options["fusion"] not in {"rrf", "linear"}:
+            raise ValueError(f"{name}.fusion must be rrf or linear")
+        if options["exclude_doc_prefix"] is not None and not isinstance(options["exclude_doc_prefix"], str):
+            raise ValueError(f"{name}.exclude_doc_prefix must be string or null")
+        prepared[name] = options
+    modes = {}
+    for name, options in prepared.items():
+        rows = []
+        for gold_row in gold:
+            start = perf_counter()
+            hits = hybrid_search(es, gold_row["query"], top_k=top_k,
+                                 variants=gold_row.get("variants"), log=False, **options)
+            latency_ms = round((perf_counter() - start) * 1000, 2)
+            rows.append({"query": gold_row["query"], "query_type": gold_row["query_type"],
+                         "answerable": gold_row["answerable"], "latency_ms": latency_ms,
+                         **eval_query(gold_row, hits, top_k)})
+        modes[name] = {"config": {"top_k": top_k, **options}, "summary": _summary(rows),
+                       "by_query_type": {kind: _summary([row for row in rows if row["query_type"] == kind])
+                                         for kind in sorted({row["query_type"] for row in rows})},
+                       "queries": rows}
+    payload = json.dumps(gold, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {"schema_version": 1, "metric_cutoff": top_k,
+            "metadata": {"git": _git_revision(), "index": settings.es_index,
+                         "embedding_model": settings.embedding_model,
+                         "embedding_revision": getattr(settings, "embedding_revision", None),
+                         "rerank_model": settings.rerank_model,
+                         "rerank_revision": getattr(settings, "rerank_revision", None),
+                         "queryset_sha256": hashlib.sha256(payload).hexdigest()},
+            "modes": modes}
+
+
+def format_report(report: dict) -> str:
+    """Concise human view; report dict is the machine artifact."""
+    k = report["metric_cutoff"]
+    lines = [f"mode  MRR@{k}  final R@{k}  nDCG@{k}  evidence R@{k}  no-answer FP  p50/p95 ms"]
+    for name, mode in report["modes"].items():
+        metrics = mode["summary"]
+        def display(key: str, metrics: dict = metrics) -> str:
+            value = metrics[key]
+            return "-" if value is None else f"{value:.3f}"
+        lines.append(f"{name}  {display('mrr_at_k')}  {display('final_recall_at_k')}  "
+                     f"{display('ndcg_at_k')}  {display('evidence_recall_at_k')}  "
+                     f"{display('noanswer_false_positive_rate')}  "
+                     f"{metrics['latency_p50_ms']}/{metrics['latency_p95_ms']}")
+    return "\n".join(lines)

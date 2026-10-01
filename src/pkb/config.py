@@ -7,10 +7,12 @@ class Settings(BaseSettings):
     es_host: str = "http://localhost:9200"
     es_index: str = "pkb_documents"
     embedding_model: str = "BAAI/bge-m3"  # 2026-07 매트릭스 실측 채택 (KURE-v1·MiniLM 대비 우위)
+    embedding_revision: str = ""  # 선택: 모델 저장소 commit/tag 고정
     embedding_dims: int = 1024
     embedding_device: str = "auto"  # auto | cpu | mps | cuda
     embedding_batch_size: int = 32  # sentence-transformers 기본값. RAM 8GB 머신의 대량 색인에선 8까지 낮출 것
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    rerank_revision: str = ""  # 선택: 모델 저장소 commit/tag 고정
     # 2026-07 벤치: BGE-M3 후보 풀에서 bge/qwen3 리랭커 모두 no-rerank(MRR 0.517)보다 낮아 기본 off
     rerank_enabled: bool = False
     rerank_device: str = "auto"  # auto | cpu | mps | cuda

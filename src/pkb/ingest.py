@@ -103,7 +103,10 @@ def embedding_fingerprint(chunk: dict) -> str:
     content_hash는 '본문이 같은가'(그래프 pending 추적)만 답한다. 모델 교체나
     prefix 토글처럼 본문이 같아도 벡터가 달라져야 하는 변경은 이 키가 잡는다.
     """
-    key = "\n".join([settings.embedding_model, EMBED_PREPROC_VERSION, embed_input(chunk)])
+    parts = [settings.embedding_model]
+    if settings.embedding_revision:
+        parts.append(settings.embedding_revision)
+    key = "\n".join([*parts, EMBED_PREPROC_VERSION, embed_input(chunk)])
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
@@ -324,6 +327,9 @@ def conversion_frontmatter(src: Path) -> str:
     return f"---\n{block}---\n\n"
 
 
+_THEMATIC_BREAK_RE = re.compile(r"^([*_-])(?:[ \t]*\1){2,}$")
+
+
 def _split_by_headings_hierarchical(text: str) -> list[tuple[str, str]]:
     """H1~H3 헤딩 경계로 분할하되 section_path 동반.
     반환: [(section_path, section_text), ...]
@@ -333,10 +339,25 @@ def _split_by_headings_hierarchical(text: str) -> list[tuple[str, str]]:
     current: list[str] = []
     path_stack: list[tuple[int, str]] = []  # [(level, heading_text)]
     current_path = ""
+    pending_headings: list[str] = []
 
-    def flush():
-        if current:
-            sections.append((current_path, "\n".join(current)))
+    def flush(next_level: int | None = None):
+        # A bodyless parent is already represented in its child's path.
+        if not current:
+            return
+        if (
+            next_level is not None
+            and path_stack
+            and next_level > path_stack[-1][0]
+            and all(
+                not line.strip() or _THEMATIC_BREAK_RE.fullmatch(line.strip())
+                for line in current[1:]
+            )
+        ):
+            pending_headings.extend(current)
+            return
+        sections.append((current_path, "\n".join([*pending_headings, *current])))
+        pending_headings.clear()
 
     in_fence = False
     for line in text.split("\n"):
@@ -349,7 +370,7 @@ def _split_by_headings_hierarchical(text: str) -> list[tuple[str, str]]:
             level = len(m.group(1))
             heading = m.group(2).strip()
 
-            flush()
+            flush(level)
             current = []
 
             # 스택 갱신
@@ -398,6 +419,93 @@ def _split_oversized_paragraph(para: str, max_tokens: int) -> list[str]:
     return pieces
 
 
+_FENCE_RE = re.compile(r"^\s*```[^`]*$")
+_TABLE_RULE_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
+
+
+def _markdown_blocks(text: str) -> list[str]:
+    """빈 줄과 표·펜스 경계를 지키며 큰 섹션을 분리한다."""
+    lines = text.split("\n")
+    blocks: list[str] = []
+    plain: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        is_table = i + 1 < len(lines) and "|" in line and _TABLE_RULE_RE.match(lines[i + 1])
+        if _FENCE_RE.match(line) or is_table:
+            if plain:
+                blocks.append("\n".join(plain))
+                plain = []
+            start = i
+            if is_table:
+                i += 2
+                while i < len(lines) and "|" in lines[i] and lines[i].strip():
+                    i += 1
+            else:
+                i += 1
+                while i < len(lines):
+                    if _FENCE_RE.match(lines[i]):
+                        i += 1
+                        break
+                    i += 1
+            blocks.append("\n".join(lines[start:i]))
+            continue
+        if not line.strip():
+            if plain:
+                blocks.append("\n".join(plain))
+                plain = []
+        else:
+            plain.append(line)
+        i += 1
+    if plain:
+        blocks.append("\n".join(plain))
+    return blocks
+
+
+def _split_structured_block(block: str, max_tokens: int) -> list[str]:
+    """큰 표에는 헤더를, 큰 코드 블록에는 펜스를 각 조각마다 반복한다."""
+    lines = block.split("\n")
+    if _FENCE_RE.match(lines[0]):
+        closed = len(lines) > 1 and bool(_FENCE_RE.match(lines[-1]))
+        prefix, suffix = lines[0], lines[-1] if closed else "```"
+        body = lines[1:-1] if closed else lines[1:]
+    elif len(lines) > 1 and _TABLE_RULE_RE.match(lines[1]):
+        prefix, suffix, body = "\n".join(lines[:2]), "", lines[2:]
+    else:
+        return _split_oversized_paragraph(block, max_tokens)
+
+    def wrapped(rows: list[str]) -> str:
+        return "\n".join([prefix, *rows, suffix] if suffix else [prefix, *rows])
+
+    if _count_tokens(wrapped([""])) >= max_tokens:
+        return _split_oversized_paragraph(block, max_tokens)
+    chunks: list[str] = []
+    rows: list[str] = []
+    for line in body:
+        if _count_tokens(wrapped([*rows, line])) <= max_tokens:
+            rows.append(line)
+            continue
+        if rows:
+            chunks.append(wrapped(rows))
+            rows = []
+        original_line = line
+        while line and _count_tokens(wrapped([line])) > max_tokens:
+            lo, hi = 1, len(line)
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if _count_tokens(wrapped([line[:mid]])) <= max_tokens:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            chunks.append(wrapped([line[:lo]]))
+            line = line[lo:]
+        if line or not original_line:
+            rows.append(line)
+    if rows:
+        chunks.append(wrapped(rows))
+    return chunks
+
+
 def _chunk_text(text: str, max_tokens: int, overlap_tokens: int) -> list[str]:
     """고정 크기 청킹 + 오버랩. 단락/문장 경계 존중."""
     if _count_tokens(text) <= max_tokens:
@@ -405,19 +513,17 @@ def _chunk_text(text: str, max_tokens: int, overlap_tokens: int) -> list[str]:
 
     # max_tokens 초과 단락이 단독 청크로 통과하면 리랭커 max_length(512)에서 뒷부분이 잘린다.
     paragraphs: list[str] = []
-    for para in text.split("\n\n"):
+    blocks = _markdown_blocks(text) if "```" in text or "|" in text else text.split("\n\n")
+    for para in blocks:
         if _count_tokens(para) > max_tokens:
-            paragraphs.extend(_split_oversized_paragraph(para, max_tokens))
+            paragraphs.extend(_split_structured_block(para, max_tokens))
         else:
             paragraphs.append(para)
     chunks: list[str] = []
     current_parts: list[str] = []
-    current_tokens = 0
 
     for para in paragraphs:
-        para_tokens = _count_tokens(para)
-
-        if current_tokens + para_tokens > max_tokens and current_parts:
+        if current_parts and _count_tokens("\n\n".join([*current_parts, para])) > max_tokens:
             chunk_text = "\n\n".join(current_parts).strip()
             if chunk_text:
                 chunks.append(chunk_text)
@@ -432,10 +538,11 @@ def _chunk_text(text: str, max_tokens: int, overlap_tokens: int) -> list[str]:
                 overlap_parts.insert(0, part)
                 overlap_count += part_tokens
             current_parts = overlap_parts
-            current_tokens = overlap_count
+
+            if current_parts and _count_tokens("\n\n".join([*current_parts, para])) > max_tokens:
+                current_parts = []
 
         current_parts.append(para)
-        current_tokens += para_tokens
 
     if current_parts:
         chunk_text = "\n\n".join(current_parts).strip()
@@ -450,30 +557,38 @@ MIN_CHUNK_CHARS = 80
 
 
 def _merge_tiny_chunks(chunks: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """MIN_CHUNK_CHARS 미만인 저정보 청크를 인접 청크에 병합. 결정적 순수 함수.
+    """MIN_CHUNK_CHARS 미만인 청크를 같은 section_path의 인접 청크에 병합.
 
-    - tiny + 다음 청크가 있으면 → 다음 청크 앞에 병합 (헤딩이 후속 본문의 문맥이 되도록
-      section_path는 다음 청크 것 유지)
-    - tiny가 마지막 청크면 → 이전 청크 뒤에 병합 (section_path는 이전 것 유지)
+    - 같은 절의 다음 청크가 있으면 그 앞에, 아니면 같은 절의 이전 청크 뒤에 병합
     - 문서 전체가 tiny 1개뿐이면 그대로 유지
-    - 왼쪽부터 반복 처리해 연쇄 tiny(연속 2개 이상)도 자연스럽게 병합
+    - 다른 절의 내용은 합치지 않아 출처 section_path를 보존
     """
     merged = list(chunks)
     i = 0
     while i < len(merged):
-        _, content = merged[i]
+        path, content = merged[i]
         if len(merged) == 1 or len(content) >= MIN_CHUNK_CHARS:
             i += 1
             continue
-        if i < len(merged) - 1:
+        if i < len(merged) - 1 and merged[i + 1][0] == path:
             next_path, next_content = merged[i + 1]
-            merged[i + 1] = (next_path, content + "\n\n" + next_content)
+            combined = content + "\n\n" + next_content
+            if _count_tokens(combined) > settings.chunk_size:
+                i += 1
+                continue
+            merged[i + 1] = (next_path, combined)
             del merged[i]
-        else:
+        elif i > 0 and merged[i - 1][0] == path:
             prev_path, prev_content = merged[i - 1]
-            merged[i - 1] = (prev_path, prev_content + "\n\n" + content)
+            combined = prev_content + "\n\n" + content
+            if _count_tokens(combined) > settings.chunk_size:
+                i += 1
+                continue
+            merged[i - 1] = (prev_path, combined)
             del merged[i]
             i -= 1
+        else:
+            i += 1
     return merged
 
 
@@ -592,6 +707,8 @@ def process_file(
         return []
     raw_text = read_file_as_text(file_path)
     if not raw_text.strip():
+        if file_path.suffix.lower() not in {".md", ".markdown", ".txt"}:
+            raise ValueError(f"텍스트 추출 결과가 비어 있습니다: {file_path}")
         return []
 
     # YAML frontmatter 추출 (md/markdown 파일만)
@@ -602,6 +719,8 @@ def process_file(
 
     chunks_with_path = chunk_markdown_hierarchical(text)
     if not chunks_with_path:
+        if file_path.suffix.lower() not in {".md", ".markdown", ".txt"}:
+            raise ValueError(f"텍스트 추출 결과가 비어 있습니다: {file_path}")
         return []
 
     # H1~H3 헤딩이 전혀 없어 section_path가 모두 빈 경우, 파일 경로에서 파생된 값으로 대체.
@@ -711,6 +830,7 @@ def ingest_files(
     from pkb.search_log import log_change
     from pkb.store import (
         apply_chunk_delta,
+        delete_document,
         get_chunk_embeddings,
         get_client,
         get_existing_chunks,
@@ -730,6 +850,21 @@ def ingest_files(
             category_override=category_override,
         )
         if not new_chunks:
+            suffix = file_path.suffix.lower()
+            if not is_excluded_path(file_path) and suffix in {".md", ".markdown", ".txt"}:
+                raw = read_file_as_text(file_path)
+                body = parse_frontmatter(raw)[1] if suffix != ".txt" else raw
+                if not body.strip():
+                    doc_id = f"{doc_id_prefix}{_nfc(str(file_path.relative_to(base_dir)))}"
+                    deleted = delete_document(es, doc_id)
+                    if Path(settings.graph_db_path).exists():
+                        from pkb.graph import store as gstore
+                        from pkb.graph.schema import graph_connection
+
+                        with graph_connection(settings.graph_db_path) as conn:
+                            gstore.purge_document(conn, doc_id)
+                    stats["files"] += 1
+                    stats["deleted"] += deleted
             continue
         if tag_override is not None:
             for c in new_chunks:
@@ -737,6 +872,18 @@ def ingest_files(
 
         doc_id = new_chunks[0]["doc_id"]
         existing = get_existing_chunks(es, doc_id)
+        # Replacement and moved slots are indexed as whole documents. Carry
+        # document-level fields that an older source file does not declare.
+        for field in (*DOCUMENT_METADATA_FIELDS, "archived_at", "archive_reason"):
+            if field in new_chunks[0]:
+                continue
+            values = [old[field] for old in existing.values() if old.get(field) is not None]
+            if not values:
+                continue
+            if any(value != values[0] for value in values[1:]):
+                raise ValueError(f"conflicting {field} across existing chunks of {doc_id}")
+            for chunk in new_chunks:
+                chunk[field] = list(values[0]) if isinstance(values[0], list) else values[0]
         new_by_idx = {c["chunk_index"]: c for c in new_chunks}
 
         # 벡터 재사용·복사 판정은 embedding_fingerprint(모델+전처리+임베딩 입력) 기준.

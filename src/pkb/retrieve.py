@@ -1,3 +1,4 @@
+from math import isfinite
 from time import perf_counter
 
 from elasticsearch import Elasticsearch
@@ -93,17 +94,16 @@ def canonical_group_key(candidate: dict) -> str:
 def apply_canonical_boost(candidates: list[dict], boost: float) -> list[dict]:
     """Apply an optional score multiplier to metadata-bearing canonical hits.
 
-    A positive ``boost`` is interpreted as a relative multiplier (``0.15``
-    means +15%).  It is intentionally a post-fusion operation so BM25/kNN
+    A positive ``boost`` increases score by that fraction of its magnitude;
+    negative reranker scores therefore also improve. It is a post-fusion operation so BM25/kNN
     scores remain comparable.  Hits without ``canonical_id`` are left alone,
     preserving legacy ranking behavior.  The input list is sorted and returned
     for convenient use in the search pipeline.
     """
     if not boost:
         return candidates
-    if boost < 0:
-        raise ValueError("canonical_boost는 음수가 될 수 없습니다")
-    factor = 1.0 + float(boost)
+    if not isfinite(boost) or not 0 <= boost < 1:
+        raise ValueError("canonical_boost는 0 이상 1 미만이어야 합니다")
     for candidate in candidates:
         canonical_id = candidate.get("canonical_id")
         if canonical_id is None or not str(canonical_id).strip():
@@ -111,7 +111,8 @@ def apply_canonical_boost(candidates: list[dict], boost: float) -> list[dict]:
         score = candidate.get("score")
         if score is None:
             continue
-        candidate["score"] = float(score) * factor
+        score = float(score)
+        candidate["score"] = score + abs(score) * boost
     candidates.sort(key=lambda item: -item.get("score", 0.0))
     return candidates
 
@@ -213,7 +214,12 @@ def _bm25_query(
                 {"match": {"content": {"query": query_text, "boost": 1.0}}},
                 {"match": {"title": {"query": query_text, "boost": 0.5}}},
                 {"match": {"section_path": {"query": query_text, "boost": 0.3}}},
+                {"term": {"aliases": {"value": query_text, "boost": 1.0}}},
+                {"term": {"tags": {"value": query_text, "boost": 0.5}}},
+                {"term": {"canonical_id": {"value": query_text, "boost": 1.0}}},
+                {"term": {"concept_ids": {"value": query_text, "boost": 1.0}}},
             ],
+            "minimum_should_match": 1,
         }
     }
     filters: list[dict] = []
@@ -276,6 +282,9 @@ def hybrid_search(
     canonical_group: bool = False,
     canonical_boost: float = 0.0,
     retrieval_profile: str | None = None,
+    fusion: str = "rrf",
+    lexical_weight: float = 0.5,
+    rerank_context: bool = False,
 ) -> list[dict]:
     """하이브리드 검색.
 
@@ -293,11 +302,18 @@ def hybrid_search(
             프로필은 frontmatter의 status/doc_type 필터로 변환된다.
         canonical_group: True면 canonical_id가 같은 물리 문서를 한 다양성 그룹으로
             묶는다. canonical_id가 없는 레거시 청크는 doc_id로 fallback한다.
-        canonical_boost: canonical_id가 있는 결과의 상대 점수 가산율(예: 0.15 = +15%).
+        canonical_boost: canonical_id 결과의 점수 절댓값 기준 가산율 (0 이상 1 미만).
+        fusion: ``rrf``(기본) 또는 채널별 최고 점수로 정규화한 ``linear``.
+        lexical_weight: ``linear``에서 BM25 점수의 가중치(0~1).
+        rerank_context: True면 리랭커 입력에 title·section_path를 포함한다.
     """
     profile = _resolve_profile(profile, retrieval_profile)
-    if canonical_boost < 0:
-        raise ValueError("canonical_boost는 음수가 될 수 없습니다")
+    if fusion not in {"rrf", "linear"}:
+        raise ValueError(f"알 수 없는 fusion: {fusion!r}")
+    if not isfinite(lexical_weight) or not 0 <= lexical_weight <= 1:
+        raise ValueError("lexical_weight는 0~1이어야 합니다")
+    if not isfinite(canonical_boost) or not 0 <= canonical_boost < 1:
+        raise ValueError("canonical_boost는 0 이상 1 미만이어야 합니다")
     timings: dict[str, float] = {}
     t_total = perf_counter()
 
@@ -325,6 +341,8 @@ def hybrid_search(
             include_archived=include_archived,
             exclude_doc_prefix=exclude_doc_prefix,
             profile=profile,
+            fusion=fusion,
+            lexical_weight=lexical_weight,
         )
         for hit in hits:
             if hit["_id"] in merged:
@@ -343,7 +361,7 @@ def hybrid_search(
         from pkb.rerank import rerank as _rerank_fn
 
         t = perf_counter()
-        candidates = _rerank_fn(query_text, candidates, top_k=len(candidates))
+        candidates = _rerank_fn(query_text, candidates, top_k=len(candidates), include_context=rerank_context)
         apply_canonical_boost(candidates, canonical_boost)
         candidates = _cap_per_doc(candidates, top_k, group_by_canonical=canonical_group)
         timings["rerank_ms"] = round((perf_counter() - t) * 1000, 2)
@@ -365,7 +383,7 @@ def hybrid_search(
                 query=query_text,
                 category=category,
                 top_k=top_k,
-                fusion="rrf",
+                fusion=fusion,
                 reranked=rerank,
                 results=candidates,
                 latency_ms=timings,
@@ -446,14 +464,18 @@ def _rrf_search(
     exclude_doc_prefix: str | None = None,
     profile: str | None = None,
     retrieval_profile: str | None = None,
+    fusion: str = "rrf",
+    lexical_weight: float = 0.5,
 ) -> list[dict]:
-    """BM25와 kNN을 각각 실행 → Reciprocal Rank Fusion으로 결합.
+    """BM25와 kNN을 각각 실행해 RRF 또는 정규화 가중합으로 결합.
 
-    timings이 주어지면 bm25_ms/knn_ms/fusion_ms/candidate_count/rrf_top_gap 기록.
+    timings이 주어지면 bm25_ms/knn_ms/fusion_ms/candidate_count/top_gap 기록.
     include_archived=False(기본)면 archived/expired 문서는 검색에서 제외.
     exclude_doc_prefix가 주어지면 해당 doc_id 접두사 문서도 검색에서 제외.
     profile은 BM25/kNN 양쪽에 동일한 frontmatter 필터를 적용한다.
     """
+    if fusion not in {"rrf", "linear"} or not isfinite(lexical_weight) or not 0 <= lexical_weight <= 1:
+        raise ValueError("fusion 또는 lexical_weight 값이 올바르지 않습니다")
     # BM25·kNN을 msearch 한 요청으로 묶는다 — HTTP 왕복 2회→1회.
     # (ES 내부 하위 검색 비용은 동일. Basic 라이선스라 네이티브 RRF retriever는 403 — 클라이언트 RRF 유지)
     t = perf_counter()
@@ -495,20 +517,22 @@ def _rrf_search(
         timings["knn_ms"] = knn_result.get("took", 0)
 
     t = perf_counter()
-    # doc_id(_id) → {rrf_score, source}
+    # doc_id(_id) → {fusion score, source}
     combined: dict[str, dict] = {}
-    for rank, hit in enumerate(bm25_result["hits"]["hits"]):
-        doc_id = hit["_id"]
-        rrf = 1.0 / (RRF_K + rank + 1)
-        combined[doc_id] = {"score": rrf, "source": _source_to_dict(hit)}
-
-    for rank, hit in enumerate(knn_result["hits"]["hits"]):
-        doc_id = hit["_id"]
-        rrf = 1.0 / (RRF_K + rank + 1)
-        if doc_id in combined:
-            combined[doc_id]["score"] += rrf
-        else:
-            combined[doc_id] = {"score": rrf, "source": _source_to_dict(hit)}
+    for response, weight in ((bm25_result, lexical_weight), (knn_result, 1 - lexical_weight)):
+        if fusion == "linear" and weight == 0:
+            continue
+        hits = response["hits"]["hits"]
+        max_score = max((hit["_score"] for hit in hits), default=0) if fusion == "linear" else 0
+        for rank, hit in enumerate(hits):
+            if fusion == "rrf":
+                score = 1.0 / (RRF_K + rank + 1)
+            else:
+                score = weight * hit["_score"] / max_score if max_score else 0.0
+            item = combined.get(hit["_id"])
+            if item is None:
+                item = combined[hit["_id"]] = {"score": 0.0, "source": _source_to_dict(hit)}
+            item["score"] += score
 
     sorted_hits = sorted(combined.values(), key=lambda x: -x["score"])
     results = []
@@ -521,9 +545,9 @@ def _rrf_search(
         timings["fusion_ms"] = round((perf_counter() - t) * 1000, 2)
         timings["candidate_count"] = len(sorted_hits)
         if len(sorted_hits) >= 2:
-            timings["rrf_top_gap"] = round(
+            timings[f"{fusion}_top_gap"] = round(
                 sorted_hits[0]["score"] - sorted_hits[1]["score"], 6
             )
         else:
-            timings["rrf_top_gap"] = 0.0
+            timings[f"{fusion}_top_gap"] = 0.0
     return results

@@ -11,6 +11,12 @@ the given notes, resolves them (arXiv Atom API, MITRE CVE Services), and reports
 * whether a venue claimed on the same line is backed by the arXiv
   ``comment``/``journal_ref`` metadata (otherwise "unverified" → treat as preprint).
 
+Blog citations hallucinate the same way, but as URLs: a real article title pinned to a
+guessed numeric ID. Every Markdown link is fetched — 404 means the page does not exist,
+and the page ``<title>`` is compared against the link text so a live-but-different
+article is flagged too. SPAs that answer 200 for any path (NAVER D2) are resolved
+through their content API instead.
+
 Usage::
 
     python scripts/verify_citations.py NOTE.md [NOTE2.md ...]          # report to stdout
@@ -43,10 +49,18 @@ VENUE_RE = re.compile(
     r"COLM|TMLR|JMLR|CCNC|INFOCOM|SIGCOMM|IMC|CoNEXT)\b(?:['’]?\s?(20\d{2}|\d{2}))?",
     re.IGNORECASE,
 )
+LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)")
+TOKEN_RE = re.compile(r"[0-9a-z가-힣]{2,}")
+D2_RE = re.compile(r"https?://d2\.naver\.com/helloworld/(\d+)")
+TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.S | re.I)
 SECTION_HEADER = "## 인용 검증 메모"
 ATOM = "{http://www.w3.org/2005/Atom}"
 ARXIV_NS = "{http://arxiv.org/schemas/atom}"
 USER_AGENT = "pkb-verify-citations/1 (+https://github.com/jjongkwann/personal-docs)"
+
+
+class ArxivUnavailable(RuntimeError):
+    """arXiv API에 도달하지 못함 — 인용이 틀렸다는 뜻이 아니다."""
 
 
 @dataclass
@@ -61,7 +75,7 @@ class ArxivMeta:
 @dataclass
 class Finding:
     ref: str
-    exists: bool
+    exists: bool | None  # None = 미확인 (네트워크·차단 등으로 판정 불가)
     detail: str
     venue_claims: list[str] = field(default_factory=list)
     venue_verified: bool | None = None  # None = no claim
@@ -74,7 +88,9 @@ def _get(url: str, timeout: int = 30) -> tuple[int, bytes]:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as exc:
-        return exc.code, b""
+        return exc.code, exc.read()
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return 0, str(exc).encode()  # 0 = 도달 실패 (판정 불가)
 
 
 def extract_arxiv_ids(text: str) -> list[str]:
@@ -107,7 +123,10 @@ def fetch_arxiv(ids: list[str], sleep: float = 3.0) -> dict[str, ArxivMeta]:
         )
         status, body = _get(url)
         if status != 200:
-            raise SystemExit(f"arXiv API HTTP {status}")
+            time.sleep(sleep)
+            status, body = _get(url)
+        if status != 200:
+            raise ArxivUnavailable(f"arXiv API HTTP {status}")
         for entry in ET.fromstring(body).iter(f"{ATOM}entry"):
             raw_id = (entry.findtext(f"{ATOM}id") or "").strip()
             if "/abs/" not in raw_id:
@@ -135,6 +154,61 @@ def fetch_cve(cve_id: str) -> tuple[bool, str]:
     except (KeyError, ValueError):
         state = "?"
     return True, f"MITRE state={state}"
+
+
+def extract_links(text: str) -> list[tuple[str, str]]:
+    """Unique (link text, URL) pairs. arXiv is already covered by the ID check."""
+    out: list[tuple[str, str]] = []
+    for label, url in LINK_RE.findall(text):
+        url = url.rstrip(".,")
+        if "arxiv.org" in url or (label, url) in out:
+            continue
+        out.append((label, url))
+    return out
+
+
+def page_title(url: str) -> tuple[int, str]:
+    """HTTP status and the page's own title. Returns status 0 when unreachable."""
+    if m := D2_RE.match(url):
+        # D2는 SPA라 없는 글도 200 + 빈 껍데기를 준다. 콘텐츠 API가 진짜 판정자다.
+        status, body = _get(f"https://d2.naver.com/api/v1/contents/{m.group(1)}")
+        if status != 200:
+            return 404, ""
+        try:
+            return 200, json.loads(body).get("postTitle", "")
+        except ValueError:
+            return 200, ""
+    status, body = _get(url)
+    if status != 200:
+        return status, ""
+    m = TITLE_RE.search(body.decode("utf-8", "ignore"))
+    return 200, " ".join(re.sub(r"<[^>]+>", " ", m.group(1)).split()) if m else ""
+
+
+def label_matches_title(label: str, title: str) -> float:
+    """Share of the page title's tokens that also appear in the note's link text."""
+    words = set(TOKEN_RE.findall(title.lower()))
+    if not words:
+        return 1.0  # 제목 없음 → 대조 불가, 통과시키고 상태 코드만 믿는다
+    ctx = set(TOKEN_RE.findall(label.lower()))
+    return len(words & ctx) / len(words)
+
+
+def check_link(label: str, url: str, *, fetch=page_title) -> Finding:
+    status, title = fetch(url)
+    if status == 0:
+        return Finding(url, None, "도달 실패 (네트워크·차단)")
+    if status == 404 or status == 410:
+        return Finding(url, False, f"HTTP {status} — 존재하지 않는 URL")
+    if status != 200:
+        return Finding(url, None, f"HTTP {status} (미확인)")
+    if not title:
+        return Finding(url, True, "HTTP 200 · 제목 없음 — 본문 대조 필요")
+    overlap = label_matches_title(label, title)
+    detail = f"HTTP 200 · 실제 제목 “{title}”"
+    if overlap < 0.4:
+        return Finding(url, False, detail + " — 노트의 링크 텍스트와 불일치")
+    return Finding(url, True, detail)
 
 
 def context_lines(text: str, needle: str) -> list[str]:
@@ -165,10 +239,17 @@ def title_overlap(lines: list[str], title: str) -> float:
     return sum(1 for w in words if w in ctx) / len(words)
 
 
-def verify_text(text: str, *, arxiv_fetch=fetch_arxiv, cve_fetch=fetch_cve) -> list[Finding]:
+def verify_text(
+    text: str, *, arxiv_fetch=fetch_arxiv, cve_fetch=fetch_cve, link_fetch=page_title
+) -> list[Finding]:
     findings: list[Finding] = []
     arxiv_ids = extract_arxiv_ids(text)
-    metas = arxiv_fetch(arxiv_ids) if arxiv_ids else {}
+    try:
+        metas = arxiv_fetch(arxiv_ids) if arxiv_ids else {}
+    except ArxivUnavailable as exc:
+        # arXiv가 죽어도 CVE·링크 검증은 계속한다.
+        findings.append(Finding("arXiv API", None, f"{exc} — arXiv 인용 미검증"))
+        arxiv_ids, metas = [], {}
     for ref in arxiv_ids:
         meta = metas[ref]
         lines = context_lines(text, ref)
@@ -192,6 +273,8 @@ def verify_text(text: str, *, arxiv_fetch=fetch_arxiv, cve_fetch=fetch_cve) -> l
     for cve in extract_cve_ids(text):
         exists, detail = cve_fetch(cve)
         findings.append(Finding(cve, exists, detail))
+    for label, url in extract_links(text):
+        findings.append(check_link(label, url, fetch=link_fetch))
     return findings
 
 
@@ -199,15 +282,15 @@ def render_section(findings: list[Finding], today: str) -> str:
     lines = [
         SECTION_HEADER,
         "",
-        f"자동 검증 {today} (`scripts/verify_citations.py`, arXiv API·MITRE CVE). "
+        f"자동 검증 {today} (`scripts/verify_citations.py`, arXiv API·MITRE CVE·링크 조회). "
         "venue 미확인 = arXiv 메타(comment/journal_ref)에 근거 없음 → 확인 전까지 'arXiv preprint'로 취급. "
         "제목·수치·저자 대조는 사람이 한다.",
         "",
     ]
     if not findings:
-        lines.append("- 검증 대상 인용(arXiv/CVE ID) 없음.")
+        lines.append("- 검증 대상 인용(arXiv/CVE ID·링크) 없음.")
     for f in findings:
-        mark = "✅" if f.exists else "❌"
+        mark = {True: "✅", False: "❌", None: "⚠️"}[f.exists]
         line = f"- {mark} `{f.ref}` — {f.detail}"
         if f.venue_claims:
             verdict = "확인" if f.venue_verified else "미확인"
@@ -238,7 +321,7 @@ def main(argv: list[str] | None = None) -> int:
         text = path.read_text(encoding="utf-8")
         findings = verify_text(text)
         section = render_section(findings, today)
-        bad += sum(1 for f in findings if not f.exists)
+        bad += sum(1 for f in findings if f.exists is False)
         print(f"# {path}\n{section}")
         if args.write:
             path.write_text(upsert_section(text, section), encoding="utf-8")

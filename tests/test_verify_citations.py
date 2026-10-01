@@ -45,3 +45,51 @@ def test_upsert_section_is_idempotent():
     twice = vc.upsert_section(once, section)
     assert once == twice
     assert once.count(vc.SECTION_HEADER) == 1 and once.startswith(NOTE.rstrip("\n"))
+
+
+LINK_NOTE = """# 노트
+- [우아한형제들: 우리 팀은 카프카를 어떻게 사용하고 있을까](https://techblog.woowahan.com/17386/)
+- [죽은 링크](https://techblog.woowahan.com/18854/)
+- [엉뚱한 제목을 단 링크](https://example.com/x)
+- [arXiv는 ID 검사로 이미 커버](https://arxiv.org/abs/1803.01474)
+"""
+
+PAGES = {
+    "https://techblog.woowahan.com/17386/": (200, "우리 팀은 카프카를 어떻게 사용하고 있을까 | 우아한형제들 기술블로그"),
+    "https://techblog.woowahan.com/18854/": (404, ""),
+    "https://example.com/x": (200, "카프카 컨슈머에 동적 쓰로틀링 적용하기"),
+}
+
+
+def test_extract_links_skips_arxiv_and_dedupes():
+    assert [u for _, u in vc.extract_links(LINK_NOTE)] == [
+        "https://techblog.woowahan.com/17386/",
+        "https://techblog.woowahan.com/18854/",
+        "https://example.com/x",
+    ]
+
+
+def test_check_link_catches_404_and_title_mismatch():
+    fetch = PAGES.__getitem__
+    good, dead, wrong = (
+        vc.check_link(label, url, fetch=fetch) for label, url in vc.extract_links(LINK_NOTE)
+    )
+    assert good.exists is True
+    assert dead.exists is False and "존재하지 않는" in dead.detail
+    assert wrong.exists is False and "불일치" in wrong.detail
+
+
+def test_unreachable_link_is_unverified_not_missing():
+    f = vc.check_link("x", "https://x.test/", fetch=lambda u: (0, ""))
+    assert f.exists is None and "⚠️" in vc.render_section([f], "2026-08-25")
+
+
+def test_arxiv_outage_does_not_block_cve_and_link_checks():
+    def boom(ids):
+        raise vc.ArxivUnavailable("arXiv API HTTP 0")
+
+    findings = vc.verify_text(
+        LINK_NOTE, arxiv_fetch=boom, cve_fetch=lambda c: (True, ""), link_fetch=PAGES.__getitem__
+    )
+    assert findings[0].ref == "arXiv API" and findings[0].exists is None
+    assert sum(1 for f in findings if f.exists is False) == 2

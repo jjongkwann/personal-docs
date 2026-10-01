@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from datetime import UTC, datetime
@@ -14,6 +15,17 @@ from pkb.graph import store as graph_store
 SCAN_PAGE_SIZE = 2000
 
 
+def graph_input_hash(source: dict) -> str:
+    """Version the exact chunk fields used for graph extraction and attribution."""
+    fields = ("doc_id", "chunk_index", "content", "title", "section_path", "category")
+    payload = {field: source.get(field) for field in fields}
+    payload["content"] = source.get("content", "")
+    payload["section_path"] = source.get("section_path", "")
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 def scan_pending_chunks(
     es: Elasticsearch,
     conn: sqlite3.Connection,
@@ -21,7 +33,8 @@ def scan_pending_chunks(
     query: dict | None = None,
 ) -> tuple[list[dict], int]:
     """ES 청크를 search_after로 전량 순회해 (pending source, 전체 수)를 반환."""
-    by_idx, legacy = graph_store.extracted_markers(conn)
+    by_idx, _ = graph_store.extracted_markers(conn)
+    input_by_idx = graph_store.extracted_input_markers(conn)
     pending: list[dict] = []
     total = 0
     search_after = None
@@ -30,7 +43,7 @@ def scan_pending_chunks(
             index=settings.es_index,
             query=query or {"match_all": {}},
             size=SCAN_PAGE_SIZE,
-            source_includes=["doc_id", "chunk_index", "content_hash"],
+            source_includes=["doc_id", "chunk_index", "content_hash", "content", "title", "section_path", "category"],
             sort=[{"doc_id": "asc"}, {"chunk_index": "asc"}],
             **({"search_after": search_after} if search_after else {}),
         )
@@ -41,7 +54,9 @@ def scan_pending_chunks(
         pending.extend(
             source
             for source in (hit["_source"] for hit in hits)
-            if graph_store.is_pending(source, by_idx, legacy)
+            if not source.get("content_hash")
+            or by_idx.get((source["doc_id"], source["chunk_index"])) != source["content_hash"]
+            or input_by_idx.get((source["doc_id"], source["chunk_index"])) != graph_input_hash(source)
         )
         search_after = hits[-1]["sort"]
     return pending, total
@@ -68,6 +83,8 @@ def load_pending_batch(
         {
             "doc_id": doc["_source"]["doc_id"],
             "chunk_index": doc["_source"]["chunk_index"],
+            "content_hash": doc["_source"].get("content_hash"),
+            "input_hash": graph_input_hash(doc["_source"]),
             "category": doc["_source"].get("category"),
             "title": doc["_source"].get("title"),
             "section_path": doc["_source"].get("section_path", ""),
@@ -119,28 +136,23 @@ def corpus_vocabulary(conn: sqlite3.Connection, *, limit: int = 400) -> list[str
     return [row["name"] for row in conn.execute(sql, (limit,))]
 
 
-def _chunk_hashes(keys: list[tuple[str, int]]) -> dict[tuple[str, int], str]:
-    """(doc_id, chunk_index) → 현재 content_hash. ES 조회 실패는 빈 dict."""
+def _chunk_versions(keys: list[tuple[str, int]]) -> dict[tuple[str, int], tuple[str, str]]:
+    """(doc_id, chunk_index) → current (content_hash, input_hash)."""
     if not keys:
         return {}
-    try:
-        from pkb.store import get_client
+    from pkb.store import get_client
 
-        docs = get_client().mget(
-            index=settings.es_index,
-            ids=[f"{doc_id}_{index}" for doc_id, index in keys],
-            source_includes=["content_hash"],
-        )["docs"]
-    except Exception:
-        return {}
-    hashes = {}
+    docs = get_client().mget(
+        index=settings.es_index,
+        ids=[f"{doc_id}_{index}" for doc_id, index in keys],
+        source_includes=["doc_id", "chunk_index", "content_hash", "content", "title", "section_path", "category"],
+    )["docs"]
+    versions = {}
     for key, doc in zip(keys, docs, strict=False):
-        content_hash = (
-            (doc.get("_source") or {}).get("content_hash") if doc.get("found") else None
-        )
-        if content_hash:
-            hashes[key] = content_hash
-    return hashes
+        source = doc.get("_source") or {}
+        if doc.get("found") and source.get("content_hash"):
+            versions[key] = (source["content_hash"], graph_input_hash(source))
+    return versions
 
 
 def store_concepts(items_json: str) -> str:
@@ -163,29 +175,45 @@ def store_concepts(items_json: str) -> str:
     alias_conflicts: list[tuple[str, str, str | None]] = []
     dropped: list[tuple[str, str, str]] = []
     invalid_concepts: list[str] = []
-    processed: list[tuple[str, int]] = []
+    rejected: list[str] = []
+    processed: list[tuple[str, int, str, str]] = []
     touched: set[int] = set()
     keys = [
         (item["doc_id"], int(item["chunk_index"]))
         for item in items
         if item.get("doc_id") and item.get("chunk_index") is not None
     ]
-    current_hashes = _chunk_hashes(keys)
+    current_versions = _chunk_versions(keys)
+    accepted: list[tuple[dict, str, int, str, str]] = []
+    for item in items:
+        doc_id = item.get("doc_id")
+        chunk_index = item.get("chunk_index")
+        if not doc_id or chunk_index is None:
+            rejected.append("doc_id/chunk_index 누락")
+            continue
+        index = int(chunk_index)
+        expected_hash = item.get("content_hash")
+        expected_input_hash = item.get("input_hash")
+        current = current_versions.get((doc_id, index))
+        if not isinstance(expected_hash, str) or not expected_hash:
+            rejected.append(f"{doc_id}[{index}]: content_hash 누락")
+        elif not isinstance(expected_input_hash, str) or not expected_input_hash:
+            rejected.append(f"{doc_id}[{index}]: input_hash 누락")
+        elif not current:
+            rejected.append(f"{doc_id}[{index}]: ES 청크 없음 또는 해시 누락")
+        elif (expected_hash, expected_input_hash) != current:
+            rejected.append(f"{doc_id}[{index}]: 추출 입력 변경 (재조회 필요)")
+        else:
+            accepted.append((item, doc_id, index, expected_hash, expected_input_hash))
 
     with graph_connection(settings.graph_db_path) as conn:
         marker_hashes, _ = graph_store.extracted_markers(conn)
+        marker_input_hashes = graph_store.extracted_input_markers(conn)
         materialize_edges = not graph_store.edge_evidence_rebuild_active(conn)
-        for item in items:
-            doc_id = item.get("doc_id")
-            chunk_index = item.get("chunk_index")
-            if not doc_id or chunk_index is None:
-                continue
-            index = int(chunk_index)
+        for item, doc_id, index, expected_hash, expected_input_hash in accepted:
             key = (doc_id, index)
-            processed.append(key)
-
-            current_hash = current_hashes.get(key)
-            if current_hash is not None and marker_hashes.get(key) != current_hash:
+            processed.append((doc_id, index, expected_hash, expected_input_hash))
+            if marker_hashes.get(key) != expected_hash or marker_input_hashes.get(key) != expected_input_hash:
                 touched.update(graph_store.clear_mentions_for_chunk(conn, doc_id, index))
                 graph_store.clear_edge_evidence_for_chunk(conn, doc_id, index)
 
@@ -286,16 +314,16 @@ def store_concepts(items_json: str) -> str:
                     dropped.append((src, dst, relation_type))
 
         now = datetime.now(UTC).isoformat()
-        for key in processed:
-            content_hash = current_hashes.get(key)
-            if content_hash:
-                graph_store.record_extraction(conn, key[0], key[1], content_hash, now)
+        for doc_id, index, content_hash, input_hash in processed:
+            graph_store.record_extraction(conn, doc_id, index, content_hash, now, input_hash)
         graph_store.recompute_mention_counts(conn, touched)
 
     message = (
-        f"저장 완료: 항목 {len(items)}개 처리, "
+        f"저장 완료: 항목 {len(processed)}개 처리, "
         f"개념 {total_concepts}개 / 관계 {total_edges}개 / 언급 {total_mentions}개 반영"
     )
+    if rejected:
+        message += f"\n저장 거부 {len(rejected)}건: {', '.join(rejected[:10])}"
     if dropped:
         preview = ", ".join(f"{src}→{dst}({kind})" for src, dst, kind in dropped[:10])
         message += (

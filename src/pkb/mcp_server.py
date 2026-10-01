@@ -89,6 +89,8 @@ def search_knowledge(
     profile: str = "all",
     canonical_group: bool = True,
     canonical_boost: float = 0.15,
+    expand_context: int | None = None,
+    max_context_tokens: int = 4000,
 ) -> str:
     """개인 지식 베이스에서 관련 정보를 하이브리드 검색(BM25+kNN)합니다.
     RRF 결합으로 정밀도를 높입니다 (CrossEncoder 재순위는 RERANK_ENABLED 설정 시).
@@ -110,14 +112,21 @@ def search_knowledge(
         profile: all(레거시 포함), curated(개념·가이드·MOC), evidence(curated+research),
             source(원본) 중 하나. 전체 카테고리 마이그레이션 전까지 기본은 all.
         canonical_group: True면 같은 canonical_id의 물리 문서를 한 결과 그룹으로 취급.
-        canonical_boost: canonical_id가 있는 정리 문서의 상대 점수 가산율. 기본 0.15.
+        canonical_boost: 정본 문서의 점수 절댓값 기준 가산율 (0 이상 1 미만, 기본 0.15).
+        expand_context: 같은 절의 전후 청크 수 (0~4). 생략하면 설정값.
+        max_context_tokens: 출처·본문·주변 문맥을 합한 토큰 예산 (256~32000).
     """
     from pathlib import Path
 
     from pkb.config import settings as _settings
+    from pkb.context import render_search_results
     from pkb.retrieve import hybrid_search
     from pkb.store import get_client
 
+    # 비용이 드는 검색 전에 출력 예산과 확장 범위를 검증한다.
+    render_search_results([], max_tokens=max_context_tokens)
+    if expand_context is not None and not 0 <= expand_context <= 4:
+        raise ValueError("expand_context는 0~4여야 합니다")
     es = get_client()
     query_vector: list[list[float]] = []
     results = hybrid_search(
@@ -125,7 +134,7 @@ def search_knowledge(
         category=category or None, top_k=top_k,
         candidate_k=_settings.candidate_k,
         rerank=_settings.rerank_enabled,
-        expand_context=_settings.expand_context,
+        expand_context=_settings.expand_context if expand_context is None else expand_context,
         include_archived=include_archived,
         exclude_doc_prefix="obsidian/" if not include_obsidian else None,
         variants=query_variants or None,
@@ -160,42 +169,9 @@ def search_knowledge(
                     )
                 vocab_line = "코퍼스 개념 어휘: " + ", ".join(terms)
 
-    if not results:
-        body = "검색 결과가 없습니다."
-    else:
-        parts = []
-        for i, r in enumerate(results, 1):
-            title = r.get("title") or ""
-            section = r.get("section_path") or ""
-            ci = r.get("chunk_index")
-            score = r.get("rerank_score") if r.get("rerank_score") is not None else r.get("score", 0.0)
-            header = f"[출처 {i} | {r['source_path']}"
-            if ci is not None:
-                header += f" #{ci}"
-            header += f" | score {score:.3f} | 카테고리: {r['category']}"
-            if title:
-                header += f" | 제목: {title}"
-            if r.get("doc_type"):
-                header += f" | 유형: {r['doc_type']}"
-            if r.get("canonical_id"):
-                header += f" | 정본: {r['canonical_id']}"
-            if r.get("status"):
-                header += f" | 상태: {r['status']}"
-            header += "]"
-            section_line = f"섹션: {section}\n" if section else ""
-            concepts = sorted(
-                hit_concepts.get((r["doc_id"], ci), []), key=lambda c: c["slug"]
-            )[:5]
-            concept_line = ""
-            if concepts:
-                names = ", ".join(c["name"] for c in concepts)
-                concept_line = f"관련 개념: {names}\n"
-            parts.append(f"{header}\n{section_line}{r['content']}\n{concept_line}")
-        body = "\n".join(parts)
-
-    if vocab_line:
-        return f"{vocab_line}\n\n{body}"
-    return body
+    return render_search_results(
+        results, max_tokens=max_context_tokens, hit_concepts=hit_concepts, preamble=vocab_line
+    )
 
 
 @mcp.tool()
@@ -1033,6 +1009,7 @@ def graph_list_chunks(
     import json
 
     from pkb.config import settings as _settings
+    from pkb.graph.services import graph_input_hash
     from pkb.store import get_client
 
     if not category and not doc_id:
@@ -1083,6 +1060,8 @@ def graph_list_chunks(
             "title": h["_source"].get("title"),
             "section_path": h["_source"].get("section_path", ""),
             "content": h["_source"].get("content", ""),
+            "content_hash": h["_source"].get("content_hash"),
+            "input_hash": graph_input_hash(h["_source"]),
         }
         for h in hits
     ]
@@ -1113,6 +1092,8 @@ def graph_store_concepts(items_json: str) -> str:
                 {
                   "doc_id": "obsidian/career/DI.md",
                   "chunk_index": 0,
+                  "content_hash": "graph_list_chunks에서 받은 값",
+                  "input_hash": "graph_list_chunks에서 받은 값",
                   "section_path": "...",
                   "category": "career",
                   "title": "...",
@@ -1129,6 +1110,8 @@ def graph_store_concepts(items_json: str) -> str:
               ]
             }
 
+            content_hash와 input_hash는 graph_list_chunks의 값을 그대로 전달하세요.
+            추출 중 원본이 바뀐 항목은 거절되므로 다시 읽어 추출합니다. 다른 유효 항목은 저장됩니다.
             relations[].confidence는 선택 — 이산 루브릭 0.9/0.7/0.5만 허용 (그 외 값은 무시).
             개념 없는 청크도 concepts: []로 포함하세요 — '처리 완료' 마커로 기록돼
             pending_only 재추출 대상에서 빠집니다.

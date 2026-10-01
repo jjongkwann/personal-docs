@@ -375,15 +375,21 @@ def query(
     category: str = typer.Option(None, help="카테고리 필터"),
     top_k: int = typer.Option(settings.default_top_k, help="결과 수"),
     rerank: bool = typer.Option(None, help="CrossEncoder 재순위 사용 (기본: 설정값)"),
-    expand: int = typer.Option(None, help="전후 N청크 neighbors 포함 (기본: 설정값)"),
+    expand: int = typer.Option(None, min=0, max=4, help="전후 N청크 neighbors 포함 (기본: 설정값)"),
     include_obsidian: bool = typer.Option(
         True, "--include-obsidian/--no-obsidian", help="Obsidian 볼트 노트 포함 여부"
     ),
     profile: str = typer.Option("all", help="검색 프로필: all|curated|evidence|source"),
     canonical_group: bool = typer.Option(True, help="canonical_id 기준 결과 다양화"),
     canonical_boost: float = typer.Option(0.15, help="canonical_id 문서 상대 점수 가산율"),
+    context_tokens: int = typer.Option(4000, min=256, max=32000, help="출처와 주변 문맥을 포함한 토큰 예산"),
+    candidate_k: int = typer.Option(settings.candidate_k, min=1, help="검색 채널별 후보 수"),
+    fusion: str = typer.Option("rrf", help="결합 방식: rrf|linear (비교 실험)"),
+    lexical_weight: float = typer.Option(0.5, min=0.0, max=1.0, help="linear 모드 BM25 가중치"),
+    rerank_context: bool = typer.Option(False, help="리랭커 입력에 제목·섹션 포함 (비교 실험)"),
 ):
     """하이브리드 검색 (BM25 + kNN + RRF + 옵션 리랭커)."""
+    from pkb.context import render_search_results
     from pkb.retrieve import hybrid_search
     from pkb.store import get_client
 
@@ -391,37 +397,17 @@ def query(
     results = hybrid_search(
         es, question,
         category=category, top_k=top_k,
-        candidate_k=settings.candidate_k,
+        candidate_k=candidate_k,
         rerank=rerank if rerank is not None else settings.rerank_enabled,
         expand_context=expand if expand is not None else settings.expand_context,
         exclude_doc_prefix="obsidian/" if not include_obsidian else None,
         profile=profile,
         canonical_group=canonical_group,
         canonical_boost=canonical_boost,
+        fusion=fusion, lexical_weight=lexical_weight, rerank_context=rerank_context,
     )
 
-    if not results:
-        typer.echo("검색 결과가 없습니다.")
-        return
-
-    for i, r in enumerate(results, 1):
-        typer.echo(f"\n{'='*60}")
-        typer.echo(f"[{i}] {r['source_path']} (chunk #{r['chunk_index']})")
-        sp = r.get('section_path', '')
-        if sp:
-            typer.echo(f"    섹션: {sp}")
-        contract = ""
-        if r.get("doc_type"):
-            contract += f" | 유형: {r['doc_type']}"
-        if r.get("canonical_id"):
-            contract += f" | 정본: {r['canonical_id']}"
-        typer.echo(f"    카테고리: {r['category']} | 점수: {r['score']:.4f}{contract}")
-        typer.echo(f"{'─'*60}")
-        # 내용 미리보기 (처음 300자)
-        preview = r["content"][:300]
-        if len(r["content"]) > 300:
-            preview += "..."
-        typer.echo(preview)
+    typer.echo(render_search_results(results, max_tokens=context_tokens))
 
 
 def _graph_purge(doc_id: str) -> dict | None:
@@ -503,28 +489,42 @@ def doctor():
 
 @app.command("eval")
 def eval_cmd(
-    gold: Path = typer.Option(
-        None, help="골드셋 JSONL 경로 (기본: <DATA_ROOT>/.eval/gold.jsonl)"
-    ),
+    gold: Path = typer.Option(None, help="v2 골드셋 JSONL (기본: <DATA_ROOT>/.eval/gold.jsonl)"),
+    configurations: Path = typer.Option(None, help="이름별 검색 설정 JSON 파일"),
+    output: Path = typer.Option(None, help="상세 결과 JSON 저장 (새 파일)"),
+    top_k: int = typer.Option(settings.default_top_k, min=1, help="평가 결과 수"),
+    migrate_to: Path = typer.Option(None, help="구 query/doc_id 골드셋을 새 v2 파일로 변환 후 종료"),
 ):
-    """검색 품질 평가 — 골드셋을 4개 모드(bm25/knn/rrf/rrf+rerank)로 돌려 recall@k/MRR 비교."""
-    from pkb.eval import MODES, TOP_K, evaluate, load_gold
+    """운영 검색 경로로 여러 설정의 근거 검색 품질과 지연 시간을 비교합니다."""
+    import json
+
+    from pkb.eval import evaluate, format_report, load_gold, migrate_legacy_gold
     from pkb.store import get_client
 
     gold_path = gold.resolve() if gold is not None else data_dir() / ".eval" / "gold.jsonl"
-    if not gold_path.is_file():
-        typer.echo(f"골드셋 파일이 없습니다: {gold_path}")
-        typer.echo('라인당 {"query": "...", "doc_id": "data/..."} JSONL로 작성하세요 (docs/usage.md 참고).')
-        raise typer.Exit(1)
-
-    rows = load_gold(gold_path)
-    if not rows:
-        typer.echo(f"골드셋이 비어 있습니다: {gold_path}")
-        raise typer.Exit(1)
-
-    es = get_client()
-    typer.echo(f"골드셋 {len(rows)}개 쿼리 × {len(MODES)}개 모드 평가 (top_k={TOP_K})\n")
-    typer.echo(evaluate(es, rows))
+    try:
+        if migrate_to is not None:
+            count = migrate_legacy_gold(gold_path, migrate_to)
+            typer.echo(f"골드셋 {count}개 변환: {migrate_to} (원본 보존)")
+            return
+        rows = load_gold(gold_path)
+        if not rows:
+            raise ValueError(f"골드셋이 비어 있습니다: {gold_path}")
+        if output is not None and output.exists():
+            raise ValueError(f"결과 파일이 이미 있습니다: {output}")
+        options = json.loads(configurations.read_text(encoding="utf-8")) if configurations else None
+        report = evaluate(get_client(), rows, configurations=options, top_k=top_k)
+        if output is not None:
+            with output.open("x", encoding="utf-8") as handle:
+                json.dump(report, handle, ensure_ascii=False, indent=2, allow_nan=False)
+                handle.write("\n")
+        typer.echo(format_report(report))
+        if output is not None:
+            typer.echo(f"상세 결과: {output}")
+    except (OSError, ValueError) as exc:
+        typer.echo(f"오류: {exc}")
+        typer.echo("골드셋 v2 형식과 비교 설정은 docs/usage.md를 참고하세요.")
+        raise typer.Exit(1) from None
 
 
 @app.command("purge-archived")
