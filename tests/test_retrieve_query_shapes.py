@@ -8,20 +8,24 @@ from __future__ import annotations
 
 import pytest
 
-from pkb.retrieve import RRF_K, _bm25_query, _knn_query, hybrid_search
+from pkb.retrieve import RRF_K, _bm25_query, _knn_query, _rrf_search, hybrid_search
 
 # ---------- _bm25_query ----------
 
 def test_bm25_should_includes_content_title_section():
     q = _bm25_query("hello", None)
     shoulds = q["bool"]["should"]
-    fields = {list(s["match"].keys())[0] for s in shoulds}
+    fields = {list(s["match"].keys())[0] for s in shoulds if "match" in s}
     assert fields == {"content", "title", "section_path"}
+    assert q["bool"]["minimum_should_match"] == 1
+    assert {next(iter(s["term"])) for s in shoulds if "term" in s} == {
+        "aliases", "tags", "canonical_id", "concept_ids",
+    }
 
 
 def test_bm25_boosts_content_highest():
     shoulds = _bm25_query("q", None)["bool"]["should"]
-    boosts = {list(s["match"].keys())[0]: list(s["match"].values())[0]["boost"] for s in shoulds}
+    boosts = {list(s["match"].keys())[0]: list(s["match"].values())[0]["boost"] for s in shoulds if "match" in s}
     assert boosts["content"] > boosts["title"] > boosts["section_path"]
 
 
@@ -107,6 +111,62 @@ def test_knn_no_exclude_doc_prefix_by_default():
 def test_rrf_k_constant():
     # Elastic 기본값 60 — 바뀌면 골든셋 재측정 필요하므로 고정 감시
     assert RRF_K == 60
+
+
+def test_linear_fusion_normalizes_channels_and_keeps_ties():
+    class FakeES:
+        def msearch(self, **kwargs):
+            return {"responses": [
+                {"hits": {"hits": [
+                    {"_id": "a", "_score": 10.0, "_source": {"doc_id": "a"}},
+                    {"_id": "b", "_score": 10.0, "_source": {"doc_id": "b"}},
+                ]}},
+                {"hits": {"hits": [
+                    {"_id": "b", "_score": 2.0, "_source": {"doc_id": "b"}},
+                    {"_id": "c", "_score": 1.0, "_source": {"doc_id": "c"}},
+                ]}},
+            ]}
+
+    es = FakeES()
+    linear = _rrf_search(es, "q", [0.0], None, 3, fusion="linear", lexical_weight=0.5)
+    assert [(r["_id"], r["score"]) for r in linear] == [
+        ("b", 1.0), ("a", 0.5), ("c", 0.25),
+    ]
+    rrf = _rrf_search(es, "q", [0.0], None, 3)
+    assert [r["_id"] for r in rrf] == ["b", "a", "c"]
+    assert rrf[0]["score"] == pytest.approx(1 / 62 + 1 / 61)
+
+
+@pytest.mark.parametrize("weight,expected", [(0.0, "vector"), (1.0, "lexical")])
+def test_linear_fusion_endpoint_excludes_zero_weight_candidates_even_with_rerank(monkeypatch, weight, expected):
+    class FakeES:
+        def msearch(self, **kwargs):
+            return {"responses": [
+                {"hits": {"hits": [
+                    {"_id": "lexical", "_score": 10.0, "_source": {"doc_id": "lexical", "content": "lexical"}},
+                ]}},
+                {"hits": {"hits": [
+                    {"_id": "vector", "_score": 10.0, "_source": {"doc_id": "vector", "content": "vector"}},
+                ]}},
+            ]}
+
+    class FakeReranker:
+        def predict(self, pairs, **kwargs):
+            assert pairs == [("q", expected)]
+            return [1.0]
+
+    monkeypatch.setattr("pkb.retrieve.embed", lambda queries: [[0.0] for _ in queries])
+    monkeypatch.setattr("pkb.rerank.get_reranker", lambda: FakeReranker())
+    result = hybrid_search(
+        FakeES(), "q", top_k=2, rerank=True, fusion="linear", lexical_weight=weight, log=False,
+    )
+    assert [hit["_id"] for hit in result] == [expected]
+
+
+@pytest.mark.parametrize("weight", [-0.1, 1.1, float("nan"), float("inf")])
+def test_fusion_rejects_invalid_weight_before_search(weight):
+    with pytest.raises(ValueError):
+        hybrid_search(None, "q", log=False, lexical_weight=weight)
 
 
 # ---------- hybrid_search 다중 쿼리 변형 융합 (RAG-Fusion) ----------

@@ -7,6 +7,7 @@ prefix 토글 시 본문이 같아도 재임베딩돼야 한다.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -65,6 +66,17 @@ def test_fingerprint_changes_with_model(monkeypatch):
     assert c["content_hash"] == _content_hash("같은 본문")  # content_hash는 불변
 
 
+def test_revision_keeps_legacy_fingerprint_until_set(monkeypatch):
+    monkeypatch.setattr(settings, "embedding_revision", "")
+    c = _chunk(0, "같은 본문")
+    legacy = hashlib.sha256(
+        f"{settings.embedding_model}\n1\n같은 본문".encode()
+    ).hexdigest()
+    assert c["embedding_fingerprint"] == legacy
+    monkeypatch.setattr(settings, "embedding_revision", "commit-a")
+    assert embedding_fingerprint(c) != legacy
+
+
 def test_prefix_toggle_changes_input_and_fingerprint(monkeypatch):
     monkeypatch.setattr(settings, "embed_context_prefix", False)
     c = _chunk(0, "본문")
@@ -110,4 +122,23 @@ def test_model_change_blocks_vector_copy(monkeypatch):
 
     assert stats["moved"] == 0
     assert sorted(embed_calls[0]) == ["aaa", "new"]  # 둘 다 새 모델로 임베딩
+    es.mget.assert_not_called()
+
+
+def test_revision_change_blocks_vector_copy(monkeypatch):
+    monkeypatch.setattr(settings, "embedding_revision", "commit-a")
+    old = [_chunk(0, "aaa")]
+    monkeypatch.setattr(settings, "embedding_revision", "commit-b")
+    new = [_chunk(0, "new"), _chunk(1, "aaa")]
+
+    es = MagicMock()
+    es.search.return_value = {"hits": {"hits": [_existing_hit(c) for c in old]}}
+    es.bulk.return_value = {"errors": False}
+    embed_calls: list[list[str]] = []
+    _setup(monkeypatch, es, new, embed_calls)
+
+    stats = ingest_files([Path("dummy.md")], Path("."))
+
+    assert stats["moved"] == 0
+    assert sorted(embed_calls[0]) == ["aaa", "new"]
     es.mget.assert_not_called()

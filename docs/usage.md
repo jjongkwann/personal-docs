@@ -90,11 +90,22 @@ uv run pkb query "Python framework experience" --category career --top-k 10
 uv run pkb query "RAG evaluation" --expand 1     # attach ±1 neighboring chunks
 uv run pkb query "BM25" --rerank                 # force CrossEncoder reranking on for this run
 uv run pkb query "BM25" --no-obsidian            # corpus only, drop obsidian/* documents
+uv run pkb query "BM25" --context-tokens 2000 --candidate-k 50
+uv run pkb query "BM25" --fusion linear --lexical-weight 0.5 --rerank --rerank-context
 ```
 
 `--top-k` defaults to `DEFAULT_TOP_K` (5); `--rerank`/`--no-rerank` and `--expand` fall back to
 `RERANK_ENABLED` and `EXPAND_CONTEXT` when omitted. **Note the asymmetric negative form** — the flag
 pair is `--include-obsidian` / `--no-obsidian`, not `--no-include-obsidian`.
+`--candidate-k` sets the depth of each BM25/kNN candidate list; `--fusion linear` normalizes each
+list's scores before weighting them with `--lexical-weight` (0–1). RRF remains the default.
+`--rerank-context` adds title and section to the reranker input when reranking is enabled.
+`--context-tokens` caps the rendered output, including source labels and neighboring context.
+
+`--canonical-boost` accepts values from 0 (inclusive) to 1 (exclusive). For reproducible
+experiments, set `EMBEDDING_REVISION` and `RERANK_REVISION` to model commits. Changing the
+embedding revision invalidates its fingerprint and re-embeds affected vectors on the next
+sync. Leaving it unset preserves existing fingerprints.
 
 ## Document Management
 
@@ -408,13 +419,28 @@ tail data/.logs/search.jsonl | jq .
 
 ## Search Quality Evaluation (eval)
 
-Runs a gold set (question → correct document) through 4 search modes (bm25-only / knn-only / rrf /
-rrf+rerank) and compares recall@1/3/5/10 and MRR per mode. If the gold document falls outside the
-top 10 (a miss), the actual #1 doc_id is reported alongside it.
+Runs version 2 gold rows through the operational `hybrid_search` path. Each row can label several
+relevant documents or exact chunks and can mark a question unanswerable. Named configurations
+make retrieval settings comparable at the same `--top-k` cutoff.
 
 ```bash
 uv run pkb eval                            # default: <DATA_ROOT>/.eval/gold.jsonl
-uv run pkb eval --gold path/to/gold.jsonl
+uv run pkb eval --gold legacy.jsonl --migrate-to new-v2.jsonl
+uv run pkb eval --gold new-v2.jsonl --configurations file.json --output new-report.json --top-k 5
+```
+
+Migration creates a new file and preserves the legacy file. A legacy `{"query":"...","doc_id":"..."}`
+row becomes one v2 answerable document label; review and add exact chunks or other relevant sources
+where appropriate. `--output` also requires a new path and stores per-query results and run metadata.
+
+`file.json` maps configuration names to `hybrid_search` options:
+
+```json
+{
+  "baseline": {},
+  "linear": {"fusion": "linear", "lexical_weight": 0.5},
+  "rerank": {"rerank": true, "rerank_context": true}
+}
 ```
 
 ### Gold Set Authoring Guidelines
@@ -422,9 +448,19 @@ uv run pkb eval --gold path/to/gold.jsonl
 `data/.eval/gold.jsonl` — one entry per line:
 
 ```jsonl
-{"query": "What scoring formula combines term frequency and document length in an inverted index?", "doc_id": "data/study/rag/1.2.10_BM25.md"}
+{"version":2,"query":"How does BM25 score a term?","query_type":"paraphrase","answerable":true,"relevant":[{"doc_id":"data/study/rag/bm25.md","chunk_index":2},{"doc_id":"data/study/rag/bm25.md","chunk_index":3},{"canonical_id":"bm25-reference"}]}
+{"version":2,"query":"What is the launch date of a nonexistent project?","query_type":"no_answer","answerable":false,"relevant":[]}
 ```
 
+- `query_type` groups results in the report. `variants` is an optional list of query rewrites; only
+  rows that specify it use variants. A relevant item can use `doc_id` or `canonical_id`, with an
+  optional positive `relevance` weight. `chunk_index` requires `doc_id`; different chunks of the
+  same document can be labeled separately.
+- Final recall and nDCG credit a relevant document once. Evidence recall checks labeled
+  `doc_id` + `chunk_index` pairs exactly. The no-answer false-positive rate is the share of
+  unanswerable questions that returned any result; it is **not** a calibrated abstention measure.
+  The report also includes MRR and p50/p95 latency. The first cold model load can dominate latency,
+  so warm the models before comparing steady-state runs.
 - Have a Claude Code session read the target document directly and write the question. **No title
   words allowed** — reusing words from the filename or title lets BM25 match for free and destroys
   discriminative power. The question needs to paraphrase the content so differences between modes
@@ -432,4 +468,3 @@ uv run pkb eval --gold path/to/gold.jsonl
 - `data/.eval/` is automatically covered by existing rules without extra config: folders starting
   with `.` are excluded from ingestion, so the gold set never mixes into the search corpus, and
   `data/` is gitignored so it's never committed.
-```

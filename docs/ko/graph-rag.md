@@ -4,14 +4,14 @@
 
 **목적**: *"내 자료 전체의 개념이 어떻게 연결돼 있나"* 수준의 질문에 답한다. 기존 RRF+리랭커 검색이 잘 못하는 영역을 **보완**한다 — 대체가 아니다.
 
-**핵심 설계**: 개념 레이어는 100% Claude Code 셀프추출이다 — API 호출도 LLM 비용도 없다. Claude Code가 `graph_list_chunks`로 청크를 읽고, 스스로 개념/관계를 추출해 `graph_store_concepts`로 SQLite에 저장한다. `graph_explain`, `graph_path`, `graph_query`, `graph_affected`는 SQLite 그래프를 직접 조회하고, 필요하면 `graph_map`이 사람이 읽는 오프라인 HTML 지도를 만든다.
+**핵심 설계**: 추출은 명시적으로 실행한다. Claude Code가 `graph_list_chunks`로 청크를 읽고 개념/관계를 추출해 `graph_store_concepts`로 저장하거나, `pkb graph rebuild-evidence-local`이 로컬 Ollama 모델로 같은 pending 루프를 실행한다. `graph_explain`, `graph_path`, `graph_query`, `graph_affected`는 SQLite를 직접 조회하고 `graph_map`은 오프라인 HTML 지도를 만든다.
 
 | | 기존 (ES + RRF + 리랭커) | 그래프 RAG |
 |---|---|---|
 | 잘하는 것 | "DI란?", "BM25 공식은?" 같은 **구체 질의** | "DI·IoC·Bean·Container가 어떻게 얽혀?" 같은 **관계/전역 질의** |
 | 데이터 단위 | 청크 (500토큰) | 개념(entity) + 관계(relation) |
 | 응답 재료 | 본문 청크 | SQLite 개념·관계·큐레이션 산문·출처 근거 |
-| 빌드 시점 | 인제스트 즉시 | MCP `graph_list_chunks`/`graph_store_concepts`로 명시 실행 |
+| 빌드 시점 | 인제스트 즉시 | 명시적 MCP 추출 또는 로컬 Ollama 재구축 |
 
 **안 하는 것**: 자동 전체 그래프 빌드(opt-in만), Neo4j 등 풀 그래프 DB, GNN 임베딩, 대화 히스토리 기반 자동 업데이트.
 
@@ -32,24 +32,25 @@
 | `concept_edge_evidence` | 관계를 추출한 `doc_id`/`chunk_index`별 근거 |
 | `concept_mentions` | 개념이 등장한 `doc_id`/`chunk_index` |
 | `concept_curation` | 개념 큐레이션(real/vocab) + 증류 산문 |
-| `extracted_chunks` | 추출 완료 마커 `(doc_id, chunk_index)` → `content_hash` |
+| `extracted_chunks` | 추출 완료 마커 `(doc_id, chunk_index)` → `content_hash`, `input_hash` |
 | `graph_meta` | key/value 마커 — 1회성 스키마 마이그레이션과 `edge_evidence_rebuild` staging 플래그 |
 
-증분 추출은 `extracted_chunks`가 기준이다. 청크의 현재 `content_hash`가 그 인덱스의 마커와
-다르면(= 내용 변경 또는 다른 인덱스로 이동) pending이 되어 재추출되고, 재추출은 **그 청크의
-멘션과 관계 evidence를 교체**한다 — 개정된 청크에서 사라진 개념·관계는 남지 않는다. `chunk_index`가 NULL인
-행은 해시로만 기록된 구마커로, 해당 청크 내용이 바뀔 때까지만 fallback으로 인정된다.
+증분 추출은 `extracted_chunks`가 기준이다. 현재 ES 청크와 마커의 두 해시 중 하나라도 다르면
+pending이 된다. `content_hash`는 본문을, `input_hash`는 본문에 더해 `doc_id`, `chunk_index`,
+제목, 절 경로, 카테고리를 추적하므로 출처 메타데이터 변경도 재추출 대상이다. 재추출은
+**그 청크의 멘션과 관계 evidence를 교체**한다. `input_hash`가 없는 기존 마커(`chunk_index`가
+NULL인 구마커 포함)와 그래프 데이터는 보존하지만, 현재 입력으로 재추출하기 전까지 pending이다.
 엣지 `weight`/`evidence_count`는 `concept_edge_evidence`의 실측 행 수에서 계산하므로 같은 청크를
 재호출해도 부풀지 않는다. 문서 삭제·청크 이동·내용 변경 시 해당 evidence도 함께 정리된다.
 
 스키마 정의는 `src/pkb/graph/schema.py`, CRUD는 `src/pkb/graph/store.py`.
 
 ### 개념 정규화 (dedup)
-1. **Slug 일치**: `dependency injection` == `Dependency Injection`
-2. **Alias 일치**: "DI" → 기존 "Dependency Injection" concept에 매핑
-3. **임베딩 유사도** (≥ `GRAPH_DEDUP_THRESHOLD`, 기본 0.88): 기존 개념과 의미 매칭 → merge
-4. 새 개념이면 insert, 기존이면 alias 추가 (`mention_count`는 `concept_mentions` 실측치로
-   재계산 — 같은 청크를 재추출해도 부풀지 않는다)
+추출 시 같은 카테고리/namespace 안에서 정규화된 slug가 일치하면 기존 개념을 재사용한다
+(`dependency injection` == `Dependency Injection`). 제안된 별칭은 기록하되 충돌은 보고하고,
+자동 추출에서는 약어·동음어 오병합을 막으려고 별칭·임베딩 유사도 매칭을 사용하지 않는다.
+남은 중복은 검토 후 명시적으로 병합한다. `mention_count`는 `concept_mentions` 실측치로
+재계산해 같은 청크를 재추출해도 부풀지 않는다.
 
 dedup을 통과해 이미 별도 노드로 쪼개진 중복(표기 변형 등)은 `store.merge_concepts(conn,
 winner_slug, loser_slugs)`로 사후 병합한다 — 엣지·mention·별칭·산문을 승자로 승계하고
@@ -72,14 +73,19 @@ loser 행은 같은 SQLite 트랜잭션에서 삭제한다. 주의: "MCP Server"
 ## 파이프라인: 셀프추출 → 저장 → 네이티브 조회
 
 ### 1. `graph_list_chunks(category|doc_id, offset, limit, pending_only)`
-ES 청크를 페이지 단위 JSON으로 반환. `pending_only=True`면 미추출·내용 변경 청크만 반환한다(증분 추출). Claude Code가 이 결과를 직접 읽고 아래 규칙으로 개념/관계를 추출한다. 추출 전 `graph_list_concepts`로 기존 어휘를 확인해 겹치는 개념은 기존 name/slug를 재사용한다.
+ES 청크를 `content_hash`와 `input_hash`를 포함한 페이지 단위 JSON으로 반환한다.
+`pending_only=True`면 미추출·입력 변경 청크만 반환한다. Claude Code가 이 결과를 직접 읽고
+아래 규칙으로 개념/관계를 추출한다. 추출 전 `graph_list_concepts`로 기존 어휘를 확인해
+겹치는 개념은 기존 name/slug를 재사용한다.
 
 - 개념: 구체적 명사구 (예: "Dependency Injection", "BM25"). 일반 단어/인명/지명 제외
 - 관계 타입: `related_to` | `part_of` | `prerequisite_of` | `example_of` (필요 시 자유 라벨 허용)
 - 청크당 개념 8개·관계 12개 이내
 
 ### 2. `graph_store_concepts(items_json)`
-추출한 개념/관계 JSON을 SQLite에 upsert (정규화·alias·mention·edge 포함).
+각 item은 개념이 없어도 목록에서 받은 `content_hash`와 `input_hash`를 그대로 전달한다.
+저장 시 현재 ES 청크와 두 해시를 비교한 뒤 SQLite를 변경한다. 해시 누락·청크 삭제·입력
+변경 항목은 개별 거부하고 보고하며, 같은 배치의 유효 항목은 저장한다.
 
 ### 3. 조회와 열람
 단일 개념은 `graph_explain`, 최단 연결은 `graph_path`, 자연어 관계 질문은 의미 시드 기반

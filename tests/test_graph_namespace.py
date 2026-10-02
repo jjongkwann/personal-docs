@@ -133,6 +133,7 @@ def test_store_concepts_reports_scoped_alias_conflict(monkeypatch, tmp_path):
     db_path = str(tmp_path / "graph.sqlite")
     monkeypatch.setattr("pkb.config.settings.graph_db_path", db_path)
     monkeypatch.setattr("pkb.embeddings.embed", lambda texts: [[0.0] for _ in texts])
+    monkeypatch.setattr("pkb.graph.services._chunk_versions", lambda keys: {key: ("h", "ih") for key in keys})
 
     class _NoES:
         def mget(self, **kwargs):
@@ -144,6 +145,8 @@ def test_store_concepts_reports_scoped_alias_conflict(monkeypatch, tmp_path):
             {
                 "doc_id": "data/ai/agent.md",
                 "chunk_index": 0,
+                "content_hash": "h",
+                "input_hash": "ih",
                 "category": "ai",
                 "concepts": [{"name": "ReAct", "aliases": ["React"]}],
                 "relations": [],
@@ -151,6 +154,8 @@ def test_store_concepts_reports_scoped_alias_conflict(monkeypatch, tmp_path):
             {
                 "doc_id": "data/frontend/react.md",
                 "chunk_index": 0,
+                "content_hash": "h",
+                "input_hash": "ih",
                 "category": "frontend",
                 "concepts": [{"name": "React", "aliases": ["ReAct"]}],
                 "relations": [],

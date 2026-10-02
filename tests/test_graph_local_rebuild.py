@@ -22,6 +22,8 @@ def _chunk():
     return {
         "doc_id": "data/rag/x.md",
         "chunk_index": 0,
+        "content_hash": "h",
+        "input_hash": "ih",
         "category": "rag",
         "title": "RRF",
         "section_path": "검색",
@@ -55,6 +57,8 @@ def test_storage_payload_uses_trusted_chunk_metadata():
     assert item["category"] == "rag"
     assert item["title"] == "RRF"
     assert item["section_path"] == "검색"
+    assert item["content_hash"] == "h"
+    assert item["input_hash"] == "ih"
     assert item["concepts"][0]["name"] == "RRF"
     assert item["relations"] == []  # concepts에 없는 관계 끝점은 저장하지 않는다
 

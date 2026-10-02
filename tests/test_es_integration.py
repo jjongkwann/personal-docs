@@ -9,7 +9,7 @@ import pytest
 from elasticsearch import Elasticsearch
 
 from pkb.config import settings
-from pkb.retrieve import _attach_neighbors, _rrf_search
+from pkb.retrieve import _attach_neighbors, _bm25_query, _rrf_search
 from pkb.store import (
     add_chunks,
     create_index,
@@ -66,6 +66,16 @@ def test_real_es_accepts_hybrid_dsl_and_neighbor_msearch(monkeypatch):
         results = _rrf_search(es, "BM25", bm25_vec, "integration", candidate_k=5)
         assert results
         assert results[0]["doc_id"] == "data/integration/bm25.md"
+
+        # Lifecycle/category filters must not turn an unmatched lexical query into match-all.
+        assert es.count(index=index_name, query=_bm25_query("absentexacttoken", "integration"))["count"] == 0
+        es.update(index=index_name, id="data/integration/other.md_0",
+                  doc={"aliases": ["metadata-only-alias"]}, refresh=True)
+        lexical = es.search(index=index_name, query=_bm25_query("metadata-only-alias", "integration"))
+        assert [hit["_source"]["doc_id"] for hit in lexical["hits"]["hits"]] == ["data/integration/other.md"]
+        lexical_only = _rrf_search(es, "metadata-only-alias", bm25_vec, "integration",
+                                   candidate_k=5, fusion="linear", lexical_weight=1.0)
+        assert [hit["doc_id"] for hit in lexical_only] == ["data/integration/other.md"]
 
         hits = [{"doc_id": "data/integration/bm25.md", "chunk_index": 0}]
         expanded = _attach_neighbors(es, hits, window=1)

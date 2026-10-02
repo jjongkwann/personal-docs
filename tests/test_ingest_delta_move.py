@@ -107,6 +107,59 @@ def test_front_insert_moves_shifted_chunks_without_reembedding(monkeypatch):
     assert indexed[0]["embedding"] == [3.0]  # "new" 신규 임베딩
 
 
+def test_replaced_and_moved_chunks_keep_document_metadata(monkeypatch):
+    old = [_chunk(0, "aaa"), _chunk(1, "bbb")]
+    for chunk in old:
+        chunk.update(
+            canonical_id="topic-1", aliases=["alias"], status="draft",
+            archived_at="2026-07-05T00:00:00+00:00", archive_reason="old",
+        )
+    new = [_chunk(0, "new"), _chunk(1, "aaa")]
+    for chunk in new:
+        chunk["status"] = "active"  # source value wins over ES
+    new[0]["section_path"] = "new-section"
+    new[1]["canonical_id"] = None  # explicit contract null clears a moved slot
+    new[0]["canonical_id"] = None
+
+    es = MagicMock()
+    es.search.return_value = {"hits": {"hits": [_existing_hit(c) for c in old]}}
+    es.mget.return_value = {
+        "docs": [{"found": True, "_source": {"chunk_index": 0, "embedding": [10.0]}}]
+    }
+    es.bulk.return_value = {"errors": False}
+    embed_calls: list[list[str]] = []
+    _setup(monkeypatch, es, new, embed_calls)
+
+    stats = ingest_files([Path("dummy.md")], Path("."))
+
+    assert stats["moved"] == 1
+    assert embed_calls == [["new"]]
+    ops = es.bulk.call_args.kwargs["operations"]
+    indexed = {ops[i + 1]["chunk_index"]: ops[i + 1] for i in range(0, len(ops), 2)}
+    for chunk in indexed.values():
+        assert chunk["canonical_id"] is None
+        assert chunk["aliases"] == ["alias"]
+        assert chunk["status"] == "active"
+        assert chunk["archived_at"] == "2026-07-05T00:00:00+00:00"
+        assert chunk["archive_reason"] == "old"
+    assert indexed[0]["content"] == "new"
+    assert indexed[0]["section_path"] == "new-section"
+    assert indexed[1]["embedding"] == [10.0]
+
+
+def test_conflicting_stored_document_metadata_stops_ingest(monkeypatch):
+    old = [_chunk(0, "aaa"), _chunk(1, "bbb")]
+    old[0]["canonical_id"] = "topic-1"
+    old[1]["canonical_id"] = "topic-2"
+    es = MagicMock()
+    es.search.return_value = {"hits": {"hits": [_existing_hit(c) for c in old]}}
+    _setup(monkeypatch, es, [_chunk(0, "new")], [])
+
+    with pytest.raises(ValueError, match="conflicting canonical_id"):
+        ingest_files([Path("dummy.md")], Path("."))
+    es.bulk.assert_not_called()
+
+
 def test_front_insert_realigns_concept_mentions(monkeypatch, tmp_path):
     """시프트된 청크의 개념 멘션이 새 슬롯을 따라가는지 (인제스트→그래프 배선).
 

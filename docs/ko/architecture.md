@@ -50,7 +50,7 @@ PKB는 **두 가지 일**을 합니다.
 [인제스트]  src/pkb/ingest.py
   data/의 문서(md/pdf/docx/…)
     → frontmatter 파싱 → 헤딩 계층 청킹(+ 초소형 청크 병합)
-    → content_hash 델타 비교 → 변경분만 임베딩
+    → embedding_fingerprint(모델·전처리·입력) 비교 → 변경분만 임베딩
     → Elasticsearch bulk 적용(index/update/delete)
 
 [그래프]  src/pkb/graph/
@@ -157,7 +157,8 @@ Docker 컨테이너 `pkb-es`로 실행되며, 기본 인덱스는 `pkb_documents
     "tags": ["rag", "search"],
     "date_modified": "2026-04-16",
     "language": "ko",
-    "content_hash": "sha256(content)",   // 델타 임베딩 비교용
+    "content_hash": "sha256(content)",   # 그래프 추출용 본문 동일성
+    "embedding_fingerprint": "sha256(모델, 리비전, 전처리, 임베딩 입력)",
     # 아래 lifecycle 필드는 설정된 경우에만 존재 — 기본은 null이 아니라 "필드 자체가 없음"
     # "expires_at": "...",     frontmatter에 설정했을 때만
     # "archived_at": "...",    archive_document 호출 시에만
@@ -170,19 +171,22 @@ Docker 컨테이너 `pkb-es`로 실행되며, 기본 인덱스는 `pkb_documents
 - YAML frontmatter가 있으면 `title`, `tags`, `expires_at` 등 메타데이터를 파싱
 - H1~H3 헤딩 경로를 `section_path`로 저장 (없으면 파일 경로에서 파생)
 - 섹션 내부는 기본 500토큰, 100토큰 오버랩으로 분할 (`CHUNK_SIZE`/`CHUNK_OVERLAP`)
-- 80자 미만(`MIN_CHUNK_CHARS`) 초소형 청크는 인접 청크에 병합 — 헤딩·링크만 있는 저정보
-  청크가 리랭크 상위를 점령하는 것을 방지 (`ingest.py:_merge_tiny_chunks`)
+- 80자 미만(`MIN_CHUNK_CHARS`) 초소형 청크는 **같은 절**의 인접 청크와 합친 결과가
+  토큰 제한 안에 있을 때만 병합한다 (`ingest.py:_merge_tiny_chunks`).
+- 마크다운 표와 펜스 코드 블록은 제한 안에 들면 함께 보존한다. 큰 표는 헤더를,
+  큰 코드 블록은 펜스를 조각마다 반복하며, 한 행·한 줄 자체가 너무 크면 분할한다.
 
 ### 델타 임베딩
 
-문서를 다시 인제스트할 때 변경된 청크만 재임베딩합니다. 각 청크의 `content_hash`(SHA-256)를
-`chunk_index` 단위로 기존 청크와 비교합니다(`ingest.py:ingest_files`).
+문서를 다시 인제스트할 때 각 `chunk_index`의 `embedding_fingerprint`를 비교합니다. 이 값에는
+모델 이름, 선택적 고정 리비전, 전처리 버전, 실제 임베딩 입력이 들어갑니다. `content_hash`는
+그래프 추출용 본문 동일성과 청크 이동 판정에 사용합니다(`ingest.py:ingest_files`).
 
 | 비교 결과 | 동작 | 임베딩 비용 |
 |-----------|------|------------|
-| hash 동일 | 재사용 | 0 |
-| hash 동일 + 메타데이터만 차이 | partial update | 0 |
-| 슬롯 불일치, 같은 hash가 문서 내 다른 슬롯에 존재 | 임베딩 복사(moved) | 0 |
+| fingerprint 동일 | 재사용 | 0 |
+| fingerprint 동일 + 다른 메타데이터만 차이 | partial update | 0 |
+| 슬롯 불일치, 같은 fingerprint가 문서 내 다른 슬롯에 존재 | 임베딩 복사(moved) | 0 |
 | 그 외 신규/변경 | 재임베딩 + index | 변경분만 |
 | 새 청크에서 사라진 슬롯 | delete | 0 |
 
@@ -195,11 +199,16 @@ Docker 컨테이너 `pkb-es`로 실행되며, 기본 인덱스는 `pkb_documents
 
 1. BM25 검색 — nori 한국어 분석기, `content`/`title`/`section_path` 가중 매치
 2. kNN 검색 — sentence-transformers 임베딩, ES dense_vector(HNSW)
-3. RRF 결합 — 두 후보 집합을 Reciprocal Rank Fusion으로 결합(`RRF_K=60`, 고정 로직)
+3. 기본 RRF 결합(`RRF_K=60`); CLI 비교 실행에서는 linear 결합 선택 가능
 4. CrossEncoder 재순위 — 기본 비활성(`RERANK_ENABLED=false`), 모델 `BAAI/bge-reranker-v2-m3`.
    2026-07 벤치에서 BGE-M3 후보 풀 기준 무재순위(MRR 0.517)가 bge(0.388)·Qwen3-0.6B(0.492)를 앞서 기본 off.
 5. **문서당 최대 2청크 캡**(`MAX_CHUNKS_PER_DOC`) — 한 문서가 상위권을 독점하지 않도록 다양성 확보
 6. 선택: `EXPAND_CONTEXT=N` — 결과마다 전후 N청크를 `neighbors`로 부착
+
+CLI와 MCP는 같은 문맥 렌더러를 사용합니다. 매칭 청크를 먼저, 같은 절의 중복 없는 주변
+청크를 토큰 예산 안에서 출력하고 `doc_id`와 가능한 경우 실제 원본 경로를 함께 표시합니다.
+CLI는 `pkb query --expand N --context-tokens B`, MCP는 `search_knowledge`의
+`expand_context=N`, `max_context_tokens=B`로 지정합니다.
 
 검색 프로필은 `all`(마이그레이션 전 레거시 포함), `curated`(concept/guide/MOC),
 `evidence`(curated+research), `source`(원본) 네 가지입니다. `canonical_id`가 있는 문서는 점수를
@@ -219,15 +228,18 @@ Docker 컨테이너 `pkb-es`로 실행되며, 기본 인덱스는 `pkb_documents
 Graph RAG는 검색을 대체하지 않고 개념 간 관계 질의를 보완합니다. 저장 위치는
 `data/.graph/pkb_graph.sqlite`(`GRAPH_DB_PATH`)이며, 주요 테이블은 `concepts`,
 `concept_aliases`, `documents`, `concept_edges`, `concept_edge_evidence`, `extracted_chunks`,
-`concept_mentions`, `concept_curation`, `graph_meta` 9개가 전체 테이블입니다(`graph/schema.py`).
+`concept_mentions`, `concept_curation`, `concept_alias_conflicts`, `graph_meta` 10개가 전체 테이블입니다(`graph/schema.py`).
 `concept_edges`의 weight/evidence_count는 청크별
 `concept_edge_evidence`에서 집계되어 재추출·문서 삭제에도 정확히 정리됩니다.
 
-빌드 파이프라인(전량 Claude Code 셀프추출, API 호출 없음):
+빌드 파이프라인(Claude Code 추출 또는 선택적 로컬 Ollama 재구축):
 
-1. `graph_list_chunks(category|doc_id, offset, limit)`로 청크를 페이지 단위로 읽음
+1. `graph_list_chunks(category|doc_id, offset, limit, pending_only)`로 청크를 페이지 단위로
+   읽음. 각 청크에 `content_hash`, `input_hash`가 포함됨
 2. Claude Code가 청크 내용에서 개념/관계를 추출
-3. `graph_store_concepts(items_json)`로 SQLite에 저장 (정규화·alias·mention·edge 반영)
+3. 각 item에 두 해시를 그대로 담아 `graph_store_concepts(items_json)`로 저장. 누락·변경된
+   입력은 SQLite 변경 전에 거부하고 유효한 항목만 반영. `input_hash`는 제목·절 경로·
+   카테고리 변경도 추적하며, 이 값이 없는 기존 마커는 그래프 데이터를 보존한 채 pending
 4. `graph_explain`, `graph_path`, `graph_query`, `graph_affected`로 SQLite를 직접 조회 — 반환 엣지마다
    confidence와 제한된 출처 청크 evidence 포함
 5. 시각 탐색이 필요하면 `graph_map`으로 사람이 읽는 오프라인 HTML 지도를 생성

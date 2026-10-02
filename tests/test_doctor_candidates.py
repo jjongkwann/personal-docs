@@ -86,7 +86,7 @@ class _FakeES:
                     }
                 },
             }
-        if kwargs.get("source_includes") == ["doc_id", "chunk_index", "content_hash"]:
+        if {"doc_id", "chunk_index", "content_hash"}.issubset(kwargs.get("source_includes", [])):
             rows = sorted(self._chunk_hashes or [], key=lambda r: (r[0], r[1]))
             after = kwargs.get("search_after")
             if after:
@@ -212,7 +212,10 @@ def test_pending_chunks_query_shape_and_count(doctor_env, monkeypatch, tmp_path)
     monkeypatch.setattr("pkb.config.settings.graph_db_path", db_path)
     init_schema(db_path)
     conn = get_connection(db_path)
-    gstore.record_extraction(conn, "data/rag/x.md", 0, "hash1", "2026-01-01T00:00:00+00:00")
+    from pkb.graph.services import graph_input_hash
+
+    gstore.record_extraction(conn, "data/rag/x.md", 0, "hash1", "2026-01-01T00:00:00+00:00",
+                            input_hash=graph_input_hash({"doc_id": "data/rag/x.md", "chunk_index": 0}))
     conn.execute(  # 레거시 마커 (chunk_index 없이 해시로만 기록된 구데이터)
         "INSERT INTO extracted_chunks (doc_id, content_hash, extracted_at) VALUES (?, ?, ?)",
         ("data/rag/z.md", "hash3", "2026-01-01T00:00:00+00:00"),
@@ -224,7 +227,7 @@ def test_pending_chunks_query_shape_and_count(doctor_env, monkeypatch, tmp_path)
         ("data/rag/x.md", 0, "hash1"),  # 마커와 (인덱스, 해시) 일치 — pending 아님
         ("data/rag/x.md", 1, "hash2"),  # 마커 없음 — pending
         ("data/rag/y.md", 0, None),  # content_hash 없음 — 항상 pending
-        ("data/rag/z.md", 2, "hash3"),  # 레거시 해시 매칭 — 인덱스 달라도 추출 완료로 인정
+        ("data/rag/z.md", 2, "hash3"),  # 레거시 input_hash 없음 — 재검증 pending
     ])
     report = build_health_report(es)
 
@@ -233,9 +236,11 @@ def test_pending_chunks_query_shape_and_count(doctor_env, monkeypatch, tmp_path)
     scans = [
         c
         for c in es.search_calls
-        if c.get("source_includes") == ["doc_id", "chunk_index", "content_hash"]
+        if {"doc_id", "chunk_index", "content_hash", "content", "title", "section_path", "category"}.issubset(
+            c.get("source_includes", [])
+        )
     ]
     assert scans[0]["sort"] == [{"doc_id": "asc"}, {"chunk_index": "asc"}]
     assert scans[-1].get("search_after")  # 첫 페이지 이후 커서로 이어 읽는다
 
-    assert "그래프 미추출 청크: 2 / 4" in report
+    assert "그래프 미추출 청크: 3 / 4" in report

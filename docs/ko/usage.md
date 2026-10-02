@@ -88,11 +88,21 @@ uv run pkb query "Python 프레임워크 경험" --category career --top-k 10
 uv run pkb query "RAG 평가" --expand 1           # 전후 1청크를 neighbors로 부착
 uv run pkb query "BM25" --rerank                 # 이번 실행만 CrossEncoder 재순위 강제
 uv run pkb query "BM25" --no-obsidian            # 코퍼스만, obsidian/* 문서 제외
+uv run pkb query "BM25" --context-tokens 2000 --candidate-k 50
+uv run pkb query "BM25" --fusion linear --lexical-weight 0.5 --rerank --rerank-context
 ```
 
 `--top-k` 기본값은 `DEFAULT_TOP_K`(5)이고, `--rerank`/`--no-rerank`와 `--expand`는 생략 시 각각
 `RERANK_ENABLED`·`EXPAND_CONTEXT` 설정값을 따릅니다. **부정형이 비대칭이라는 점에 주의** — 플래그
 쌍은 `--no-include-obsidian`이 아니라 `--include-obsidian` / `--no-obsidian`입니다.
+`--candidate-k`는 BM25·kNN 각각의 후보 수입니다. `--fusion linear`는 채널별 점수를 정규화한 뒤
+`--lexical-weight`(0~1)로 가중합합니다. 기본 결합은 RRF입니다. `--rerank-context`는 재순위가
+켜졌을 때 제목·섹션을 모델 입력에 더합니다. `--context-tokens`는 출처와 주변 문맥을 포함한
+출력 토큰 수를 제한합니다. 정본 점수 보정 `--canonical-boost`는 0 이상 1 미만입니다.
+
+재현 가능한 실험에는 `EMBEDDING_REVISION`·`RERANK_REVISION`에 모델 커밋을 지정하세요.
+임베딩 revision을 바꾸면 fingerprint가 달라져 다음 sync에서 해당 벡터를 다시 계산합니다.
+설정하지 않으면 기존 fingerprint를 유지합니다.
 
 ## 문서 관리
 
@@ -402,13 +412,28 @@ tail data/.logs/search.jsonl | jq .
 
 ## 검색 품질 평가 (eval)
 
-골드셋(질문 → 정답 문서)을 4개 검색 모드(bm25 단독 / knn 단독 / rrf / rrf+rerank)로 돌려
-recall@1/3/5/10과 MRR을 모드별로 비교합니다. 골드 문서가 top10 밖이면(miss) 실제 1위
-doc_id를 함께 리포트합니다.
+v2 골드셋을 실제 `hybrid_search` 경로에 넣어 평가합니다. 질문 하나에 관련 문서·정확한 청크를
+여러 개 지정하거나 답할 수 없는 질문으로 표시할 수 있습니다. 이름별 설정을 같은 `--top-k`
+기준에서 비교합니다.
 
 ```bash
 uv run pkb eval                            # 기본: <DATA_ROOT>/.eval/gold.jsonl
-uv run pkb eval --gold path/to/gold.jsonl
+uv run pkb eval --gold legacy.jsonl --migrate-to new-v2.jsonl
+uv run pkb eval --gold new-v2.jsonl --configurations file.json --output new-report.json --top-k 5
+```
+
+마이그레이션은 원본을 보존하고 새 파일을 만듭니다. 기존 `{"query":"...","doc_id":"..."}` 행은
+문서 정답 하나를 가진 v2 행으로 바뀝니다. 필요한 정확한 청크나 다른 관련 출처는 검토 후 추가하세요.
+`--output`도 새 파일 경로를 요구하며 질문별 결과와 실행 메타데이터를 저장합니다.
+
+`file.json`은 설정 이름과 `hybrid_search` 옵션을 매핑합니다.
+
+```json
+{
+  "baseline": {},
+  "linear": {"fusion": "linear", "lexical_weight": 0.5},
+  "rerank": {"rerank": true, "rerank_context": true}
+}
 ```
 
 ### 골드셋 작성 지침
@@ -416,9 +441,18 @@ uv run pkb eval --gold path/to/gold.jsonl
 `data/.eval/gold.jsonl` — 라인당 한 항목:
 
 ```jsonl
-{"query": "역색인에서 단어 빈도와 문서 길이를 함께 반영하는 점수식은?", "doc_id": "data/study/rag/1.2.10_BM25.md"}
+{"version":2,"query":"BM25는 검색어의 점수를 어떻게 계산하나?","query_type":"paraphrase","answerable":true,"relevant":[{"doc_id":"data/study/rag/bm25.md","chunk_index":2},{"doc_id":"data/study/rag/bm25.md","chunk_index":3},{"canonical_id":"bm25-reference"}]}
+{"version":2,"query":"존재하지 않는 프로젝트의 출시일은?","query_type":"no_answer","answerable":false,"relevant":[]}
 ```
 
+- `query_type`별 집계가 보고서에 나옵니다. `variants`는 선택적 쿼리 변형 목록이며, 지정된 행에만
+  적용됩니다. 관련 항목에는 `doc_id` 또는 `canonical_id`와 선택적 양수 `relevance`를 넣습니다.
+  `chunk_index`는 `doc_id`와 함께 써야 하며, 같은 문서의 서로 다른 청크도 별도로 표시할 수 있습니다.
+- 최종 recall과 nDCG는 관련 문서를 한 번만 셉니다. 근거 recall은 표시한 `doc_id` +
+  `chunk_index` 쌍을 정확히 확인합니다. 답 없음 오탐률은 답할 수 없는 질문에 결과가 하나라도
+  나온 비율이며, 보정된 답변 보류 능력의 척도는 아닙니다. 보고서에는 MRR과 p50/p95 지연도
+  포함됩니다. 첫 실행은 모델 적재 시간이 지연을 좌우할 수 있으므로 정상 실행 지연을 비교할 때는
+  모델을 예열하세요.
 - Claude Code 세션이 대상 문서를 직접 읽고 질문을 작성하게 하세요. 이때 **제목 단어 금지** —
   파일명·제목의 단어를 그대로 쓰면 BM25가 공짜로 맞혀 변별력이 사라집니다. 내용을 패러프레이즈한
   질문이어야 모드 간 차이가 드러납니다.

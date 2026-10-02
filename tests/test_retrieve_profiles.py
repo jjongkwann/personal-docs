@@ -75,3 +75,20 @@ def test_canonical_boost_reorders_only_metadata_bearing_hits():
     ]
     assert apply_canonical_boost(candidates, 0.2)[0]["doc_id"] == "canonical"
     assert candidates[0]["score"] == pytest.approx(1.08)
+
+
+def test_canonical_boost_improves_negative_rerank_score_without_overwriting_raw_score():
+    candidates = [
+        {"doc_id": "legacy", "score": -0.9},
+        {"doc_id": "canonical", "canonical_id": "topic-1", "score": -1.0, "rerank_score": -1.0},
+    ]
+    apply_canonical_boost(candidates, 0.2)
+    assert candidates[0]["doc_id"] == "canonical"
+    assert candidates[0]["score"] == pytest.approx(-0.8)
+    assert candidates[0]["rerank_score"] == -1.0
+
+
+@pytest.mark.parametrize("boost", [1.0, 2.0, float("nan"), float("inf"), -0.1])
+def test_canonical_boost_rejects_values_that_reverse_negative_score_order(boost):
+    with pytest.raises(ValueError, match="canonical_boost"):
+        apply_canonical_boost([], boost)

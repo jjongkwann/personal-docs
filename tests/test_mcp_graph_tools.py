@@ -142,6 +142,7 @@ def test_graph_merge_reports_summary_and_skipped(graph_db):
 
 
 def test_graph_store_concepts_reports_unresolved_relations(graph_db, monkeypatch):
+    monkeypatch.setattr("pkb.graph.services._chunk_versions", lambda keys: {key: ("h", "ih") for key in keys})
     monkeypatch.setattr(
         "pkb.embeddings.embed", lambda texts: [[0.0, 0.0, 0.0] for _ in texts]
     )
@@ -157,6 +158,8 @@ def test_graph_store_concepts_reports_unresolved_relations(graph_db, monkeypatch
             {
                 "doc_id": "data/study/x.md",
                 "chunk_index": 0,
+                "content_hash": "h",
+                "input_hash": "ih",
                 "category": "study",
                 "title": "X",
                 "concepts": [{"name": "BM25", "description": "랭킹 함수"}],
@@ -180,6 +183,7 @@ def test_relations_between_existing_concepts_survive_empty_concepts(graph_db, mo
     monkeypatch.setattr(
         "pkb.embeddings.embed", lambda texts: [[0.0, 0.0, 0.0] for _ in texts]
     )
+    monkeypatch.setattr("pkb.graph.services._chunk_versions", lambda keys: {key: ("h", "ih") for key in keys})
 
     class _NoES:
         def mget(self, **kwargs):
@@ -197,6 +201,8 @@ def test_relations_between_existing_concepts_survive_empty_concepts(graph_db, mo
             {
                 "doc_id": "data/study/x.md",
                 "chunk_index": 0,
+                "content_hash": "h",
+                "input_hash": "ih",
                 "category": "study",
                 "title": "X",
                 "concepts": [],  # 신규 개념 없음 — 관계만 있는 청크

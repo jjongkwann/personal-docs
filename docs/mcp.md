@@ -198,6 +198,11 @@ For each client, verify the connection with `claude` → `/mcp`, `codex mcp list
 | `restore_document` | Restores an archived document so it's searchable again. If the frontmatter has archive metadata, it's removed before re-ingesting |
 | `doctor` | Checks ES connectivity, indices, chunk counts, configuration, and concept graph stats, and lists candidate actions (expired-but-not-archived documents, purge candidates, orphan concepts) |
 
+`search_knowledge(expand_context=N)` attaches up to N neighboring chunks (0–4; omitted uses
+`EXPAND_CONTEXT`). `max_context_tokens` (256–32000, default 4000) caps the rendered result,
+including source labels, concept vocabulary, hit bodies, and neighboring context. A larger
+`top_k` or expansion window does not bypass that output budget.
+
 ### Graph RAG
 
 | Tool | Description |
@@ -214,6 +219,11 @@ For each client, verify the connection with `claude` → `/mcp`, `codex mcp list
 
 Graph RAG's MCP-first workflow: read chunks with `graph_list_chunks`, have Claude Code extract concepts and relations directly, and store them with `graph_store_concepts`. After storing, label real/vocab with `graph_curate` and merge notation variants with `graph_merge`. Query SQLite directly with `graph_explain`/`graph_path`/`graph_query`/`graph_affected`, or render an offline HTML view with `graph_map`.
 
+Copy each chunk's `content_hash` and `input_hash` from `graph_list_chunks` unchanged into its
+`graph_store_concepts` item, including items with `concepts: []`. The input hash covers the source
+identity, chunk position, content, title, section, and category used for extraction. A changed
+input makes the chunk pending again; storing an older pair is rejected, so fetch and extract it again.
+
 ### Parameter Reference
 
 Exact signatures as registered in `src/pkb/mcp_server.py`:
@@ -221,7 +231,8 @@ Exact signatures as registered in `src/pkb/mcp_server.py`:
 ```python
 search_knowledge(query, category="", top_k=5, include_archived=False,
                  include_obsidian=True, query_variants=[], profile="all",
-                 canonical_group=True, canonical_boost=0.15)
+                 canonical_group=True, canonical_boost=0.15,
+                 expand_context=None, max_context_tokens=4000)
 read_file(file_path)
 patch_file(file_path, old, new, expected_hash="", ingest=False, dry_run=False, strict_policy=True)
 write_file(file_path, content, ingest=False, dry_run=False,

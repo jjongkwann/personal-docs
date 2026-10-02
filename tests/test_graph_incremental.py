@@ -7,6 +7,7 @@ import json
 import pytest
 
 from pkb.graph.schema import get_connection, init_schema
+from pkb.graph.services import graph_input_hash, scan_pending_chunks
 
 # MCPServer @mcp.tool() 데코레이터 호환: 함수가 래핑돼 있으면 .fn 속성으로 접근.
 from pkb.mcp_server import graph_list_chunks as _graph_list_chunks
@@ -14,6 +15,19 @@ from pkb.mcp_server import graph_store_concepts as _graph_store_concepts
 
 graph_list_chunks = getattr(_graph_list_chunks, "fn", _graph_list_chunks)
 graph_store_concepts = getattr(_graph_store_concepts, "fn", _graph_store_concepts)
+
+
+def _store(items_json: str) -> str:
+    from pkb.store import get_client
+
+    data = json.loads(items_json)
+    sources = {(c["doc_id"], c["chunk_index"]): c for c in get_client().chunks}
+    for item in data["items"]:
+        source = sources.get((item["doc_id"], item["chunk_index"]))
+        if source:
+            item["content_hash"] = source.get("content_hash")
+            item["input_hash"] = graph_input_hash(source)
+    return graph_store_concepts(json.dumps(data, ensure_ascii=False))
 
 
 class FakeES:
@@ -79,7 +93,7 @@ def _store_both_chunks():
              "concepts": []},
         ]
     }
-    return graph_store_concepts(json.dumps(items, ensure_ascii=False))
+    return _store(json.dumps(items, ensure_ascii=False))
 
 
 def _extracted_rows(db_path: str) -> set[tuple[str, str]]:
@@ -155,10 +169,10 @@ def test_legacy_chunk_without_hash_always_pending(graph_db, fake_es):
     assert [c["chunk_index"] for c in result["chunks"]] == [1]
 
 
-def test_legacy_marker_db_migrates_without_forcing_reextraction(tmp_path, monkeypatch):
+def test_legacy_marker_db_migrates_without_losing_rows(tmp_path, monkeypatch):
     """구 스키마((doc_id, content_hash) PK) DB → chunk_index=NULL 레거시 행으로 이관.
 
-    통째로 버리면 이미 구축된 그래프 전량이 pending으로 돌아가 재추출을 강요한다.
+    기존 마커를 보존하지만 input_hash가 없어 재추출 대상으로 다시 표시한다.
     """
     import sqlite3
 
@@ -182,15 +196,18 @@ def test_legacy_marker_db_migrates_without_forcing_reextraction(tmp_path, monkey
         by_idx, legacy = gstore.extracted_markers(conn)
         assert by_idx == {}
         assert legacy == {("data/study/x.md", "h0")}
-        # 레거시 해시가 일치하면 추출 완료 — 재추출 강요 없음
-        src = {"doc_id": "data/study/x.md", "chunk_index": 0, "content_hash": "h0"}
-        assert not gstore.is_pending(src, by_idx, legacy)
-        # 내용이 바뀌면 pending → 재추출 시 chunk_index 키 마커로 승격되고 레거시 행은 정리
-        assert gstore.is_pending({**src, "content_hash": "h0-v2"}, by_idx, legacy)
-        gstore.record_extraction(conn, "data/study/x.md", 0, "h0", "2026-02-01T00:00:00+00:00")
+        assert gstore.extracted_input_markers(conn) == {}
+        pending, total = scan_pending_chunks(conn=conn, es=FakeES([{
+            "doc_id": "data/study/x.md", "chunk_index": 0, "content_hash": "h0",
+            "content": "본문", "title": "X", "category": "study", "section_path": "",
+        }]))
+        assert total == len(pending) == 1
+        # 재추출 시 chunk_index 키 마커로 승격되고 레거시 행은 정리
+        gstore.record_extraction(conn, "data/study/x.md", 0, "h0", "2026-02-01T00:00:00+00:00", "input-h0")
         by_idx, legacy = gstore.extracted_markers(conn)
         assert by_idx == {("data/study/x.md", 0): "h0"}
         assert legacy == set()
+        assert gstore.extracted_input_markers(conn) == {("data/study/x.md", 0): "input-h0"}
     finally:
         conn.close()
 
@@ -216,7 +233,7 @@ def test_reextraction_replaces_mentions_of_chunk(graph_db, fake_es):
 
     _store_both_chunks()  # chunk0 → BM25
     fake_es.chunks[0]["content_hash"] = "h0-v2"
-    graph_store_concepts(json.dumps({
+    _store(json.dumps({
         "items": [
             {"doc_id": "data/study/x.md", "chunk_index": 0, "category": "study", "title": "X",
              "concepts": [{"name": "RRF", "description": "순위 융합"}]},
@@ -253,8 +270,8 @@ def test_reextraction_replaces_edge_evidence_without_inflation(graph_db, fake_es
             }
         ]
     }
-    graph_store_concepts(json.dumps(first, ensure_ascii=False))
-    graph_store_concepts(json.dumps(first, ensure_ascii=False))
+    _store(json.dumps(first, ensure_ascii=False))
+    _store(json.dumps(first, ensure_ascii=False))
 
     conn = get_connection(graph_db)
     bm25 = gstore.find_concept_by_slug(conn, "bm25")
@@ -276,7 +293,7 @@ def test_reextraction_replaces_edge_evidence_without_inflation(graph_db, fake_es
             }
         ]
     }
-    graph_store_concepts(json.dumps(second, ensure_ascii=False))
+    _store(json.dumps(second, ensure_ascii=False))
 
     conn = get_connection(graph_db)
     try:
@@ -298,7 +315,7 @@ def test_partial_recall_preserves_existing_mentions(graph_db, fake_es):
     from pkb.graph import store as gstore
 
     _store_both_chunks()  # chunk0 → BM25
-    graph_store_concepts(json.dumps({  # 같은 청크에 누락 개념만 추가 (해시 동일)
+    _store(json.dumps({  # 같은 청크에 누락 개념만 추가 (해시 동일)
         "items": [
             {"doc_id": "data/study/x.md", "chunk_index": 0, "category": "study", "title": "X",
              "concepts": [{"name": "RRF", "description": "순위 융합"}],
@@ -347,8 +364,75 @@ def test_pending_only_loop_with_marking_returns_each_chunk_exactly_once(graph_db
                 for c in result["chunks"]
             ]
         }
-        graph_store_concepts(json.dumps(items, ensure_ascii=False))
+        _store(json.dumps(items, ensure_ascii=False))
     else:
         pytest.fail("pending이 0으로 수렴하지 않음")
 
     assert seen == [0, 1, 2, 3, 4]  # 누락도 중복도 없음
+
+
+def test_stale_item_rejected_without_touching_existing_graph_or_valid_sibling(graph_db, fake_es):
+    _store_both_chunks()
+    old_source = dict(fake_es.chunks[0])
+    fake_es.chunks[0]["content"] = "개정 본문"
+    fake_es.chunks[0]["content_hash"] = "h0-v2"
+    valid_source = fake_es.chunks[1]
+    result = graph_store_concepts(json.dumps({"items": [
+        {"doc_id": old_source["doc_id"], "chunk_index": 0,
+         "content_hash": old_source["content_hash"],
+         "input_hash": graph_input_hash(old_source),
+         "concepts": [{"name": "Stale"}]},
+        {"doc_id": valid_source["doc_id"], "chunk_index": 1,
+         "content_hash": valid_source["content_hash"],
+         "input_hash": graph_input_hash(valid_source), "concepts": []},
+    ]}, ensure_ascii=False))
+
+    assert "항목 1개 처리" in result
+    assert "저장 거부 1건" in result
+    conn = get_connection(graph_db)
+    assert conn.execute("SELECT COUNT(*) FROM concepts WHERE slug = 'stale'").fetchone()[0] == 0
+    assert conn.execute("SELECT content_hash FROM extracted_chunks WHERE chunk_index = 0").fetchone()[0] == "h0"
+    assert conn.execute("SELECT COUNT(*) FROM concept_mentions WHERE chunk_index = 0").fetchone()[0] == 1
+    conn.close()
+
+
+def test_missing_input_hash_or_missing_es_chunk_rejected(graph_db, fake_es):
+    source = fake_es.chunks[0]
+    item = {"doc_id": source["doc_id"], "chunk_index": 0,
+            "content_hash": source["content_hash"], "concepts": [{"name": "Rejected"}]}
+    assert "input_hash 누락" in graph_store_concepts(json.dumps({"items": [item]}))
+    item["input_hash"] = graph_input_hash(source)
+    fake_es.chunks.pop(0)
+    assert "ES 청크 없음" in graph_store_concepts(json.dumps({"items": [item]}))
+    conn = get_connection(graph_db)
+    assert conn.execute("SELECT COUNT(*) FROM concepts").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM extracted_chunks").fetchone()[0] == 0
+    conn.close()
+
+
+def test_metadata_change_becomes_pending_without_deleting_old_graph(graph_db, fake_es):
+    _store_both_chunks()
+    fake_es.chunks[0]["title"] = "개정 제목"
+    result = json.loads(graph_list_chunks(category="study", pending_only=True))
+    assert [chunk["chunk_index"] for chunk in result["chunks"]] == [0]
+    conn = get_connection(graph_db)
+    assert conn.execute("SELECT COUNT(*) FROM concept_mentions WHERE chunk_index = 0").fetchone()[0] == 1
+    conn.close()
+
+
+def test_missing_optional_extraction_fields_have_stable_input_hash(graph_db, fake_es):
+    source = fake_es.chunks[0]
+    del source["content"]
+    del source["section_path"]
+    listed = json.loads(graph_list_chunks(category="study", pending_only=True))["chunks"][0]
+    assert listed["content"] == listed["section_path"] == ""
+    assert listed["input_hash"] == graph_input_hash(listed)
+    result = graph_store_concepts(json.dumps({"items": [{
+        "doc_id": listed["doc_id"], "chunk_index": listed["chunk_index"],
+        "content_hash": listed["content_hash"], "input_hash": listed["input_hash"],
+        "concepts": [],
+    }]}))
+    assert "항목 1개 처리" in result
+    assert "저장 거부" not in result
+    pending = json.loads(graph_list_chunks(category="study", pending_only=True))
+    assert [chunk["chunk_index"] for chunk in pending["chunks"]] == [1]

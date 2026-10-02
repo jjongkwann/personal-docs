@@ -191,6 +191,10 @@ uv run pkb doctor
 | `restore_document` | 아카이브된 문서를 검색 대상으로 복구. frontmatter에 아카이브 기록이 있으면 제거 후 재인제스트 |
 | `doctor` | ES 연결, 인덱스, 청크 수, 설정, 개념 그래프 통계 점검 + 조치 후보(만료 미아카이브·purge 대상·고아 개념) 나열 |
 
+`search_knowledge(expand_context=N)`은 전후 N개 청크를 붙입니다(0~4, 생략 시
+`EXPAND_CONTEXT`). `max_context_tokens`(256~32000, 기본 4000)는 출처 표기·개념 어휘·본문·
+주변 문맥을 합친 출력 예산입니다. `top_k`나 확장 범위를 늘려도 이 예산을 넘기지 않습니다.
+
 ### Graph RAG
 
 | 도구 | 역할 |
@@ -207,6 +211,11 @@ uv run pkb doctor
 
 Graph RAG의 MCP-first 흐름은 `graph_list_chunks`로 청크를 읽고, Claude Code가 직접 개념과 관계를 추출한 뒤, `graph_store_concepts`로 저장하는 방식입니다. 저장 후 `graph_curate`로 real/vocab을 라벨링하고 표기 변형은 `graph_merge`로 병합합니다. 관계 조회는 `graph_explain`/`graph_path`/`graph_query`/`graph_affected`로 SQLite를 직접 읽고, 사람이 보는 지도는 `graph_map`으로 오프라인 HTML을 만듭니다.
 
+`graph_list_chunks`에서 받은 각 청크의 `content_hash`와 `input_hash`를 변경하지 말고
+`graph_store_concepts`의 해당 항목에 그대로 넣으세요. `concepts: []`인 항목도 같습니다.
+`input_hash`는 추출에 쓰는 원본 ID·청크 위치·본문·제목·섹션·카테고리를 반영합니다.
+입력이 바뀌면 청크가 다시 pending이 되며, 오래된 해시 쌍으로 저장하면 거절됩니다.
+
 ### 파라미터 레퍼런스
 
 `src/pkb/mcp_server.py`에 등록된 그대로의 시그니처:
@@ -214,7 +223,8 @@ Graph RAG의 MCP-first 흐름은 `graph_list_chunks`로 청크를 읽고, Claude
 ```python
 search_knowledge(query, category="", top_k=5, include_archived=False,
                  include_obsidian=True, query_variants=[], profile="all",
-                 canonical_group=True, canonical_boost=0.15)
+                 canonical_group=True, canonical_boost=0.15,
+                 expand_context=None, max_context_tokens=4000)
 write_file(file_path, content, ingest=False, dry_run=False,
            expected_hash="", strict_policy=True)
 list_documents(category="", include_archived=False, limit=50)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pkb.config import settings
 from pkb.ingest import (
     MIN_CHUNK_CHARS,
     _chunk_text,
@@ -79,6 +80,45 @@ def test_chunk_single_h1_section_path():
     assert chunks[0][0] == "Intro"
 
 
+def test_bodyless_parent_headings_are_kept_in_child_path_without_own_chunk():
+    text = "# Parent\n\n## Child\n### Leaf\nbody"
+    assert chunk_markdown_hierarchical(text) == [
+        ("Parent > Child > Leaf", text)
+    ]
+
+
+def test_parent_with_only_thematic_break_moves_verbatim_to_first_child():
+    for rule in ("---", "* * *", "_ _ _", "- - - -"):
+        text = f"# Root\n## Appendix\n\n{rule}\n### Child\nbody"
+        assert chunk_markdown_hierarchical(text) == [
+            ("Root > Appendix > Child", text)
+        ]
+
+
+def test_empty_leaf_and_standalone_headings_are_not_dropped():
+    assert chunk_markdown_hierarchical("# Alone") == [("Alone", "# Alone")]
+    assert chunk_markdown_hierarchical("# Parent\n## Empty\n## Sibling\nbody") == [
+        ("Parent > Empty", "# Parent\n## Empty"),
+        ("Parent > Sibling", "## Sibling\nbody"),
+    ]
+
+
+def test_parent_body_and_fenced_heading_are_preserved():
+    text = "# Parent\n```md\n## Not a child\n```\n## Child\nbody"
+    assert chunk_markdown_hierarchical(text) == [
+        ("Parent", "# Parent\n```md\n## Not a child\n```"),
+        ("Parent > Child", "## Child\nbody"),
+    ]
+
+
+def test_suppressed_parent_precedes_child_fence_without_splitting_it():
+    text = "# Parent\n## Child\n```md\n### Not a leaf\n```\n### Leaf\nbody"
+    assert chunk_markdown_hierarchical(text) == [
+        ("Parent > Child", "# Parent\n## Child\n```md\n### Not a leaf\n```"),
+        ("Parent > Child > Leaf", "### Leaf\nbody"),
+    ]
+
+
 def test_chunk_h1_h2_h3_hierarchy_path():
     # 각 섹션 본문은 MIN_CHUNK_CHARS(80자) 이상으로 채워 병합(R4a) 없이
     # section_path 계층만 검증한다.
@@ -151,18 +191,17 @@ def test_chunk_h4_not_in_path_stack():
 _LONG = "x" * MIN_CHUNK_CHARS  # MIN_CHUNK_CHARS 이상 → tiny 아님
 
 
-def test_merge_heading_only_chunk_folds_into_next():
-    # 헤딩-전용 초소형 청크는 다음 청크 앞에 병합되고 section_path는 다음 것을 유지
+def test_merge_heading_only_chunk_keeps_its_section_path():
+    # 상위 절 헤딩을 하위 절 본문에 넣으면 출처 section_path가 틀어진다.
     tiny = ("Intro", "# Intro")
     normal = ("Intro > Body", _LONG)
-    merged = _merge_tiny_chunks([tiny, normal])
-    assert merged == [("Intro > Body", "# Intro\n\n" + _LONG)]
+    assert _merge_tiny_chunks([tiny, normal]) == [tiny, normal]
 
 
 def test_merge_last_tiny_folds_into_previous():
-    # 마지막 청크가 tiny면 이전 청크 뒤에 병합되고 section_path는 이전 것을 유지
+    # 같은 절의 마지막 tiny는 이전 청크 뒤에 병합
     normal = ("A", _LONG)
-    tiny = ("B", "tail")
+    tiny = ("A", "tail")
     merged = _merge_tiny_chunks([normal, tiny])
     assert merged == [("A", _LONG + "\n\ntail")]
 
@@ -174,11 +213,16 @@ def test_merge_single_tiny_chunk_kept_as_is():
 
 
 def test_merge_chained_tiny_chunks_collapse_left_to_right():
-    # 연쇄 tiny(연속 2개 이상)도 왼쪽부터 반복 처리돼 최종적으로 1개로 수렴
-    a, b, c = ("A", "a"), ("B", "b"), ("C", "c")
-    normal = ("D", _LONG)
+    # 같은 절의 연쇄 tiny는 왼쪽부터 병합
+    a, b, c = ("A", "a"), ("A", "b"), ("A", "c")
+    normal = ("A", _LONG)
     merged = _merge_tiny_chunks([a, b, c, normal])
-    assert merged == [("D", "a\n\nb\n\nc\n\n" + _LONG)]
+    assert merged == [("A", "a\n\nb\n\nc\n\n" + _LONG)]
+
+
+def test_merge_tiny_into_previous_same_section_before_next_section():
+    chunks = [("A", _LONG), ("A", "tail"), ("B", _LONG)]
+    assert _merge_tiny_chunks(chunks) == [("A", _LONG + "\n\ntail"), ("B", _LONG)]
 
 
 # ---------- _chunk_text (초과 단락 분할) ----------
@@ -224,3 +268,36 @@ def test_chunk_inline_backticks_line_not_fence_toggle():
     )
     chunks = chunk_markdown_hierarchical(text)
     assert [c[0] for c in chunks] == ["Guide", "Second"]
+
+
+def test_oversized_table_repeats_header_without_dropping_rows():
+    header = "| ID | Description |\n| --- | --- |"
+    rows = [f"| row{i} | value {i} repeated phrase |" for i in range(18)]
+    chunks = _chunk_text("\n".join([header, *rows]), max_tokens=60, overlap_tokens=0)
+    assert len(chunks) > 1
+    assert all(chunk.startswith(header + "\n") and _count_tokens(chunk) <= 60 for chunk in chunks)
+    assert [line for chunk in chunks for line in chunk.splitlines()[2:]] == rows
+
+
+def test_oversized_code_repeats_fences_and_preserves_blank_lines():
+    lines = [f'print("line {i} substantial content")' for i in range(18)]
+    lines.insert(9, "")
+    chunks = _chunk_text("\n".join(["```python", *lines, "```"]), max_tokens=60, overlap_tokens=0)
+    assert len(chunks) > 1
+    assert all(chunk.startswith("```python\n") and chunk.endswith("\n```") for chunk in chunks)
+    assert all(_count_tokens(chunk) <= 60 for chunk in chunks)
+    assert [line for chunk in chunks for line in chunk.splitlines()[1:-1]] == lines
+
+
+def test_structured_huge_lines_stay_bounded():
+    line = "가나다 abc " * 500
+    for text in (f"```text\n{line}\n```", f"| h | v |\n| --- | --- |\n| {line} |"):
+        chunks = _chunk_text(text, max_tokens=60, overlap_tokens=0)
+        assert len(chunks) > 1
+        assert all(_count_tokens(chunk) <= 60 for chunk in chunks)
+
+
+def test_tiny_merge_never_exceeds_chunk_limit(monkeypatch):
+    monkeypatch.setattr(settings, "chunk_size", 20)
+    chunks = [("A", "short"), ("A", "word " * 18)]
+    assert _merge_tiny_chunks(chunks) == chunks

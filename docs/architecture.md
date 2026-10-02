@@ -51,7 +51,7 @@ The core architecture has four layers:
 [Ingest]  src/pkb/ingest.py
   Documents in data/ (md/pdf/docx/…)
     → parse frontmatter → chunk by heading hierarchy (+ merge tiny chunks)
-    → compare content_hash delta → embed only changed chunks
+    → compare embedding_fingerprint (model, preprocessing, input) → embed only changed chunks
     → apply to Elasticsearch via bulk (index/update/delete)
 
 [Graph]  src/pkb/graph/
@@ -162,7 +162,8 @@ A single file is split into multiple chunks, and each chunk is stored as one ES 
     "tags": ["rag", "search"],
     "date_modified": "2026-04-16",
     "language": "ko",
-    "content_hash": "sha256(content)",   // for delta embedding comparison
+    "content_hash": "sha256(content)",   # body identity for graph extraction
+    "embedding_fingerprint": "sha256(model, revision, preprocessing, embedding input)",
     # The lifecycle fields below exist only if they were set — by default they're not null,
     # the field simply isn't present at all
     # "expires_at": "...",     only if set in frontmatter
@@ -177,20 +178,24 @@ A single file is split into multiple chunks, and each chunk is stored as one ES 
 - Store the H1–H3 heading path as `section_path` (derived from the file path if absent)
 - Within a section, split by 500 tokens with 100-token overlap by default (`CHUNK_SIZE`/
   `CHUNK_OVERLAP`)
-- Chunks under 80 characters (`MIN_CHUNK_CHARS`) are merged into an adjacent chunk — prevents
-  low-information chunks containing only headings/links from dominating the top of rerank results
-  (`ingest.py:_merge_tiny_chunks`)
+- Chunks under 80 characters (`MIN_CHUNK_CHARS`) merge with an adjacent chunk in the **same
+  section** when the combined text fits the token limit; otherwise they remain separate
+  (`ingest.py:_merge_tiny_chunks`). This reduces low-information heading/link chunks.
+- Markdown tables and fenced code blocks stay together when they fit. Oversized tables repeat
+  their header and oversized code blocks repeat their fence across pieces; a single oversized
+  row or line can still be split to meet the limit.
 
 ### Delta Embedding
 
-When a document is re-ingested, only changed chunks are re-embedded. Each chunk's `content_hash`
-(SHA-256) is compared against the existing chunk at the same `chunk_index` (`ingest.py:ingest_files`).
+When a document is re-ingested, `embedding_fingerprint` compares the model name, optional pinned
+revision, preprocessing version, and actual embedding input at each `chunk_index`. `content_hash`
+tracks body identity for graph extraction and chunk relocation (`ingest.py:ingest_files`).
 
 | Comparison result | Action | Embedding cost |
 |-----------|------|------------|
-| hash identical | reuse | 0 |
-| hash identical + only metadata differs | partial update | 0 |
-| slot mismatch, same hash found in a different slot within the document | copy embedding (moved) | 0 |
+| fingerprint identical | reuse | 0 |
+| fingerprint identical + other metadata differs | partial update | 0 |
+| slot mismatch, same fingerprint found in a different slot within the document | copy embedding (moved) | 0 |
 | otherwise new/changed | re-embed + index | only the changed portion |
 | slot no longer present in the new chunk set | delete | 0 |
 
@@ -202,13 +207,18 @@ When a document is re-ingested, only changed chunks are re-embedded. Each chunk'
 
 1. BM25 search — nori Korean analyzer, weighted matching across `content`/`title`/`section_path`
 2. kNN search — sentence-transformers embeddings, ES dense_vector (HNSW)
-3. RRF fusion — combines both candidate sets via Reciprocal Rank Fusion (`RRF_K=60`, fixed logic)
+3. RRF fusion by default (`RRF_K=60`); CLI comparison runs can select linear fusion
 4. CrossEncoder reranking — disabled by default (`RERANK_ENABLED=false`), model
    `BAAI/bge-reranker-v2-m3`. In the 2026-07 benchmark, no-rerank (MRR 0.517) beat bge (0.388) and
    Qwen3-0.6B (0.492) on the BGE-M3 candidate pool, hence off by default.
 5. **Cap of at most 2 chunks per document** (`MAX_CHUNKS_PER_DOC`) — ensures diversity so a single
    document can't dominate the top results
 6. Optional: `EXPAND_CONTEXT=N` — attaches N chunks before/after each result as `neighbors`
+
+CLI and MCP use the same context renderer: it emits matched chunks first, then distinct neighbors
+from the same section within the token budget, with `doc_id` and the physical source path when
+available. Use `pkb query --expand N --context-tokens B` or MCP `search_knowledge` with
+`expand_context=N` and `max_context_tokens=B`.
 
 Four retrieval profiles are available: `all` (includes pre-migration legacy notes), `curated`
 (concept/guide/MOC), `evidence` (curated plus research), and `source` (raw sources). Canonical documents
@@ -229,16 +239,19 @@ Search calls are logged as JSONL to `data/.logs/search.jsonl`.
 Graph RAG doesn't replace search — it complements it by answering relationship queries between
 concepts. It's stored at `data/.graph/pkb_graph.sqlite` (`GRAPH_DB_PATH`), with `concepts`,
 `concept_aliases`, `documents`, `concept_edges`, `concept_edge_evidence`, `extracted_chunks`,
-`concept_mentions`, `concept_curation`, and `graph_meta` as the nine tables (`graph/schema.py`). The weight/evidence_count on
+`concept_mentions`, `concept_curation`, `concept_alias_conflicts`, and `graph_meta` as the ten tables (`graph/schema.py`). The weight/evidence_count on
 `concept_edges` is aggregated from per-chunk `concept_edge_evidence`, so it stays accurate through
 re-extraction and document deletion.
 
-Build pipeline (entirely Claude Code self-extraction, no API calls):
+Build pipeline (Claude Code extraction, or optional local Ollama rebuild):
 
-1. Read chunks page by page with `graph_list_chunks(category|doc_id, offset, limit)`
+1. Read chunks page by page with `graph_list_chunks(category|doc_id, offset, limit, pending_only)`;
+   each chunk carries `content_hash` and `input_hash`
 2. Claude Code extracts concepts/relationships from the chunk content
-3. Store into SQLite with `graph_store_concepts(items_json)` (reflects normalization, aliases,
-   mentions, edges)
+3. Echo both hashes in each `graph_store_concepts(items_json)` item. Storage rejects stale or
+   missing inputs before changing SQLite and records accepted items (normalization, aliases,
+   mentions, edges). The input hash also detects title, section path, and category changes;
+   existing markers without it remain pending while graph data is preserved
 4. Query SQLite directly with `graph_explain`, `graph_path`, `graph_query`, or `graph_affected`;
    each returned edge carries confidence and bounded source-chunk evidence
 5. Render a human-readable offline HTML graph with `graph_map` when visual exploration is needed

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pkb import embeddings
+from pkb import rerank as rerank_module
+from pkb.config import settings
 from pkb.rerank import rerank
 
 
@@ -46,3 +49,40 @@ def test_rerank_missing_content_uses_empty_text(monkeypatch):
     monkeypatch.setattr("pkb.rerank.get_reranker", lambda: model)
     rerank("query", [{}])
     assert model.calls[0][0] == [("query", "")]
+
+
+def test_rerank_context_is_opt_in_and_preserves_content(monkeypatch):
+    model = _FakeReranker([0.2])
+    monkeypatch.setattr("pkb.rerank.get_reranker", lambda: model)
+    candidate = {"title": "Title", "section_path": "Section", "content": "Body"}
+    rerank("query", [candidate], include_context=True)
+    assert model.calls[0][0] == [("query", "Title\nSection\nBody")]
+    assert candidate["content"] == "Body"
+
+
+def test_model_loaders_forward_only_configured_revisions(monkeypatch):
+    calls = []
+    monkeypatch.setattr(embeddings, "_model", None)
+    monkeypatch.setattr(rerank_module, "_reranker", None)
+    monkeypatch.setattr(embeddings, "SentenceTransformer", lambda *a, **kw: calls.append(("embed", kw)))
+    monkeypatch.setattr(rerank_module, "CrossEncoder", lambda *a, **kw: calls.append(("rerank", kw)))
+    monkeypatch.setattr(embeddings, "resolve_device", lambda _: "cpu")
+    monkeypatch.setattr(rerank_module, "resolve_device", lambda _: "cpu")
+
+    monkeypatch.setattr(settings, "embedding_revision", "")
+    monkeypatch.setattr(settings, "rerank_revision", "")
+    embeddings.get_model()
+    rerank_module.get_reranker()
+    assert all("revision" not in kwargs for _, kwargs in calls)
+
+    calls.clear()
+    monkeypatch.setattr(embeddings, "_model", None)
+    monkeypatch.setattr(rerank_module, "_reranker", None)
+    monkeypatch.setattr(settings, "embedding_revision", "embed-sha")
+    monkeypatch.setattr(settings, "rerank_revision", "rerank-sha")
+    embeddings.get_model()
+    rerank_module.get_reranker()
+    assert calls == [
+        ("embed", {"device": "cpu", "revision": "embed-sha"}),
+        ("rerank", {"max_length": 512, "device": "cpu", "revision": "rerank-sha"}),
+    ]

@@ -4,14 +4,14 @@
 
 **Purpose**: answer questions at the level of *"how are the concepts across my whole corpus connected?"*. It **complements** the existing RRF + reranker search where that search is weak — it does not replace it.
 
-**Core design**: the concept layer is 100% self-extracted by Claude Code — no API calls, no LLM cost. Claude Code reads chunks with `graph_list_chunks`, extracts concepts/relations itself, and stores them in SQLite via `graph_store_concepts`. Native `graph_explain`, `graph_path`, `graph_query`, and `graph_affected` queries read that SQLite graph directly; `graph_map` renders a human-readable offline HTML view when needed.
+**Core design**: extraction is explicit. Claude Code can read chunks with `graph_list_chunks`, extract concepts/relations, and store them via `graph_store_concepts`; `pkb graph rebuild-evidence-local` can run the same pending loop with a local Ollama model. Native `graph_explain`, `graph_path`, `graph_query`, and `graph_affected` queries read SQLite directly; `graph_map` renders an offline HTML view.
 
 | | Existing (ES + RRF + reranker) | Graph RAG |
 |---|---|---|
 | Good at | **Specific queries** like "what is DI?", "what's the BM25 formula?" | **Relational/global queries** like "how are DI, IoC, Bean, and Container tangled together?" |
 | Data unit | Chunk (500 tokens) | Concept (entity) + relation |
 | Response material | Body chunks | SQLite concepts, relations, curated prose, and source evidence |
-| Build trigger | Immediately on ingest | Explicit run via MCP `graph_list_chunks`/`graph_store_concepts` |
+| Build trigger | Immediately on ingest | Explicit MCP extraction or local Ollama rebuild |
 
 **Not doing**: automatic full-graph builds (opt-in only), a full graph DB like Neo4j, GNN embeddings, automatic updates driven by conversation history.
 
@@ -32,15 +32,16 @@ Main tables:
 | `concept_edge_evidence` | Evidence per `doc_id`/`chunk_index` that a relation was extracted from |
 | `concept_mentions` | `doc_id`/`chunk_index` where a concept appears |
 | `concept_curation` | Concept curation (real/vocab) + distilled prose |
-| `extracted_chunks` | Extraction-complete markers `(doc_id, chunk_index)` → `content_hash` |
+| `extracted_chunks` | Extraction-complete markers `(doc_id, chunk_index)` → `content_hash`, `input_hash` |
 | `graph_meta` | Key/value markers — one-shot schema migrations and the `edge_evidence_rebuild` staging flag |
 
-Incremental extraction is driven by `extracted_chunks`. If a chunk's current `content_hash`
-differs from the marker for that index (i.e. content changed or it moved to a different index),
-it becomes pending and gets re-extracted, and re-extraction **replaces that chunk's mentions and
-relation evidence** — concepts/relations that disappeared from a revised chunk don't linger.
-Rows with a NULL `chunk_index` are legacy markers recorded by hash only, and are honored as a
-fallback only until that chunk's content changes.
+Incremental extraction is driven by `extracted_chunks`. A chunk is pending when either marker hash
+differs from the current ES source. `content_hash` tracks the body; `input_hash` also covers
+`doc_id`, `chunk_index`, title, section path, and category, so attribution changes trigger
+re-extraction. Re-extraction **replaces that chunk's mentions and relation evidence** — concepts
+and relations that disappeared from a revised chunk don't linger. Existing markers without
+`input_hash` (including legacy rows with NULL `chunk_index`) and graph data are preserved, but
+those chunks remain pending until extracted against the current input.
 Edge `weight`/`evidence_count` are computed from the actual row count in `concept_edge_evidence`,
 so re-running the same chunk doesn't inflate them. When a document is deleted, a chunk moves, or
 content changes, the corresponding evidence is cleaned up too.
@@ -48,11 +49,12 @@ content changes, the corresponding evidence is cleaned up too.
 Schema definitions live in `src/pkb/graph/schema.py`, CRUD in `src/pkb/graph/store.py`.
 
 ### Concept Normalization (dedup)
-1. **Slug match**: `dependency injection` == `Dependency Injection`
-2. **Alias match**: "DI" maps to the existing "Dependency Injection" concept
-3. **Embedding similarity** (≥ `GRAPH_DEDUP_THRESHOLD`, default 0.88): semantic match to an existing concept → merge
-4. Insert if new, otherwise add an alias (`mention_count` is recomputed from actual
-   `concept_mentions` rows — re-extracting the same chunk doesn't inflate it)
+Extraction reuses an existing concept on a normalized slug match within its category/namespace
+(`dependency injection` == `Dependency Injection`). It records proposed aliases but reports
+conflicts instead of silently joining concepts. Automatic extraction deliberately disables alias
+and embedding-similarity matching to avoid merging unrelated abbreviations or homonyms. Review
+remaining duplicates and merge them explicitly. `mention_count` is recomputed from actual
+`concept_mentions` rows, so re-extracting the same chunk does not inflate it.
 
 Duplicates that passed dedup but still ended up split into separate nodes (notation variants,
 etc.) are merged after the fact with `store.merge_concepts(conn, winner_slug, loser_slugs)` —
@@ -76,14 +78,20 @@ default graph seeding. If the curation table is empty, the system falls back to 
 ## Pipeline: Self-Extraction → Storage → Native Query
 
 ### 1. `graph_list_chunks(category|doc_id, offset, limit, pending_only)`
-Returns ES chunks as paginated JSON. With `pending_only=True`, only unextracted or content-changed chunks are returned (incremental extraction). Claude Code reads this result directly and extracts concepts/relations using the rules below. Before extracting, check the existing vocabulary with `graph_list_concepts` and reuse existing names/slugs for overlapping concepts.
+Returns ES chunks as paginated JSON, each with `content_hash` and `input_hash`. With
+`pending_only=True`, unextracted or changed-input chunks are returned. Claude Code reads this
+result directly and extracts concepts/relations using the rules below. Before extracting, check
+the existing vocabulary with `graph_list_concepts` and reuse existing names/slugs for overlapping concepts.
 
 - Concepts: concrete noun phrases (e.g. "Dependency Injection", "BM25"). Excludes generic words, personal names, place names
 - Relation types: `related_to` | `part_of` | `prerequisite_of` | `example_of` (free-form labels allowed when needed)
 - Up to 8 concepts and 12 relations per chunk
 
 ### 2. `graph_store_concepts(items_json)`
-Upserts the extracted concept/relation JSON into SQLite (including normalization, aliases, mentions, edges).
+Each item must echo both hashes from its listed chunk, even when `concepts` is empty. Storage
+checks them against the current ES chunk before changing SQLite; missing, deleted, or changed
+inputs are rejected per item and reported, while valid items in the batch are stored. Accepted
+items upsert concepts/relations, aliases, mentions, edges, and extraction markers.
 
 ### 3. Querying and Reading
 Use `graph_explain` for one concept, `graph_path` for a shortest path, `graph_query` for a
