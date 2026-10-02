@@ -59,7 +59,7 @@ ARXIV_NS = "{http://arxiv.org/schemas/atom}"
 USER_AGENT = "pkb-verify-citations/1 (+https://github.com/jjongkwann/personal-docs)"
 
 
-class ArxivUnavailable(RuntimeError):
+class ArxivUnavailableError(RuntimeError):
     """arXiv API에 도달하지 못함 — 인용이 틀렸다는 뜻이 아니다."""
 
 
@@ -126,7 +126,7 @@ def fetch_arxiv(ids: list[str], sleep: float = 3.0) -> dict[str, ArxivMeta]:
             time.sleep(sleep)
             status, body = _get(url)
         if status != 200:
-            raise ArxivUnavailable(f"arXiv API HTTP {status}")
+            raise ArxivUnavailableError(f"arXiv API HTTP {status}")
         for entry in ET.fromstring(body).iter(f"{ATOM}entry"):
             raw_id = (entry.findtext(f"{ATOM}id") or "").strip()
             if "/abs/" not in raw_id:
@@ -173,7 +173,8 @@ def page_title(url: str) -> tuple[int, str]:
         # D2는 SPA라 없는 글도 200 + 빈 껍데기를 준다. 콘텐츠 API가 진짜 판정자다.
         status, body = _get(f"https://d2.naver.com/api/v1/contents/{m.group(1)}")
         if status != 200:
-            return 404, ""
+            # Network failures and temporary API errors do not establish absence.
+            return status, ""
         try:
             return 200, json.loads(body).get("postTitle", "")
         except ValueError:
@@ -246,7 +247,7 @@ def verify_text(
     arxiv_ids = extract_arxiv_ids(text)
     try:
         metas = arxiv_fetch(arxiv_ids) if arxiv_ids else {}
-    except ArxivUnavailable as exc:
+    except ArxivUnavailableError as exc:
         # arXiv가 죽어도 CVE·링크 검증은 계속한다.
         findings.append(Finding("arXiv API", None, f"{exc} — arXiv 인용 미검증"))
         arxiv_ids, metas = [], {}

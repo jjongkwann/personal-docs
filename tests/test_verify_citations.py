@@ -6,6 +6,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 _SPEC = importlib.util.spec_from_file_location(
     "verify_citations", Path(__file__).resolve().parents[1] / "scripts" / "verify_citations.py"
 )
@@ -55,7 +57,9 @@ LINK_NOTE = """# 노트
 """
 
 PAGES = {
-    "https://techblog.woowahan.com/17386/": (200, "우리 팀은 카프카를 어떻게 사용하고 있을까 | 우아한형제들 기술블로그"),
+    "https://techblog.woowahan.com/17386/": (
+        200, "우리 팀은 카프카를 어떻게 사용하고 있을까 | 우아한형제들 기술블로그",
+    ),
     "https://techblog.woowahan.com/18854/": (404, ""),
     "https://example.com/x": (200, "카프카 컨슈머에 동적 쓰로틀링 적용하기"),
 }
@@ -84,9 +88,31 @@ def test_unreachable_link_is_unverified_not_missing():
     assert f.exists is None and "⚠️" in vc.render_section([f], "2026-08-25")
 
 
+@pytest.mark.parametrize("status,exists", [
+    (200, True), (404, False), (410, False),
+    (0, None), (403, None), (429, None), (500, None),
+])
+def test_d2_preserves_api_status_and_only_marks_missing_pages_absent(monkeypatch, status, exists):
+    calls = []
+
+    def get(url):
+        calls.append(url)
+        return status, b'{"postTitle": "Article title"}'
+
+    monkeypatch.setattr(vc, "_get", get)
+    finding = vc.check_link("Article title", "https://d2.naver.com/helloworld/12345")
+
+    assert calls == ["https://d2.naver.com/api/v1/contents/12345"]
+    assert finding.exists is exists
+    if status == 200:
+        assert "Article title" in finding.detail
+    elif status:
+        assert f"HTTP {status}" in finding.detail
+
+
 def test_arxiv_outage_does_not_block_cve_and_link_checks():
     def boom(ids):
-        raise vc.ArxivUnavailable("arXiv API HTTP 0")
+        raise vc.ArxivUnavailableError("arXiv API HTTP 0")
 
     findings = vc.verify_text(
         LINK_NOTE, arxiv_fetch=boom, cve_fetch=lambda c: (True, ""), link_fetch=PAGES.__getitem__
