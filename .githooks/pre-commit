@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+uv run --locked ruff check .
+uv run --locked pytest -q

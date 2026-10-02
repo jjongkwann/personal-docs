@@ -6,7 +6,6 @@
 
 Elasticsearch 하이브리드 검색, MCP, Obsidian, SQLite Graph RAG를 하나의 로컬 워크플로로 연결합니다.
 
-[![CI](https://github.com/jjongkwann/personal-docs/actions/workflows/ci.yml/badge.svg)](https://github.com/jjongkwann/personal-docs/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![Elasticsearch](https://img.shields.io/badge/Elasticsearch-8.17-005571?logo=elasticsearch&logoColor=white)
 ![Local first](https://img.shields.io/badge/data-local--first-2F855A)
@@ -263,9 +262,12 @@ personal-docs/
 
 ```bash
 uv sync --locked --dev
-uv run ruff check .
-uv run pytest -q
+git config --local core.hooksPath .githooks
 ```
+
+저장소를 복제한 뒤 한 번 설정하면 커밋 전에 로컬 훅이 Ruff와 pytest를 실행합니다.
+검사가 실패하면 커밋을 차단합니다. 수동 검사는 `.githooks/pre-commit`으로 실행합니다.
+이 검사는 GitHub Actions 없이 로컬에서 수행합니다.
 
 실제 Elasticsearch를 사용하는 통합 테스트는 컨테이너를 실행한 뒤 별도로 수행합니다.
 

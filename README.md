@@ -6,7 +6,6 @@
 
 Connects Elasticsearch hybrid search, MCP, Obsidian, and SQLite Graph RAG into a single local workflow.
 
-[![CI](https://github.com/jjongkwann/personal-docs/actions/workflows/ci.yml/badge.svg)](https://github.com/jjongkwann/personal-docs/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![Elasticsearch](https://img.shields.io/badge/Elasticsearch-8.17-005571?logo=elasticsearch&logoColor=white)
 ![Local first](https://img.shields.io/badge/data-local--first-2F855A)
@@ -267,9 +266,12 @@ personal-docs/
 
 ```bash
 uv sync --locked --dev
-uv run ruff check .
-uv run pytest -q
+git config --local core.hooksPath .githooks
 ```
+
+Configure the hook once per clone. Before each commit, the local hook runs Ruff and pytest;
+either check failing blocks the commit. Run `.githooks/pre-commit` to check manually.
+These checks run locally, without a GitHub Actions workflow.
 
 Integration tests against a real Elasticsearch run separately, after starting the container.
 
