@@ -104,6 +104,12 @@ def test_same_file_in_other_unicode_form_is_not_a_conflict(data_root):
     target.parent.mkdir(parents=True)
     target.write_text(_curated("research", "self-id"), encoding="utf-8")
 
+    request_path = target.with_name(nfc)
+    # Linux는 NFC/NFD를 구분한다. 하드 링크로 같은 inode라는 테스트 전제를 유지한다.
+    if not request_path.exists():
+        request_path.hardlink_to(target)
+    assert request_path.samefile(target)
+
     policy = resolve_document_policy(f"data/research/{nfc}", strict=True)
     assert policy.conflicts == ()
 
