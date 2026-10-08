@@ -181,6 +181,8 @@ uv run pkb doctor
 | `search_knowledge` | 개인 지식 베이스 하이브리드 검색. BM25와 kNN을 msearch 한 요청으로 검색한 뒤 RRF로 결합(CrossEncoder 재순위는 기본 비활성), 문서당 최대 2청크로 캡. 개념 그래프가 있으면 히트별 관련 개념 링크와 재검색용 개념 어휘를 함께 부착. `include_obsidian=False`로 코퍼스 밖(볼트 직속, `obsidian/` 접두 doc_id) 문서 제외 가능. 기본 검색이 부실하면 `query_variants`(RAG-Fusion 쿼리 변형, 최대 3개)로 변형 쿼리를 함께 검색해 RRF 병합 |
 | `write_file` | `data/` 하위 `.md` 작성. 기본값으로 작성 직후 자동 인제스트 |
 | `list_documents` | ES에 저장된 문서 목록. `date_modified` 내림차순으로 상위 `limit`(기본 50)개만 표시. `limit<=0`이면 전체 |
+| `list_files` | `data/` 폴더의 파일·하위 폴더 목록. 색인되지 않은 `_origin` 첨부파일도 포함하며 `next_offset`으로 페이지 조회 |
+| `get_file` | `data/` 원본 파일을 MCP embedded resource의 base64 blob으로 전송. 파일명·MIME·크기·SHA-256 포함, 파일당 최대 10 MiB |
 | `add_document` | `data/` 하위 파일 인제스트 (md/txt/pdf/docx/pptx/xlsx/html) |
 | `convert_and_ingest` | 외부 PDF/DOCX/PPTX/XLSX/HTML을 `.md`로 변환해 `data/<category>/`에 저장하고 인제스트. 변환본 상단에 provenance frontmatter(`source`·`converted_from`·`converted_at`) 기록, PDF는 페이지 마커(`## p.N`) 보존 |
 | `sync_corpus` | `data/` 코퍼스를 ES와 재조정: 업서트 + 코퍼스에 없는 문서 정리 (`confirm_prune=True`로 대량 삭제 승인) |
@@ -194,6 +196,34 @@ uv run pkb doctor
 `search_knowledge(expand_context=N)`은 전후 N개 청크를 붙입니다(0~4, 생략 시
 `EXPAND_CONTEXT`). `max_context_tokens`(256~32000, 기본 4000)는 출처 표기·개념 어휘·본문·
 주변 문맥을 합친 출력 예산입니다. `top_k`나 확장 범위를 늘려도 이 예산을 넘기지 않습니다.
+
+### 다른 환경에서 원본 파일 받기
+
+`list_files`와 `get_file`은 `core` 프로파일에도 포함됩니다. 검색으로 관련 문서를 찾은 뒤,
+문서에 연결된 원본 폴더를 조회하고 필요한 파일을 받습니다. 예를 들어:
+
+```python
+list_files(directory="data/about/_origin/personal-brand/ljk")
+get_file(file_path="data/about/_origin/personal-brand/ljk/ljk-black-1024.png")
+```
+
+`list_files`는 바로 아래 항목만 반환합니다. `next_offset`이 있으면 같은 폴더와 해당
+`offset`으로 다음 페이지를 조회합니다(기본 100개, 최대 200개). 숨김 경로·심볼릭 링크·
+특수 파일은 제외합니다. 절대경로나 `data/` 밖의 파일은 조회할 수 없습니다.
+
+`get_file`은 별도 HTTP 링크나 서버 로컬 경로를 전달하는 대신 **응답 안에 원본 바이트**를
+담습니다. JSON 응답의 `content`에서 `type: resource`인 항목의 `resource.blob`을 base64
+디코딩하면 PNG/SVG/PDF 등 원본 파일을 그대로 복원할 수 있습니다. 파일명(`name`),
+`mime_type`, `size_bytes`, `sha256`은 `structuredContent`와 짧은 텍스트 블록에 있습니다.
+`pkb://files/...` URI는 포함된 파일의 식별자이며 웹 다운로드 주소가 아닙니다.
+
+클라이언트의 첨부파일 표시·저장 UI는 제품마다 다릅니다. 파일 저장 도구가 있는 에이전트는
+blob을 디코딩해 저장하고 크기와 SHA-256을 검증하면 됩니다. 원본 10 MiB는 전송 시 약
+13.3 MiB의 base64가 되므로 클라이언트·게이트웨이의 응답 크기 제한도 적용됩니다.
+이 도구들은 원본이나 검색 인덱스를 변경하지 않습니다.
+
+서버 업데이트 후 PKB 프로세스를 재시작하고, 게이트웨이를 사용한다면 PKB 도구 목록을
+갱신해야 합니다. 기존 대화가 도구 목록을 캐시하면 MCP를 재연결하거나 새 대화에서 확인하세요.
 
 ### Graph RAG
 
@@ -228,6 +258,8 @@ search_knowledge(query, category="", top_k=5, include_archived=False,
 write_file(file_path, content, ingest=False, dry_run=False,
            expected_hash="", strict_policy=True)
 list_documents(category="", include_archived=False, limit=50)
+list_files(directory="data", offset=0, limit=100)
+get_file(file_path)
 add_document(file_path, tags="")
 convert_and_ingest(input_path, category, output_name="", ingest=True)
 get_document(doc_id, include_content=False, chunk_range="")

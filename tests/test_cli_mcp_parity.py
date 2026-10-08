@@ -76,6 +76,8 @@ ALLOWLIST_CLI_ONLY = {
 #   cat/sed로 충분하므로 CLI 대응 없음.
 ALLOWLIST_MCP_ONLY = {
     "read_file",
+    "list_files",  # 로컬 CLI는 ls로 조회
+    "get_file",  # 로컬 CLI는 원본 파일을 직접 복사
     "patch_file",
     "graph_list_concepts",
     "graph_list_chunks",
@@ -127,6 +129,7 @@ def test_core_profile_exposes_only_core_tools(monkeypatch):
         exposed = set(core_mod.mcp._tool_manager._tools)
         assert exposed == set(core_mod.CORE_TOOLS)
         assert "graph_merge" not in exposed
+        assert {"list_files", "get_file"} <= exposed
     finally:
         monkeypatch.delenv("PKB_MCP_PROFILE", raising=False)
         full = importlib.reload(m)

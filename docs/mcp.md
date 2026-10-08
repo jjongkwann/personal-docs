@@ -188,6 +188,8 @@ For each client, verify the connection with `claude` → `/mcp`, `codex mcp list
 | `read_file` | Returns the on-disk source of a `data/**.md` file plus its `content_hash` (`get_document` serves ES chunks, which cannot be reassembled into the original) |
 | `patch_file` | Replaces one exact occurrence of `old` with `new` in an existing document — partial edits without resending the whole file. Same policy check and optimistic lock (`expected_hash`) as `write_file` |
 | `list_documents` | Lists documents stored in ES. Shows the top `limit` (default 50) sorted by `date_modified` descending. Set `limit<=0` to list everything |
+| `list_files` | Lists immediate files and folders under `data/`, including unindexed `_origin` attachments. Continue with `next_offset` |
+| `get_file` | Transfers an original `data/` file as an embedded MCP resource containing a base64 blob, with name, MIME type, byte size and SHA-256. Maximum 10 MiB per file |
 | `add_document` | Ingests a file under `data/` (md/txt/pdf/docx/pptx/xlsx/html) |
 | `convert_and_ingest` | Converts an external PDF/DOCX/PPTX/XLSX/HTML file to `.md`, saves it under `data/<category>/`, and ingests it. The converted file's frontmatter records provenance (`source`, `converted_from`, `converted_at`); PDFs keep page markers (`## p.N`) |
 | `sync_corpus` | Reconciles the `data/` corpus with ES: upserts, then lists documents no longer in the corpus. Nothing is deleted unless `confirm_prune=True` — with a Syncthing-replicated corpus a freshly written file may not have arrived yet |
@@ -202,6 +204,34 @@ For each client, verify the connection with `claude` → `/mcp`, `codex mcp list
 `EXPAND_CONTEXT`). `max_context_tokens` (256–32000, default 4000) caps the rendered result,
 including source labels, concept vocabulary, hit bodies, and neighboring context. A larger
 `top_k` or expansion window does not bypass that output budget.
+
+### Receiving original files on another client
+
+`list_files` and `get_file` are available in the `core` profile too. Search for the relevant
+document, list its linked source directory, and request the file:
+
+```python
+list_files(directory="data/about/_origin/personal-brand/ljk")
+get_file(file_path="data/about/_origin/personal-brand/ljk/ljk-black-1024.png")
+```
+
+Listings are not recursive. When `next_offset` is present, use it as `offset` to fetch the next
+page (100 entries by default, maximum 200). Hidden paths, symlinks and special files are excluded.
+Absolute paths and paths outside `data/` are rejected.
+
+`get_file` embeds the **original bytes in the response**, rather than returning a server-local
+path. In the JSON result, find the `content` item with `type: resource` and base64-decode its
+`resource.blob` to restore the exact PNG, SVG, PDF or other file. Metadata (`name`, `mime_type`,
+`size_bytes`, `sha256`) is available in `structuredContent` and a short text block.
+The `pkb://files/...` URI identifies the embedded payload; it is not an HTTP download URL.
+
+Attachment display and save buttons depend on the client. An agent with file tools can decode
+the blob, save it, and verify its size and SHA-256. A 10 MiB original produces approximately
+13.3 MiB of base64, so client and gateway response limits also apply. Neither tool modifies
+the corpus or search index.
+
+After updating the server, restart the PKB process and refresh its tool inventory in any
+gateway. Reconnect MCP or start a new conversation if the client caches the old tool list.
 
 ### Graph RAG
 
@@ -238,6 +268,8 @@ patch_file(file_path, old, new, expected_hash="", ingest=False, dry_run=False, s
 write_file(file_path, content, ingest=False, dry_run=False,
            expected_hash="", strict_policy=True)
 list_documents(category="", include_archived=False, limit=50)
+list_files(directory="data", offset=0, limit=100)
+get_file(file_path)
 add_document(file_path, tags="")
 convert_and_ingest(input_path, category, output_name="", ingest=True)
 get_document(doc_id, include_content=False, chunk_range="")
