@@ -10,7 +10,9 @@ from time import perf_counter
 
 from elasticsearch import Elasticsearch
 
+from pkb.answer_eval import digest, validate_gold_answer
 from pkb.config import settings
+from pkb.context import render_query_plan, render_search_results
 from pkb.retrieve import RETRIEVAL_PROFILES, hybrid_search
 
 TOP_K = settings.default_top_k
@@ -18,6 +20,7 @@ SEARCH_OPTIONS = {
     "candidate_k", "rerank", "expand_context", "profile", "canonical_group",
     "canonical_boost", "fusion", "lexical_weight", "rerank_context",
     "exclude_doc_prefix", "include_archived",
+    "analyze", "use_variants", "context_tokens",
 }
 
 
@@ -66,9 +69,15 @@ def load_gold(path: Path) -> list[dict]:
                 if key in seen:
                     raise ValueError("duplicate relevant item")
                 seen.add(key)
+                if "quote" in item and (not isinstance(item["quote"], str) or not item["quote"].strip()):
+                    raise ValueError("evidence quote must be nonempty")
+            validate_gold_answer(row)
             rows.append(row)
         except (ValueError, TypeError) as exc:
             raise ValueError(f"{path}:{number}: {exc}") from exc
+    ids = [row.get("id", str(i)) for i, row in enumerate(rows)]
+    if any(not isinstance(value, str) or not value.strip() for value in ids) or len(ids) != len(set(ids)):
+        raise ValueError("gold query ids must be unique nonempty strings")
     return rows
 
 
@@ -141,6 +150,8 @@ def eval_query(row: dict, hits: list[dict], k: int = TOP_K) -> dict:
     idcg = sum(gain / log2(i + 2) for i, gain in enumerate(ideal))
     evidence = [item for item in row["relevant"] if "chunk_index" in item]
     evidence_found = sum(any(_matches(item, hit) and item["chunk_index"] == hit.get("chunk_index")
+                             and (not item.get("content_hash") or item["content_hash"] == hit.get("content_hash"))
+                             and (not item.get("quote") or item["quote"] in hit.get("content", ""))
                              for hit in selected) for item in evidence)
     return {"rank": min((rank for rank in matched if rank is not None), default=None),
             "recall_at_k": sum(rank is not None for rank in matched) / len(relevant),
@@ -198,7 +209,8 @@ def evaluate(es: Elasticsearch, gold: list[dict], *, configurations: dict[str, d
     defaults = {"candidate_k": settings.candidate_k, "rerank": settings.rerank_enabled,
                 "expand_context": settings.expand_context, "profile": "all", "canonical_group": True,
                 "canonical_boost": 0.15, "fusion": "rrf", "lexical_weight": 0.5,
-                "rerank_context": False, "exclude_doc_prefix": None, "include_archived": False}
+                "rerank_context": False, "exclude_doc_prefix": None, "include_archived": False,
+                "analyze": False, "use_variants": True, "context_tokens": 4000}
     if configurations is None:
         configurations = {"operational": {}}
     if not isinstance(configurations, dict) or not configurations:
@@ -215,7 +227,7 @@ def evaluate(es: Elasticsearch, gold: list[dict], *, configurations: dict[str, d
             minimum = 1 if key == "candidate_k" else 0
             if type(options[key]) is not int or options[key] < minimum:
                 raise ValueError(f"{name}.{key} must be an integer >= {minimum}")
-        for key in ("rerank", "canonical_group", "rerank_context", "include_archived"):
+        for key in ("rerank", "canonical_group", "rerank_context", "include_archived", "analyze", "use_variants"):
             if type(options[key]) is not bool:
                 raise ValueError(f"{name}.{key} must be boolean")
         for key in ("canonical_boost", "lexical_weight"):
@@ -230,17 +242,40 @@ def evaluate(es: Elasticsearch, gold: list[dict], *, configurations: dict[str, d
             raise ValueError(f"{name}.fusion must be rrf or linear")
         if options["exclude_doc_prefix"] is not None and not isinstance(options["exclude_doc_prefix"], str):
             raise ValueError(f"{name}.exclude_doc_prefix must be string or null")
+        render_search_results([], max_tokens=options["context_tokens"])
         prepared[name] = options
     modes = {}
     for name, options in prepared.items():
         rows = []
-        for gold_row in gold:
+        for i, gold_row in enumerate(gold):
+            query_plan = []
+            search_options = {key: value for key, value in options.items() if key not in {
+                "use_variants", "context_tokens",
+            }}
+            search_options.update({key: gold_row[key] for key in (
+                "as_of", "law_id", "article_id", "case_id", "legal_version", "legal_kind", "category",
+            ) if key in gold_row})
+            if options["analyze"]:
+                search_options.update({key: gold_row[key] for key in ("issues", "needed_sources") if key in gold_row})
             start = perf_counter()
             hits = hybrid_search(es, gold_row["query"], top_k=top_k,
-                                 variants=gold_row.get("variants"), log=False, **options)
+                                 variants=gold_row.get("variants") if options["use_variants"] else None,
+                                 query_plan_out=query_plan, log=False, **search_options)
             latency_ms = round((perf_counter() - start) * 1000, 2)
-            rows.append({"query": gold_row["query"], "query_type": gold_row["query_type"],
+            evidence = []
+            rendered = render_search_results(
+                hits, max_tokens=options["context_tokens"], evidence_out=evidence,
+                preamble=render_query_plan(query_plan[0]) if options["analyze"] and query_plan else "",
+            )
+            context = {"question": gold_row["query"], "rendered": rendered, "evidence": evidence}
+            rows.append({"query_id": gold_row.get("id", str(i)),
+                         "query": gold_row["query"], "query_type": gold_row["query_type"],
                          "answerable": gold_row["answerable"], "latency_ms": latency_ms,
+                         "query_plan": query_plan[0] if query_plan else None,
+                         "context": context, "context_sha256": digest(context),
+                         "ranking": [{key: hit[key] for key in (
+                             "doc_id", "chunk_index", "content_hash", "score", "rerank_score",
+                         ) if key in hit} for hit in hits],
                          **eval_query(gold_row, hits, top_k)})
         modes[name] = {"config": {"top_k": top_k, **options}, "summary": _summary(rows),
                        "by_query_type": {kind: _summary([row for row in rows if row["query_type"] == kind])
@@ -249,6 +284,8 @@ def evaluate(es: Elasticsearch, gold: list[dict], *, configurations: dict[str, d
     payload = json.dumps(gold, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return {"schema_version": 1, "metric_cutoff": top_k,
             "metadata": {"git": _git_revision(), "index": settings.es_index,
+                         "source_sha256": digest({str(path.relative_to(Path(__file__).parent)): path.read_text()
+                                                  for path in sorted(Path(__file__).parent.rglob("*.py"))}),
                          "embedding_model": settings.embedding_model,
                          "embedding_revision": getattr(settings, "embedding_revision", None),
                          "rerank_model": settings.rerank_model,
@@ -270,4 +307,8 @@ def format_report(report: dict) -> str:
                      f"{display('ndcg_at_k')}  {display('evidence_recall_at_k')}  "
                      f"{display('noanswer_false_positive_rate')}  "
                      f"{metrics['latency_p50_ms']}/{metrics['latency_p95_ms']}")
+        if "answer_summary" in mode:
+            a = mode["answer_summary"]
+            lines.append(f"  reviewed answers {a['reviewed_answers']} | accuracy {a['answer_accuracy']} | "
+                         f"citation precision {a['citation_precision']} | completeness {a['citation_completeness']}")
     return "\n".join(lines)

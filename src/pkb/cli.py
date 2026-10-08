@@ -2,6 +2,7 @@
 # 함수 첨자 TypeError를 일으킨다 — 지연 평가로 모듈 전체를 방어.
 from __future__ import annotations
 
+import builtins
 import sys
 from pathlib import Path
 
@@ -387,13 +388,24 @@ def query(
     fusion: str = typer.Option("rrf", help="결합 방식: rrf|linear (비교 실험)"),
     lexical_weight: float = typer.Option(0.5, min=0.0, max=1.0, help="linear 모드 BM25 가중치"),
     rerank_context: bool = typer.Option(False, help="리랭커 입력에 제목·섹션 포함 (비교 실험)"),
+    analyze: bool = typer.Option(False, help="질문 쟁점·기준일·필요 자료를 분석해 검색"),
+    issue: builtins.list[str] = typer.Option(None, help="분리한 쟁점 (반복 가능, --analyze와 사용)"),
+    needed_source: builtins.list[str] = typer.Option(None, help="필요 자료 (statute|judgment 또는 검색어)"),
+    query_variant: builtins.list[str] = typer.Option(None, help="검색어 변형 (최대 3개)"),
+    as_of: str = typer.Option(None, help="법률 자료 기준일 YYYY-MM-DD"),
+    law_id: str = typer.Option(None, help="법령 식별자"),
+    article_id: str = typer.Option(None, help="조문 식별자"),
+    case_id: str = typer.Option(None, help="판결 식별자"),
+    legal_version: str = typer.Option(None, help="법률 자료 버전"),
+    legal_kind: str = typer.Option(None, help="statute|judgment"),
 ):
     """하이브리드 검색 (BM25 + kNN + RRF + 옵션 리랭커)."""
-    from pkb.context import render_search_results
+    from pkb.context import render_query_plan, render_search_results
     from pkb.retrieve import hybrid_search
     from pkb.store import get_client
 
     es = get_client()
+    plan = []
     results = hybrid_search(
         es, question,
         category=category, top_k=top_k,
@@ -405,9 +417,13 @@ def query(
         canonical_group=canonical_group,
         canonical_boost=canonical_boost,
         fusion=fusion, lexical_weight=lexical_weight, rerank_context=rerank_context,
+        analyze=analyze, issues=issue, needed_sources=needed_source, variants=query_variant,
+        as_of=as_of, law_id=law_id, article_id=article_id, case_id=case_id,
+        legal_version=legal_version, legal_kind=legal_kind, query_plan_out=plan,
     )
 
-    typer.echo(render_search_results(results, max_tokens=context_tokens))
+    typer.echo(render_search_results(results, max_tokens=context_tokens,
+                                    preamble=render_query_plan(plan[0]) if analyze and plan else ""))
 
 
 def _graph_purge(doc_id: str) -> dict | None:
@@ -494,6 +510,9 @@ def eval_cmd(
     output: Path = typer.Option(None, help="상세 결과 JSON 저장 (새 파일)"),
     top_k: int = typer.Option(settings.default_top_k, min=1, help="평가 결과 수"),
     migrate_to: Path = typer.Option(None, help="구 query/doc_id 골드셋을 새 v2 파일로 변환 후 종료"),
+    replay_report: Path = typer.Option(None, help="고정된 검색 보고서 (답변 평가 시 재검색하지 않음)"),
+    answers: Path = typer.Option(None, help="답변과 별도 검토 판정 JSONL"),
+    contexts_output: Path = typer.Option(None, help="정답 라벨을 제외한 답변 소비자용 문맥 JSONL (새 파일)"),
 ):
     """운영 검색 경로로 여러 설정의 근거 검색 품질과 지연 시간을 비교합니다."""
     import json
@@ -512,12 +531,29 @@ def eval_cmd(
             raise ValueError(f"골드셋이 비어 있습니다: {gold_path}")
         if output is not None and output.exists():
             raise ValueError(f"결과 파일이 이미 있습니다: {output}")
+        if contexts_output is not None and (contexts_output.exists() or contexts_output == output):
+            raise ValueError("문맥 출력은 별도의 새 파일이어야 합니다")
         options = json.loads(configurations.read_text(encoding="utf-8")) if configurations else None
-        report = evaluate(get_client(), rows, configurations=options, top_k=top_k)
+        if (replay_report is None) != (answers is None):
+            raise ValueError("--replay-report와 --answers를 함께 지정하세요")
+        if replay_report is not None:
+            if configurations is not None:
+                raise ValueError("고정 보고서 답변 평가에는 --configurations를 지정할 수 없습니다")
+            from pkb.answer_eval import score_answers
+            report = score_answers(json.loads(replay_report.read_text(encoding="utf-8")), rows,
+                                   [json.loads(line) for line in answers.read_text(encoding="utf-8").splitlines()
+                                    if line.strip()])
+        else:
+            report = evaluate(get_client(), rows, configurations=options, top_k=top_k)
         if output is not None:
             with output.open("x", encoding="utf-8") as handle:
                 json.dump(report, handle, ensure_ascii=False, indent=2, allow_nan=False)
                 handle.write("\n")
+        if contexts_output is not None:
+            from pkb.answer_eval import export_contexts
+            with contexts_output.open("x", encoding="utf-8") as handle:
+                for context in export_contexts(report):
+                    handle.write(json.dumps(context, ensure_ascii=False, allow_nan=False) + "\n")
         typer.echo(format_report(report))
         if output is not None:
             typer.echo(f"상세 결과: {output}")

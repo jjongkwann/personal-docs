@@ -1,8 +1,13 @@
 """CLI와 MCP가 같은 출처·토큰 예산으로 검색 근거를 전달한다."""
 
+import json
 from functools import lru_cache
 
 import tiktoken
+
+
+def render_query_plan(plan: dict) -> str:
+    return "질문 분석: " + json.dumps(plan, ensure_ascii=False)
 
 
 @lru_cache(maxsize=1)
@@ -25,6 +30,7 @@ def render_search_results(
     max_tokens: int = 4000,
     hit_concepts: dict | None = None,
     preamble: str = "",
+    evidence_out: list[dict] | None = None,
 ) -> str:
     """매칭 청크를 먼저, 같은 절의 주변 청크를 다음에 전달한다.
 
@@ -73,6 +79,10 @@ def render_search_results(
         for field, label in (
             ("category", "카테고리"), ("title", "제목"), ("doc_type", "유형"),
             ("canonical_id", "정본"), ("status", "상태"),
+            ("legal_kind", "법률 자료 유형"), ("law_id", "법령 ID"), ("article_id", "조문"),
+            ("case_id", "사건번호"), ("legal_version", "법률 버전"),
+            ("effective_from", "시행 시작"), ("effective_to", "시행 종료(미포함)"),
+            ("decision_date", "선고일"), ("original_url", "원문 URL"), ("original_location", "원문 위치"),
         ):
             if row.get(field):
                 header += f" | {label}: {row[field]}"
@@ -83,9 +93,15 @@ def render_search_results(
         if concepts:
             header += "관련 개념: " + ", ".join(c["name"] for c in concepts) + "\n"
         content = row.get("content", "")
+        def record(visible: str, row: dict = row, index: int = index) -> None:
+            if evidence_out is not None:
+                evidence_out.append({**{k: v for k, v in row.items() if k not in {"embedding", "neighbors"}},
+                                     "citation_id": index, "content": visible})
+
         candidate = "\n\n".join([*parts, header + content])
         if len(_tokens(candidate)) <= budget:
             parts.append(header + content)
+            record(content)
             continue
         prefix = "\n\n".join([*parts, header])
         suffix = "\n[본문 일부 생략]"
@@ -96,6 +112,7 @@ def render_search_results(
                 clipped = _clip(clipped, max(0, len(_tokens(clipped)) - 1))
             if clipped:
                 parts.append(header + clipped + suffix)
+                record(clipped)
         omitted = True
         break
     if omitted:

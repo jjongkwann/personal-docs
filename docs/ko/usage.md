@@ -458,3 +458,39 @@ uv run pkb eval --gold new-v2.jsonl --configurations file.json --output new-repo
   질문이어야 모드 간 차이가 드러납니다.
 - `data/.eval/`은 별도 설정 없이 기존 규칙으로 자동 커버됩니다: `.`으로 시작하는 폴더는
   인제스트에서 제외되어 골드셋이 검색 대상에 섞이지 않고, `data/`는 gitignore라 커밋되지 않습니다.
+
+### 질문 분석·법률 기준일·답변 평가
+
+`query --analyze`는 쟁점·기준일·필요 자료·검색어 변형·필터·모호성을 함께 표시한다.
+`--issue`, `--needed-source`, `--query-variant`를 반복 전달해 복합 질문을 명시할 수 있다.
+자연어 분석은 보수적인 규칙 기반이다. 일반 기술 질문에서 추출한 기준일은 계획에 보존하되,
+지원하지 않는 날짜 필터로 기술 문서를 배제하지 않는다.
+
+```bash
+uv run pkb query "2025-12-31 기준 제7조 통지 기간?" --analyze --law-id verified-source-id
+uv run pkb query "요건과 판결" --analyze --issue "법률 요건" --issue "판결의 적용" \
+  --needed-source statute --needed-source judgment --as-of 2025-12-31
+```
+
+명시적인 `--as-of YYYY-MM-DD`는 법률 자료용이다. 법령은 시행 시작일 이상·종료일 미만,
+판결은 선고일 이하를 검색하며 날짜 미상은 제외한다. 과거 기준일에는 현재 아카이브·만료로
+역사 자료를 제외하지 않는다. 법령·조문·판결·버전 필터는 `--law-id`, `--article-id`,
+`--case-id`, `--legal-version`, `--legal-kind`로 전달한다. BM25/kNN·변형·이웃 청크에 같은
+필터를 적용하며 법률 버전은 정본 그룹에서도 구분한다. [저장·마이그레이션](../legal-metadata.md)을 참고한다.
+
+[평가 자료와 절차](../../evaluation/README.md)는 정확한 문단, 답 없음, 여러 문서, 상충 자료를
+포함한다. 기존 v2 자료는 그대로 읽고, 답변용 행에만 `id`, `expected_claims`, `answer_policy`를
+추가한다. `pkb eval`은 실제 전달한 토큰 예산 내 문맥·순위·질문 계획을 해시와 함께 보존한다.
+`use_variants=false`로 수동 변형도 끄며 `analyze=true`로 계획을 켠다. 리랭커 기본값은 꺼짐이다.
+
+정답 라벨을 보지 않은 소비자의 답변과 별도 검토자의 주장별 판정을 저장한 다음 재생한다.
+
+```bash
+uv run pkb eval --gold data/evaluation/gold.jsonl \
+  --replay-report data/evaluation/retrieval-report.json \
+  --answers data/evaluation/reviewed-answers.jsonl --output data/evaluation/answer-report.json
+```
+
+이 단계는 재검색하지 않는다. 검색 Recall/nDCG와 답변 정확도·Citation precision·누락·보류를
+따로 집계한다. 인용문이 실제 보이는 문맥에 존재하고 검토자가 해당 주장 지지를 확인해야
+Citation precision의 정답으로 센다. 판정 없는 답변 지표는 미측정으로 남기며 해시 불일치는 거부한다.

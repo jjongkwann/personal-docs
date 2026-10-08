@@ -1,0 +1,28 @@
+{
+  "baseline": {
+    "rerank": false,
+    "analyze": false,
+    "use_variants": false
+  },
+  "analyze": {
+    "rerank": false,
+    "analyze": true,
+    "use_variants": false
+  },
+  "neighbors": {
+    "rerank": false,
+    "analyze": false,
+    "use_variants": false,
+    "expand_context": 1
+  },
+  "rerank": {
+    "rerank": true,
+    "analyze": false,
+    "use_variants": false
+  },
+  "oracle_variants": {
+    "rerank": false,
+    "analyze": false,
+    "use_variants": true
+  }
+}

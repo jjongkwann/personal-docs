@@ -50,6 +50,11 @@ mcp = MCPServer(
 사용자의 개인 데이터(경력, 공부 노트, 자기소개, Obsidian 등)가 Elasticsearch에 저장되어 있습니다.
 질문에 답하려면 search_knowledge로 먼저 검색하세요. 정본만 필요하면 profile="curated",
 연구 근거까지 필요하면 profile="evidence", 레거시까지 넓히려면 profile="all"을 사용합니다.
+복합 질문은 analyze=True와 issues/needed_sources로 쟁점과 필요한 자료를 나누세요.
+법률 질문은 as_of 기준일과 확인한 법령·조문·판결 식별자를 전달하세요.
+답변의 사실 주장마다 doc_id와 청크 번호, 해당 원문 인용을 붙이세요. 인용문이 존재하는 것과
+주장을 뒷받침하는 것은 별도 판단입니다. 근거가 부족하면 보류하고, 상충 자료는 각 출처의
+조건·시점·주장을 함께 제시하세요. 검색 점수를 확신도나 법률상 유효성으로 해석하지 마세요.
 {_WRITE_WORKFLOW}
 원본 첨부파일은 list_files로 data/ 경로를 찾고 get_file로 받으세요. get_file은 파일명·MIME·
 SHA-256과 원본 바이트를 MCP blob으로 반환하므로 클라이언트에서 디코딩해 저장할 수 있습니다.
@@ -97,6 +102,15 @@ def search_knowledge(
     canonical_boost: float = 0.15,
     expand_context: int | None = None,
     max_context_tokens: int = 4000,
+    analyze: bool = False,
+    issues: list[str] | None = None,
+    needed_sources: list[str] | None = None,
+    as_of: str | None = None,
+    law_id: str | None = None,
+    article_id: str | None = None,
+    case_id: str | None = None,
+    legal_version: str | None = None,
+    legal_kind: str | None = None,
 ) -> str:
     """개인 지식 베이스에서 관련 정보를 하이브리드 검색(BM25+kNN)합니다.
     RRF 결합으로 정밀도를 높입니다 (CrossEncoder 재순위는 RERANK_ENABLED 설정 시).
@@ -121,11 +135,20 @@ def search_knowledge(
         canonical_boost: 정본 문서의 점수 절댓값 기준 가산율 (0 이상 1 미만, 기본 0.15).
         expand_context: 같은 절의 전후 청크 수 (0~4). 생략하면 설정값.
         max_context_tokens: 출처·본문·주변 문맥을 합한 토큰 예산 (256~32000).
+        analyze: 질문 쟁점·기준일·필요 자료를 분석하고 검색어 변형 및 필터를 적용.
+        issues: 명시적으로 분리한 쟁점 목록 (analyze=True와 함께 사용).
+        needed_sources: 필요한 자료 목록 (statute, judgment 또는 검색어; analyze=True).
+        as_of: 법률 자료 기준일 YYYY-MM-DD. 시행 구간·선고일 미상 자료는 제외.
+        law_id: 법령 식별자 정확 일치.
+        article_id: 조문 식별자 정확 일치.
+        case_id: 판결 식별자 정확 일치.
+        legal_version: 법률 자료 버전 정확 일치.
+        legal_kind: statute 또는 judgment.
     """
     from pathlib import Path
 
     from pkb.config import settings as _settings
-    from pkb.context import render_search_results
+    from pkb.context import render_query_plan, render_search_results
     from pkb.retrieve import hybrid_search
     from pkb.store import get_client
 
@@ -135,6 +158,7 @@ def search_knowledge(
         raise ValueError("expand_context는 0~4여야 합니다")
     es = get_client()
     query_vector: list[list[float]] = []
+    plan: list[dict] = []
     results = hybrid_search(
         es, query,
         category=category or None, top_k=top_k,
@@ -148,6 +172,9 @@ def search_knowledge(
         profile=profile,
         canonical_group=canonical_group,
         canonical_boost=canonical_boost,
+        analyze=analyze, issues=issues, needed_sources=needed_sources,
+        as_of=as_of, law_id=law_id, article_id=article_id, case_id=case_id,
+        legal_version=legal_version, legal_kind=legal_kind, query_plan_out=plan,
     )
 
     # 개념그래프 부착 데이터: 히트별 언급 개념(1-hop) + 재질의 시드용 개념 어휘
@@ -175,8 +202,9 @@ def search_knowledge(
                     )
                 vocab_line = "코퍼스 개념 어휘: " + ", ".join(terms)
 
+    preamble = "\n".join(filter(None, [render_query_plan(plan[0]) if analyze and plan else "", vocab_line]))
     return render_search_results(
-        results, max_tokens=max_context_tokens, hit_concepts=hit_concepts, preamble=vocab_line
+        results, max_tokens=max_context_tokens, hit_concepts=hit_concepts, preamble=preamble
     )
 
 

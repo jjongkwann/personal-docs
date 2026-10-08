@@ -359,3 +359,5 @@ MCP에서는 Claude Code 자체가 도구 선택, 재검색, 요약, 파일 작�
 - `convert_and_ingest`는 원본 파일 위치에 제한이 없지만, 변환 결과는 항상 코퍼스의 `<category>/`에 저장됩니다.
 - `sync_corpus`가 기본 재조정 도구입니다(`data/` 코퍼스 전체 업서트 + 유령 문서 정리). `sync_obsidian`은 `DATA_ROOT` 밖에 남겨둔 볼트 파일이 있을 때만 쓰는 선택 경로로, 외부 Obsidian 볼트를 읽어 ES에만 저장합니다(원본은 복사·수정하지 않음). `DATA_ROOT`가 볼트 안에 있으면 그 서브트리는 크롤에서 제외됩니다(이중 인제스트 방지). 둘 다 원본에서 사라진 문서는 정리(prune)하되, 21개 이상 대량 삭제는 `confirm_prune=True`를 요구합니다.
 - 대규모 Graph RAG 구축은 시간이 들 수 있으므로 특정 카테고리(예: `rag`) 또는 단일 `doc_id`부터 진행합니다.
+
+검색은 `analyze`, `issues`, `needed_sources`와 법률 필터 `as_of`, `law_id`, `article_id`, `case_id`, `legal_version`, `legal_kind`도 받는다. 질문 계획과 법률 출처 메타데이터는 문맥 토큰 예산에 포함된다. 답변 소비자는 사실 주장별로 인용하고, 근거 부족 시 보류하며, 상충 출처의 시점·조건을 함께 설명한다. [평가 절차](../../evaluation/README.md)와 [법률 메타데이터](../legal-metadata.md)를 참고한다.

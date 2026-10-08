@@ -1,3 +1,4 @@
+import json
 from math import isfinite
 from time import perf_counter
 
@@ -5,6 +6,7 @@ from elasticsearch import Elasticsearch
 
 from pkb.config import settings
 from pkb.embeddings import embed
+from pkb.query import analyze_query, normalize_legal_filters
 
 RRF_K = 60  # Reciprocal Rank Fusion 상수 (Elastic 기본값)
 MAX_CHUNKS_PER_DOC = 2  # 최종 결과에서 문서당 허용할 최대 청크 수 (다양성 캡)
@@ -87,6 +89,12 @@ def canonical_group_key(candidate: dict) -> str:
     if canonical_id is not None:
         canonical_id = str(canonical_id).strip()
     if canonical_id:
+        version_fields = (
+            "legal_kind", "law_id", "article_id", "case_id", "legal_version",
+            "effective_from", "effective_to", "decision_date",
+        )
+        if any(candidate.get(field) is not None for field in version_fields):
+            return canonical_id + "|legal:" + json.dumps([candidate.get(field) for field in version_fields])
         return canonical_id
     return str(candidate.get("doc_id") or candidate.get("_id") or "")
 
@@ -170,14 +178,16 @@ def cap_per_canonical(
 _cap_per_canonical = cap_per_canonical
 
 
-def _lifecycle_filter(include_archived: bool) -> list[dict]:
+def _lifecycle_filter(include_archived: bool, as_of: str | None = None) -> list[dict]:
     """아카이브/만료 문서 제외 필터. include_archived=True면 빈 리스트 반환.
 
     기본 조건:
       - archived_at 필드가 없어야 함 (아카이브되지 않음)
       - expires_at이 없거나 현재 시점보다 미래여야 함
     """
-    if include_archived:
+    # Legal as-of retrieval uses legal validity intervals. Today's curation
+    # archive/expiry must not erase a law that was applicable on the question date.
+    if include_archived or as_of:
         return []
     return [
         {"bool": {"must_not": {"exists": {"field": "archived_at"}}}},
@@ -200,6 +210,46 @@ def _exclude_doc_prefix_filter(exclude_doc_prefix: str | None) -> list[dict]:
     return [{"bool": {"must_not": [{"prefix": {"doc_id": exclude_doc_prefix}}]}}]
 
 
+def legal_filter(**values: str | None) -> list[dict]:
+    """Exact legal identifiers and strict historical applicability filters.
+
+    Unknown validity dates/kinds are excluded from as-of searches. Statute
+    effective_to is exclusive; judgments cannot precede their decision date.
+    """
+    values = normalize_legal_filters(**values)
+    as_of = values.pop("as_of", None)
+    filters = [{"term": {field: value}} for field, value in values.items()]
+    if as_of:
+        filters.append({"bool": {"should": [
+            {"bool": {"filter": [
+                {"term": {"legal_kind": "statute"}},
+                {"range": {"effective_from": {"lte": as_of}}},
+                {"bool": {"should": [
+                    {"bool": {"must_not": {"exists": {"field": "effective_to"}}}},
+                    {"range": {"effective_to": {"gt": as_of}}},
+                ], "minimum_should_match": 1}},
+            ]}},
+            {"bool": {"filter": [
+                {"term": {"legal_kind": "judgment"}},
+                {"range": {"decision_date": {"lte": as_of}}},
+            ]}},
+        ], "minimum_should_match": 1}})
+    return filters
+
+
+def _search_filters(
+    category: str | None, include_archived: bool, exclude_doc_prefix: str | None,
+    profile: str | None, legal_filters: dict | None = None,
+) -> list[dict]:
+    legal_filters = legal_filters or {}
+    filters = [{"term": {"category": category}}] if category else []
+    filters.extend(profile_filter(profile))
+    filters.extend(_lifecycle_filter(include_archived, legal_filters.get("as_of")))
+    filters.extend(_exclude_doc_prefix_filter(exclude_doc_prefix))
+    filters.extend(legal_filter(**legal_filters))
+    return filters
+
+
 def _bm25_query(
     query_text: str,
     category: str | None,
@@ -207,6 +257,7 @@ def _bm25_query(
     exclude_doc_prefix: str | None = None,
     profile: str | None = None,
     retrieval_profile: str | None = None,
+    legal_filters: dict | None = None,
 ) -> dict:
     bm25: dict = {
         "bool": {
@@ -222,12 +273,9 @@ def _bm25_query(
             "minimum_should_match": 1,
         }
     }
-    filters: list[dict] = []
-    if category:
-        filters.append({"term": {"category": category}})
-    filters.extend(profile_filter(_resolve_profile(profile, retrieval_profile)))
-    filters.extend(_lifecycle_filter(include_archived))
-    filters.extend(_exclude_doc_prefix_filter(exclude_doc_prefix))
+    filters = _search_filters(
+        category, include_archived, exclude_doc_prefix, _resolve_profile(profile, retrieval_profile), legal_filters,
+    )
     if filters:
         bm25["bool"]["filter"] = filters
     return bm25
@@ -241,6 +289,7 @@ def _knn_query(
     exclude_doc_prefix: str | None = None,
     profile: str | None = None,
     retrieval_profile: str | None = None,
+    legal_filters: dict | None = None,
 ) -> dict:
     knn: dict = {
         "field": "embedding",
@@ -248,12 +297,9 @@ def _knn_query(
         "k": k,
         "num_candidates": k * 5,
     }
-    filters: list[dict] = []
-    if category:
-        filters.append({"term": {"category": category}})
-    filters.extend(profile_filter(_resolve_profile(profile, retrieval_profile)))
-    filters.extend(_lifecycle_filter(include_archived))
-    filters.extend(_exclude_doc_prefix_filter(exclude_doc_prefix))
+    filters = _search_filters(
+        category, include_archived, exclude_doc_prefix, _resolve_profile(profile, retrieval_profile), legal_filters,
+    )
     if filters:
         knn["filter"] = filters
     return knn
@@ -285,6 +331,16 @@ def hybrid_search(
     fusion: str = "rrf",
     lexical_weight: float = 0.5,
     rerank_context: bool = False,
+    analyze: bool = False,
+    issues: list[str] | None = None,
+    needed_sources: list[str] | None = None,
+    as_of: str | None = None,
+    law_id: str | None = None,
+    article_id: str | None = None,
+    case_id: str | None = None,
+    legal_version: str | None = None,
+    legal_kind: str | None = None,
+    query_plan_out: list[dict] | None = None,
 ) -> list[dict]:
     """하이브리드 검색.
 
@@ -306,6 +362,10 @@ def hybrid_search(
         fusion: ``rrf``(기본) 또는 채널별 최고 점수로 정규화한 ``linear``.
         lexical_weight: ``linear``에서 BM25 점수의 가중치(0~1).
         rerank_context: True면 리랭커 입력에 title·section_path를 포함한다.
+        analyze: 질문을 쟁점·기준일·자료 유형으로 분리해 variants와 필터에 적용한다.
+        as_of: YYYY-MM-DD 기준 법령 시행구간/판결일 필터. 날짜 미상 자료는 제외한다.
+            이때 현재의 아카이브/만료 대신 법률상 유효기간으로 판단한다.
+        query_plan_out: 분석한 질문 계획을 append할 선택적 출력 목록.
     """
     profile = _resolve_profile(profile, retrieval_profile)
     if fusion not in {"rrf", "linear"}:
@@ -314,6 +374,21 @@ def hybrid_search(
         raise ValueError("lexical_weight는 0~1이어야 합니다")
     if not isfinite(canonical_boost) or not 0 <= canonical_boost < 1:
         raise ValueError("canonical_boost는 0 이상 1 미만이어야 합니다")
+    legal_filters = normalize_legal_filters(
+        as_of=as_of, law_id=law_id, article_id=article_id, case_id=case_id,
+        legal_version=legal_version, legal_kind=legal_kind,
+    )
+    if analyze:
+        plan = analyze_query(
+            query_text, issues=issues, needed_sources=needed_sources, variants=variants,
+            category=category, **legal_filters,
+        )
+        variants = plan["variants"]
+        legal_filters = {key: value for key, value in plan["filters"].items() if key != "category"}
+        if query_plan_out is not None:
+            query_plan_out.append(plan)
+    elif issues is not None or needed_sources is not None:
+        raise ValueError("issues/needed_sources 입력에는 analyze=True가 필요합니다")
     timings: dict[str, float] = {}
     t_total = perf_counter()
 
@@ -343,6 +418,7 @@ def hybrid_search(
             profile=profile,
             fusion=fusion,
             lexical_weight=lexical_weight,
+            legal_filters=legal_filters,
         )
         for hit in hits:
             if hit["_id"] in merged:
@@ -370,7 +446,10 @@ def hybrid_search(
 
     if expand_context > 0:
         t = perf_counter()
-        candidates = _attach_neighbors(es, candidates, window=expand_context)
+        candidates = _attach_neighbors(
+            es, candidates, window=expand_context,
+            filters=_search_filters(category, include_archived, exclude_doc_prefix, profile, legal_filters),
+        )
         timings["expand_ms"] = round((perf_counter() - t) * 1000, 2)
 
     timings["total_ms"] = round((perf_counter() - t_total) * 1000, 2)
@@ -396,7 +475,7 @@ def hybrid_search(
 
 
 def _attach_neighbors(
-    es: Elasticsearch, hits: list[dict], window: int = 1
+    es: Elasticsearch, hits: list[dict], window: int = 1, filters: list[dict] | None = None,
 ) -> list[dict]:
     """각 hit의 전후 window개 청크를 neighbors 필드로 부착 (동일 doc_id 내).
     검색 결과를 상위 맥락과 함께 반환할 때 사용. msearch 한 번으로 전 히트를 조회한다."""
@@ -428,6 +507,8 @@ def _attach_neighbors(
                 "sort": [{"chunk_index": {"order": "asc"}}],
             },
         ])
+        if filters:
+            searches[-1]["query"]["bool"]["filter"] = filters
 
     if not searches:
         return hits
@@ -442,9 +523,15 @@ def _attach_neighbors(
                 continue  # 자기 자신 제외
             neighbors.append(
                 {
+                    "_id": nh.get("_id"),
+                    "doc_id": src.get("doc_id", hit.get("doc_id")),
                     "chunk_index": src.get("chunk_index"),
                     "section_path": src.get("section_path"),
                     "content": src.get("content"),
+                    **{field: src[field] for field in (
+                        "legal_kind", "law_id", "article_id", "case_id", "legal_version", "effective_from",
+                        "effective_to", "decision_date", "original_url", "original_location",
+                    ) if field in src},
                 }
             )
         hit["neighbors"] = neighbors
@@ -466,6 +553,7 @@ def _rrf_search(
     retrieval_profile: str | None = None,
     fusion: str = "rrf",
     lexical_weight: float = 0.5,
+    legal_filters: dict | None = None,
 ) -> list[dict]:
     """BM25와 kNN을 각각 실행해 RRF 또는 정규화 가중합으로 결합.
 
@@ -489,6 +577,7 @@ def _rrf_search(
                     exclude_doc_prefix=exclude_doc_prefix,
                     profile=profile,
                     retrieval_profile=retrieval_profile,
+                    legal_filters=legal_filters,
                 ),
                 "size": candidate_k,
                 "_source": {"excludes": ["embedding"]},
@@ -500,6 +589,7 @@ def _rrf_search(
                     exclude_doc_prefix=exclude_doc_prefix,
                     profile=profile,
                     retrieval_profile=retrieval_profile,
+                    legal_filters=legal_filters,
                 ),
                 "size": candidate_k,
                 "_source": {"excludes": ["embedding"]},

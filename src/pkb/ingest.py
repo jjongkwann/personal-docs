@@ -13,6 +13,7 @@ import tiktoken
 import yaml
 
 from pkb.config import settings
+from pkb.legal import LEGAL_METADATA_FIELDS, normalize_legal_metadata, preserve_legal_revision, validate_legal_metadata
 
 _log = logging.getLogger(__name__)
 
@@ -133,6 +134,7 @@ _META_DIFF_FIELDS = (
     "source_ids",
     "supports",
     "concept_ids",
+    *LEGAL_METADATA_FIELDS,
 )
 
 # Frontmatter fields introduced after the original corpus was created.  Keep
@@ -168,7 +170,7 @@ def _diff_metadata(old: dict, new: dict) -> dict:
         # erase values already present in ES during a metadata-only update.
         # An explicit YAML null is different: process_file includes the key
         # and the resulting ``None`` is propagated as a field removal.
-        if f in DOCUMENT_METADATA_FIELDS and f not in new:
+        if f in (*DOCUMENT_METADATA_FIELDS, *LEGAL_METADATA_FIELDS) and f not in new:
             continue
         ov, nv = old.get(f), new.get(f)
         if f == "tags" or f in _DOCUMENT_METADATA_LIST_FIELDS:
@@ -753,6 +755,7 @@ def process_file(
     if not isinstance(fm_archive_reason, str):
         fm_archive_reason = None
     document_metadata = _normalize_document_metadata(frontmatter)
+    document_metadata.update(normalize_legal_metadata(frontmatter))
 
     results = []
     for i, (section_path, chunk_text) in enumerate(chunks_with_path):
@@ -874,7 +877,7 @@ def ingest_files(
         existing = get_existing_chunks(es, doc_id)
         # Replacement and moved slots are indexed as whole documents. Carry
         # document-level fields that an older source file does not declare.
-        for field in (*DOCUMENT_METADATA_FIELDS, "archived_at", "archive_reason"):
+        for field in (*DOCUMENT_METADATA_FIELDS, *LEGAL_METADATA_FIELDS, "archived_at", "archive_reason"):
             if field in new_chunks[0]:
                 continue
             values = [old[field] for old in existing.values() if old.get(field) is not None]
@@ -884,6 +887,8 @@ def ingest_files(
                 raise ValueError(f"conflicting {field} across existing chunks of {doc_id}")
             for chunk in new_chunks:
                 chunk[field] = list(values[0]) if isinstance(values[0], list) else values[0]
+        validate_legal_metadata(new_chunks[0])
+        preserve_legal_revision(existing, new_chunks[0])
         new_by_idx = {c["chunk_index"]: c for c in new_chunks}
 
         # 벡터 재사용·복사 판정은 embedding_fingerprint(모델+전처리+임베딩 입력) 기준.

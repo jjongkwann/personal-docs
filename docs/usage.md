@@ -468,3 +468,50 @@ where appropriate. `--output` also requires a new path and stores per-query resu
 - `data/.eval/` is automatically covered by existing rules without extra config: folders starting
   with `.` are excluded from ingestion, so the gold set never mixes into the search corpus, and
   `data/` is gitignored so it's never committed.
+
+### Question planning and legal reference dates
+
+Use `--analyze` with repeatable `--issue`, `--needed-source`, and `--query-variant` inputs.
+The visible plan separates issues, the reference date, needed sources, generated variants, exact
+filters, and unresolved ambiguity. Automatic extraction is conservative and deterministic;
+complex issues can be supplied by the answering agent. An inferred reference date on a technical
+question remains in the plan without applying unsupported temporal filters to ordinary notes.
+
+```bash
+uv run pkb query "2025-12-31 기준 제7조 통지 기간?" --analyze --law-id verified-source-id
+uv run pkb query "문제의 요건과 관련 판결" --analyze --issue "법률 요건" --issue "판결의 적용" \
+  --needed-source statute --needed-source judgment --as-of 2025-12-31
+```
+
+`--as-of` explicitly selects legal sources valid on `YYYY-MM-DD`: statutes require a known
+`effective_from <= as_of`, with `as_of < effective_to` when an end is recorded; judgments require
+`decision_date <= as_of`. Unknown dates are excluded. Historical searches ignore today's archive
+and expiry flags. Exact `--law-id`, `--article-id`, `--case-id`, `--legal-version`, and `--legal-kind`
+filters apply to BM25, kNN, every variant, and neighboring chunks. Legal versions remain distinct
+under canonical grouping. See [legal metadata and migration](legal-metadata.md).
+
+### Answer and citation evaluation
+
+[Evaluation assets and protocol](../evaluation/README.md) provide exact paragraphs, no-answer,
+multi-document and conflicting-source cases. v2 retrieval gold remains valid; answer-enabled rows
+add a stable `id`, `expected_claims` with exact `evidence`, and `answer_policy` (`answer`, `conflict`,
+or `abstain`). Existing files are preserved; the legacy migration remains explicit.
+
+`pkb eval` now freezes each final ranking, the visible question plan, and the actual token-budgeted
+context/evidence. A clipped or omitted passage cannot later validate a citation. Configuration
+`use_variants=false` disables supplied variants; `analyze=true` enables planning, and
+`context_tokens` controls the same renderer used by CLI/MCP. The default reranker remains off.
+
+Have the answer consumer read only each question/context (never expected claims), record its
+claims and citations, then have a separate reviewer judge correctness and entailment. Replaying
+those records does not query Elasticsearch or regenerate answers:
+
+```bash
+uv run pkb eval --gold data/evaluation/gold.jsonl \
+  --replay-report data/evaluation/retrieval-report.json \
+  --answers data/evaluation/reviewed-answers.jsonl --output data/evaluation/answer-report.json
+```
+
+Missing reviews leave answer metrics unmeasured. Incorrect context/answer/gold hashes reject the
+batch. Citation precision combines exact quote visibility with reviewed entailment; a quote's
+presence alone earns no support credit. See the protocol for denominators and examples.

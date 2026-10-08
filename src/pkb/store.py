@@ -5,6 +5,7 @@ from functools import lru_cache
 from elasticsearch import Elasticsearch, NotFoundError
 
 from pkb.config import settings
+from pkb.legal import LEGAL_MAPPING_PROPERTIES
 from pkb.search_log import log_change
 
 INDEX_SETTINGS = {
@@ -62,6 +63,7 @@ INDEX_SETTINGS = {
             "source_ids": {"type": "keyword"},
             "supports": {"type": "keyword"},
             "concept_ids": {"type": "keyword"},
+            **LEGAL_MAPPING_PROPERTIES,
         }
     },
 }
@@ -83,6 +85,29 @@ def get_client() -> Elasticsearch:
 def create_index(es: Elasticsearch) -> None:
     if not es.indices.exists(index=settings.es_index):
         es.indices.create(index=settings.es_index, body=INDEX_SETTINGS)
+
+
+def migrate_legal_mapping(es: Elasticsearch, *, index: str) -> list[str]:
+    """Add legal fields to one explicitly selected physical index; preserve all data.
+
+    Not called by create_index or ingest: existing services require a separate
+    authorized migration. Conflicting dynamic mappings require a fresh index.
+    """
+    if not index or any(char in index for char in "*,?") or index == "_all":
+        raise ValueError("select one physical index for the legal metadata migration")
+    if es.indices.exists_alias(name=index):
+        raise ValueError("select a physical index, not an alias")
+    mappings = es.indices.get_mapping(index=index)
+    if set(mappings) != {index}:
+        raise ValueError("migration must resolve to exactly the selected physical index")
+    existing = mappings[index]["mappings"].get("properties", {})
+    for field, expected in LEGAL_MAPPING_PROPERTIES.items():
+        if field in existing and existing[field].get("type") != expected["type"]:
+            raise ValueError(f"incompatible mapping for {field}; reindex into a separate index")
+    additions = {field: spec for field, spec in LEGAL_MAPPING_PROPERTIES.items() if field not in existing}
+    if additions:
+        es.indices.put_mapping(index=index, properties=additions)
+    return list(additions)
 
 
 def delete_index(es: Elasticsearch) -> None:
