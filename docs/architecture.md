@@ -31,7 +31,7 @@ The core architecture has four layers:
   ↓
 [Claude Code]
   ↓ MCP (Streamable HTTP, 127.0.0.1:8787)
-[PKB MCP Server]  src/pkb/mcp_server.py  (23 tools)
+[PKB MCP Server]  src/pkb/mcp_server.py  (26 tools)
   ├─ search_knowledge        → ES hybrid search
   ├─ write_file / add_document / convert_and_ingest  → write/ingest into data/
   ├─ list_documents / get_document / reindex_document
@@ -294,15 +294,15 @@ core is what actually makes the CLI↔MCP parity above true. `tests/test_cli_mcp
 the *surface* by introspection — it fails when a newly registered command or tool isn't declared in
 its capability map or an allowlist — but it never compares behavior; the shared core does that.
 
-23 tools provided:
+26 tools provided:
 
 | Category | Tools |
 |------|------|
 | Search | `search_knowledge` |
-| File/document | `write_file`, `read_file`, `patch_file`, `list_documents`, `add_document`, `convert_and_ingest`, `get_document`, `reindex_document`, `sync_corpus`, `sync_obsidian` |
+| File/document | `write_file`, `read_file`, `patch_file`, `list_files`, `get_file`, `list_documents`, `add_document`, `convert_and_ingest`, `get_document`, `reindex_document`, `sync_corpus`, `sync_obsidian` |
 | Lifecycle | `archive_document`, `restore_document` |
 | Status | `doctor` |
-| Graph RAG | `graph_explain`, `graph_path`, `graph_query`, `graph_affected`, `graph_list_concepts`, `graph_list_chunks`, `graph_store_concepts`, `graph_curate`, `graph_merge` |
+| Graph RAG | `graph_explain`, `graph_path`, `graph_query`, `graph_affected`, `graph_map`, `graph_list_concepts`, `graph_list_chunks`, `graph_store_concepts`, `graph_curate`, `graph_merge` |
 
 See [docs/mcp.md](mcp.md) for each tool's parameters and usage examples.
 
@@ -336,8 +336,8 @@ loop), `sync_obsidian` (vault-only reconciliation). This mapping is guarded by
 
 ### Tool profile (`PKB_MCP_PROFILE`)
 
-Set `PKB_MCP_PROFILE=core` on the MCP server process to expose only the 11 tools in
-`CORE_TOOLS` (`mcp_server.py`) instead of all 23 — the ones that actually get called, plus
+Set `PKB_MCP_PROFILE=core` on the MCP server process to expose only the 13 tools in
+`CORE_TOOLS` (`mcp_server.py`) instead of all 26 — the ones that actually get called, plus
 `graph_map` so the graph stays viewable without dropping to the CLI. Default is `full`.
 The server `instructions` adapt to the profile so they never advertise a pruned tool;
 `tests/test_cli_mcp_parity.py` guards that.

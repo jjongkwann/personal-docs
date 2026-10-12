@@ -180,6 +180,8 @@ uv run pkb doctor
 |------|------|
 | `search_knowledge` | 개인 지식 베이스 하이브리드 검색. BM25와 kNN을 msearch 한 요청으로 검색한 뒤 RRF로 결합(CrossEncoder 재순위는 기본 비활성), 문서당 최대 2청크로 캡. 개념 그래프가 있으면 히트별 관련 개념 링크와 재검색용 개념 어휘를 함께 부착. `include_obsidian=False`로 코퍼스 밖(볼트 직속, `obsidian/` 접두 doc_id) 문서 제외 가능. 기본 검색이 부실하면 `query_variants`(RAG-Fusion 쿼리 변형, 최대 3개)로 변형 쿼리를 함께 검색해 RRF 병합 |
 | `write_file` | `data/` 하위 `.md` 작성. 기본값으로 작성 직후 자동 인제스트 |
+| `read_file` | `data/**.md` 파일의 디스크 원문과 `content_hash` 반환 (`get_document`는 ES 청크를 돌려주므로 원문으로 되돌릴 수 없음) |
+| `patch_file` | 기존 문서에서 `old`와 정확히 일치하는 한 곳을 `new`로 교체 — 전체 파일을 다시 보내지 않는 부분 편집. `write_file`과 같은 정책 검사와 낙관적 잠금(`expected_hash`) 적용 |
 | `list_documents` | ES에 저장된 문서 목록. `date_modified` 내림차순으로 상위 `limit`(기본 50)개만 표시. `limit<=0`이면 전체 |
 | `list_files` | `data/` 폴더의 파일·하위 폴더 목록. 색인되지 않은 `_origin` 첨부파일도 포함하며 `next_offset`으로 페이지 조회 |
 | `get_file` | `data/` 원본 파일을 MCP embedded resource의 base64 blob으로 전송. 파일명·MIME·크기·SHA-256 포함, 파일당 최대 10 MiB |
