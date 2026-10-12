@@ -131,6 +131,24 @@ def test_launchd_repeated_abnormal_short_runs_warn():
     assert _launchd_restart_warning(info, "00:09") is True
 
 
+def test_server_settings_apply_launchd_environment(tmp_path, monkeypatch):
+    import plistlib
+
+    from pkb import report
+
+    agents = tmp_path / "Library/LaunchAgents"
+    agents.mkdir(parents=True)
+    with (agents / f"{report.LAUNCHD_LABEL}.plist").open("wb") as f:
+        env = {"WARMUP_ON_START": "true", "MODEL_IDLE_SECONDS": "45", "OTHER": "x"}
+        plistlib.dump({"EnvironmentVariables": env}, f)
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    server = report._server_settings()
+
+    assert server.warmup_on_start is True
+    assert server.model_idle_seconds == 45
+
+
 def test_status_is_unhealthy_when_es_connection_fails(doctor_env, monkeypatch):
     monkeypatch.setattr("pkb.report._server_status", lambda: (["MCP OK"], True))
 

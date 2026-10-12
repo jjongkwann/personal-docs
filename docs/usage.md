@@ -330,6 +330,7 @@ Other tuning options in `pkb.config.Settings` (overridable via environment varia
 | `EMBEDDING_MODEL` | `BAAI/bge-m3` | sentence-transformers model (1024d, change together with `EMBEDDING_DIMS`) |
 | `EMBED_CONTEXT_PREFIX` | `true` | Include title/section_path prefix in embedding input |
 | `EMBEDDING_DEVICE` | `auto` | Torch device for embedding. `auto` picks mps → cuda → cpu; or pin `cpu`/`mps`/`cuda` |
+| `EMBEDDING_DTYPE` | `float16` | Weight precision for the embedding model on a GPU device (mps/cuda); CPU always uses `float32`. `float16` halves the weights in memory and needs no reindex. Set `float32` to go back |
 | `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | CrossEncoder reranker model |
 | `RERANK_DEVICE` | `auto` | Torch device for the reranker (same resolution rule) |
 | `RERANK_BATCH_SIZE` | `8` | CrossEncoder batch size. Small batches measured faster on MPS |
@@ -343,6 +344,7 @@ Other tuning options in `pkb.config.Settings` (overridable via environment varia
 | `MCP_PORT` | `8787` | Shared HTTP MCP server port |
 | `MCP_HOST` | `127.0.0.1` | Bind address. Set to `0.0.0.0` only to reach the server from another machine over a trusted LAN/VPN — there is no authentication and `write_file` can write anywhere in the vault. |
 | `WARMUP_ON_START` | `false` | Preload the models when the MCP server starts. Left off, the server idles at ~50MB until the first search |
+| `MODEL_IDLE_SECONDS` | `300` | Seconds after the last use before the embedding/reranker models are unloaded to return memory. The next call loads them again. `0` keeps them loaded |
 
 ## Chunking Strategy
 

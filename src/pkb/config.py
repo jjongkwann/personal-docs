@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings
 
@@ -10,6 +11,8 @@ class Settings(BaseSettings):
     embedding_revision: str = ""  # 선택: 모델 저장소 commit/tag 고정
     embedding_dims: int = 1024
     embedding_device: str = "auto"  # auto | cpu | mps | cuda
+    # 2026-10 mini(8GB) 실측: float16은 gold 57문항에서 Recall@5·근거 Recall 동일, MRR@5 0.526→0.523, 적재 17→6초
+    embedding_dtype: Literal["float32", "float16"] = "float16"  # GPU(mps·cuda)에서만 적용, CPU는 항상 float32
     embedding_batch_size: int = 32  # sentence-transformers 기본값. RAM 8GB 머신의 대량 색인에선 8까지 낮출 것
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
     rerank_revision: str = ""  # 선택: 모델 저장소 commit/tag 고정
@@ -20,6 +23,7 @@ class Settings(BaseSettings):
     mcp_host: str = "127.0.0.1"  # 바인딩 주소. LAN/VPN에 노출하려면 0.0.0.0 (인증 없음 — 신뢰망에서만)
     mcp_port: int = 8787  # 공유 HTTP MCP 서버 포트
     warmup_on_start: bool = False  # 기동 시 모델 예열. 끄면 첫 검색까지 서버가 ~50MB로 유휴
+    model_idle_seconds: float = 300  # 마지막 사용 뒤 이 시간이 지나면 모델을 내려 메모리를 돌려준다. 0이면 계속 유지
     candidate_k: int = 20  # 기본 경로(rerank=on)에서 ck=50 대비 latency 2.4x↓, 품질 동일. RRF-only도 nDCG 미세 우위.
     expand_context: int = 0  # N>0이면 각 검색 결과의 ±N 청크를 neighbors로 부착
     chunk_size: int = 500

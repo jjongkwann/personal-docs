@@ -62,6 +62,25 @@ def _launchd_restart_warning(info: str, uptime: str) -> bool:
     return seconds < 300
 
 
+def _server_settings():
+    """서버 프로세스의 실효 설정.
+
+    launchd로 뜬 서버는 .env 위에 plist의 EnvironmentVariables를 덮어쓴다 — CLI에서 부른
+    doctor가 자기 프로세스 설정을 서버 설정인 것처럼 보여주지 않게 한다.
+    """
+    import plistlib
+    from pathlib import Path
+
+    from pkb.config import Settings
+
+    try:
+        with (Path.home() / "Library/LaunchAgents" / f"{LAUNCHD_LABEL}.plist").open("rb") as f:
+            env = plistlib.load(f).get("EnvironmentVariables", {})
+    except (OSError, plistlib.InvalidFileException):
+        env = {}
+    return Settings(**{k.lower(): v for k, v in env.items() if k.lower() in Settings.model_fields})
+
+
 def _server_status() -> tuple[list[str], bool]:
     """공유 HTTP MCP 서버의 프로세스 상태.
 
@@ -69,11 +88,13 @@ def _server_status() -> tuple[list[str], bool]:
     포트를 기준으로 본다. 메모리는 RSS가 아니라 footprint — 유휴 프로세스는 페이지가
     압축·스왑돼 RSS가 수십 MB로 보이지만 실제로는 GB를 물고 있다.
     """
+    import os
     import socket
+    import sys
 
     from pkb.config import resolve_device
-    from pkb.config import settings as _settings
 
+    _settings = _server_settings()
     port = _settings.mcp_port
     lines = [f"=== MCP 서버 (http://127.0.0.1:{port}/mcp) ==="]
 
@@ -97,11 +118,14 @@ def _server_status() -> tuple[list[str], bool]:
         f"device: embedding={resolve_device(_settings.embedding_device)}"
         f" rerank={resolve_device(_settings.rerank_device)}"
         f"  warmup_on_start={_settings.warmup_on_start}"
+        f"  model_idle_seconds={_settings.model_idle_seconds:g}"
     )
+    if pid == str(os.getpid()):  # 서버 안(MCP 도구)에서 불렸을 때만 모델 상태를 안다
+        embeddings = sys.modules.get("pkb.embeddings")
+        loaded = bool(embeddings and embeddings._model.loaded)
+        lines.append(f"embedding 모델: {'적재됨' if loaded else '내려감 (다음 검색·색인 때 적재)'}")
 
     # launchd 재시작 횟수 — 크래시 루프(포트 충돌 등)는 여기서만 드러난다
-    import os
-
     info = _sh(["launchctl", "print", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"])
     runs = next((ln.split("=")[1].strip() for ln in info.splitlines() if "runs =" in ln), "")
     if runs:

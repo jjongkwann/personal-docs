@@ -1,28 +1,23 @@
 """CrossEncoder 기반 다국어 리랭커."""
 
-import threading
-
 from sentence_transformers import CrossEncoder
 
 from pkb.config import resolve_device, settings
-
-_reranker: CrossEncoder | None = None
-_reranker_lock = threading.Lock()
+from pkb.idle_model import IdleModel
 
 
-def get_reranker() -> CrossEncoder:
-    """공유 HTTP 서버에서 동시 첫 검색 시 2.3GB 모델이 중복 로드되지 않도록 락으로 막는다."""
-    global _reranker
-    if _reranker is None:
-        with _reranker_lock:
-            if _reranker is None:
-                _reranker = CrossEncoder(
-                    settings.rerank_model,
-                    max_length=512,
-                    device=resolve_device(settings.rerank_device),
-                    **({"revision": settings.rerank_revision} if settings.rerank_revision else {}),
-                )
-    return _reranker
+def _load() -> CrossEncoder:
+    kwargs: dict = {"max_length": 512, "device": resolve_device(settings.rerank_device)}
+    if settings.rerank_revision:
+        kwargs["revision"] = settings.rerank_revision
+    try:
+        return CrossEncoder(settings.rerank_model, local_files_only=True, **kwargs)  # 캐시에 있으면 허브에 묻지 않는다
+    except OSError:  # 캐시에 없다 — 최초 1회 내려받는다
+        return CrossEncoder(settings.rerank_model, **kwargs)
+
+
+# use()가 적재와 predict를 직렬화한다 — 공유 HTTP 서버에서 동시 첫 검색 시 2.3GB 모델이 중복 로드되지 않는다.
+_reranker = IdleModel(_load)
 
 
 def rerank(
@@ -40,11 +35,12 @@ def rerank(
         )
         for c in candidates
     ]
-    scores = get_reranker().predict(
-        pairs,
-        show_progress_bar=False,
-        batch_size=settings.rerank_batch_size,
-    )
+    with _reranker.use() as model:
+        scores = model.predict(
+            pairs,
+            show_progress_bar=False,
+            batch_size=settings.rerank_batch_size,
+        )
 
     for c, s in zip(candidates, scores, strict=False):
         c["rerank_score"] = float(s)

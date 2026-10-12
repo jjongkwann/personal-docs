@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from pkb.idle_model import IdleModel
 from pkb.retrieve import RRF_K, _bm25_query, _knn_query, _rrf_search, hybrid_search
 
 # ---------- _bm25_query ----------
@@ -156,7 +157,7 @@ def test_linear_fusion_endpoint_excludes_zero_weight_candidates_even_with_rerank
             return [1.0]
 
     monkeypatch.setattr("pkb.retrieve.embed", lambda queries: [[0.0] for _ in queries])
-    monkeypatch.setattr("pkb.rerank.get_reranker", lambda: FakeReranker())
+    monkeypatch.setattr("pkb.rerank._reranker", IdleModel(FakeReranker))
     result = hybrid_search(
         FakeES(), "q", top_k=2, rerank=True, fusion="linear", lexical_weight=weight, log=False,
     )
