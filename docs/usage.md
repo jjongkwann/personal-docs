@@ -203,8 +203,11 @@ replaces only `embedding` and `embedding_fingerprint` using the current settings
 the one ingest computes under the same settings, so the next `sync` on the server reuses these
 vectors. Rerunning skips chunks that are already done. If the source changed in the meantime, it
 re-embeds changed chunks, copies metadata-only changes with the existing vector and deletes chunks
-that left the source. Image and audio chunks (`media_model` set) keep the media model's vector and
-are copied unchanged. When every chunk is in place it rebuilds `<target>_docs`, so `index-switch`
+that left the source. Image and audio chunks (`media_model` set) whose `media_model` equals
+`MEDIA_EMBEDDING_MODEL` keep the media model's vector and are copied unchanged. Media chunks from
+another media model are in a different vector space, so they are not copied, a copy already in the
+target is deleted, and the run counts them as `미디어 제외 N`; `pkb media-sync` re-creates them after
+the switch. When every chunk is in place it rebuilds `<target>_docs`, so `index-switch`
 can move both aliases. `--dry-run` only counts the work and does not load the model. Exit code 3
 means it stopped at `--max-batches` and has work left. `graph reembed` recomputes every concept
 vector from `name: description` (the text `graph_store_concepts` embeds), commits per batch and
@@ -212,38 +215,57 @@ records the embedding identity in `graph_meta`. While the recorded identity diff
 settings or a run is unfinished, vocabulary lookup, `graph_query`/`graph_map` semantic seeds,
 embedding dedup and storing new concepts fail instead of comparing vectors from two models.
 
-Runbook for bge-m3 → `jinaai/jina-embeddings-v5-text-small`. On an M1 Max (32 GB) the chunks embed at
-about 8 per second, so 16k chunks take 35–40 minutes; 33k concepts take about 10 minutes.
+The runbook below works for any model switch; the example switches to `google/embeddinggemma-2`
+(EmbeddingGemma 2). Measured on 2026-10-15 on an M1 Max with the same 40-question Korean gold set and
+the same 15,440 chunks, only the vectors and the query embedder differing:
 
-1. On the GPU machine, check out the server's commit, run `uv sync`, and write `jina.env`. Every
+| Model | RRF MRR@5 | R@5 | nDCG@5 | Dense-only MRR@5 | p50 latency |
+|---|---|---|---|---|---|
+| `google/embeddinggemma-2` | 0.469 | 0.600 | 0.502 | 0.372 | 110 ms |
+| `jinaai/jina-embeddings-v5-text-small` | 0.453 | 0.625 | 0.496 | 0.373 | 186 ms |
+| `BAAI/bge-m3` | 0.485 | 0.575 | 0.508 | 0.325 | 62 ms |
+
+One question is 0.025 of R@5, so the three are within noise. Reranking lowered MRR for all three.
+EmbeddingGemma 2 is Apache-2.0 (jina v5 omni is CC BY-NC) and embeds text, images and audio with one
+model. On the M1 Max it embeds about 10.5 chunks per second with batch 32, at a peak process RSS of
+about 2 GB.
+
+1. On the GPU machine, check out the server's commit, run `uv sync`, and write `eg2.env`. Every
    value below except `ES_HOST` must match the server's `.env`, because the fingerprint covers the
    model, revision, task, document prompt, normalization and title prefix:
 
    ```bash
    ES_HOST=http://127.0.0.1:19200
    ES_INDEX=pkb_current
-   EMBEDDING_MODEL=jinaai/jina-embeddings-v5-text-small
-   EMBEDDING_DIMS=1024
-   EMBEDDING_TRUST_REMOTE_CODE=true
-   EMBEDDING_TASK=retrieval
-   EMBEDDING_QUERY_PROMPT=query
-   EMBEDDING_DOCUMENT_PROMPT=document
+   EMBEDDING_MODEL=google/embeddinggemma-2
+   EMBEDDING_DIMS=768
+   EMBEDDING_DTYPE=bfloat16
+   EMBEDDING_TEXT_ONLY=true
+   EMBEDDING_QUERY_PROMPT=SearchQuery
+   EMBEDDING_DOCUMENT_PROMPT=Document
    EMBEDDING_NORMALIZE=true
    EMBED_CONTEXT_PREFIX=true
-   GRAPH_DEDUP_THRESHOLD=0.89
-   EMBEDDING_BATCH_SIZE=8
+   MEDIA_EMBEDDING_MODEL=google/embeddinggemma-2
    ```
 
-   `EMBEDDING_BATCH_SIZE` is not part of the fingerprint. On an M1 Max with jina v5, 8 ran 8.5 chunks/s
-   with a 6.3 GB peak; 32 ran 7.7 chunks/s with a 15.5 GB peak.
+   Settings the previous model needed and the new one does not must be removed from `.env` on both
+   machines (sourced variables override `.env` but do not unset its other lines). For jina v5 these
+   are `EMBEDDING_TRUST_REMOTE_CODE` and `EMBEDDING_TASK`; the server accepts EmbeddingGemma 2 media
+   vectors only with an empty `EMBEDDING_TASK`. EmbeddingGemma 2 gives NaN or broken vectors in
+   `float16`, so a GPU needs `bfloat16` (the CPU always uses `float32`). `Document` turns a chunk
+   into `title: none | text: …`; on a sample of 2,645 chunks it beat `title: {title} | text: …`
+   (MRR@5 0.713 vs 0.640), so the title and section prefix stays inside the text.
+   `MEDIA_EMBEDDING_MODEL` decides which image and audio chunks `reembed` copies. `EMBEDDING_BATCH_SIZE`
+   is not part of the fingerprint. `GRAPH_DEDUP_THRESHOLD` depends on the model (0.88 for bge-m3,
+   0.89 for jina v5 small) and has not been calibrated for EmbeddingGemma 2.
 
 2. Open a tunnel to the server's Elasticsearch (it listens on `127.0.0.1:9200`) and fill the new
    index while the server keeps serving the old one:
 
    ```bash
    ssh -N -L 19200:127.0.0.1:9200 <server> &
-   set -a; source jina.env; set +a
-   uv run pkb reembed --target pkb_documents_20261015_jina
+   set -a; source eg2.env; set +a
+   uv run pkb reembed --target pkb_documents_20261015_eg2
    ```
 
 3. Copy the graph with SQLite's backup command on the server and record the copy's content hash
@@ -263,28 +285,36 @@ about 8 per second, so 16k chunks take 35–40 minutes; 33k concepts take about 
    chunks.
 5. Swap the graph. `sqlite3 <GRAPH_DB_PATH> .sha3sum` must equal `/tmp/pkb_graph.sha3`; if it does
    not, the graph changed after the copy, so repeat step 3. Keep the old file:
-   `mv <GRAPH_DB_PATH> <GRAPH_DB_PATH>.bge`, then copy the recomputed file into place.
-6. On the server, update the code, `uv sync`, and put the `jina.env` lines (without `ES_HOST`) in
-   `.env`. Load the model once so the first search does not download it:
+   `mv <GRAPH_DB_PATH> <GRAPH_DB_PATH>.prev`, then copy the recomputed file into place.
+6. On the server, update the code and run `uv sync`. It installs torchvision, which EmbeddingGemma 2's
+   processor imports even with `EMBEDDING_TEXT_ONLY=true`. Replace the embedding lines in `.env` with
+   the `eg2.env` lines (without `ES_HOST`), removing the previous model's other settings. Load the
+   model once so the first search does not download it:
    `uv run python -c "from pkb.embeddings import embed_queries; embed_queries(['warmup'])"`.
-   Image and audio search needs these settings too; add `MEDIA_EMBEDDING_MODEL` now if you want it
-   (see [Image and Audio Vectors](#image-and-audio-vectors-media-sync)).
-7. On the server, `uv run pkb reembed --target pkb_documents_20261015_jina --dry-run` must report
+7. On the server, `uv run pkb reembed --target pkb_documents_20261015_eg2 --dry-run` must report
    `임베딩 0 · 복사 0 · 삭제 0`. This proves the server's settings produce the fingerprints stored in
-   the new index, so `sync` will not re-embed anything.
-8. `uv run pkb index-switch pkb_documents_20261015_jina` and note the previous index it prints.
-   Switch before starting the server: a server with jina settings reading the bge index gets no
-   error (both have 1024 dimensions), only wrong results.
+   the new index, so `sync` will not re-embed anything. `미디어 제외 N` counts the previous media
+   model's image and audio chunks, which stay out of the new index.
+8. `uv run pkb index-switch pkb_documents_20261015_eg2` and note the previous index it prints.
+   Switch before starting the server: with the new settings on the old index, vector searches fail
+   when the dimensions differ (768 and 1024 here) and return wrong results without an error when
+   they match (bge-m3 and jina v5 small are both 1024).
 9. Start the server (`launchctl load ...`) and refresh the gateway's tool inventory; with MCP
    ContextForge that is `POST /gateways/<gateway id>/tools/refresh` (see [MCP Integration](mcp.md)).
-10. Verify: `uv run pkb doctor`, a few `uv run pkb query` searches, `uv run pkb graph query "..."`,
+10. On the Mac that embeds media, run `uv run pkb media-sync --url https://<gateway>/mcp`
+    (see [Image and Audio Vectors](#image-and-audio-vectors-media-sync)). `reembed` did not carry
+    the previous media model's chunks, so until this finishes `search_media` does not find those
+    files and `list_media(missing_only=True)` lists them.
+11. Verify: `uv run pkb doctor`, a few `uv run pkb query` searches, `uv run pkb graph query "..."`,
     and `uv run pkb sync`, which should report `embedded=0 added=0` apart from real edits.
 
 Rollback: stop the server, `uv run pkb index-switch <previous index>` (its `_docs` index is still
-there), restore the bge lines in `.env` and the `<GRAPH_DB_PATH>.bge` file, start the server and
+there), restore the previous lines in `.env` and the `<GRAPH_DB_PATH>.prev` file, start the server and
 refresh the gateway. Writes made after the switch exist only in the new index; run `uv run pkb sync`
-to ingest them into the old one. Delete the old physical index and its `_docs` yourself once the
-new one has run for a while.
+to ingest them into the old one. The old index keeps its image and audio chunks, but the server
+searches them only if `MEDIA_SPACES` in `src/pkb/media.py` lists the old media model; the current
+code lists only `google/embeddinggemma-2`. Delete the old physical index and its `_docs` yourself
+once the new one has run for a while.
 
 ---
 
@@ -318,14 +348,14 @@ maintenance. `doctor` warns about config-index mismatches (e.g. integration turn
 
 ### Image and Audio Vectors (`media-sync`)
 
-The server does not load the media model. On a Mac with enough memory, embed new or changed images
+The server loads only the model's text tower, not its image and audio encoders. On a Mac with enough memory, embed new or changed images
 and recordings and upload the vectors to the server (or through the MCP gateway):
 
 ```bash
-uv sync --extra media                                    # torchvision, needed only here
-uv run --extra media pkb media-sync --url https://<gateway>/mcp --dry-run   # list what would be sent
-uv run --extra media pkb media-sync --url https://<gateway>/mcp             # embed and upload
-uv run --extra media pkb media-sync --kinds audio --limit 20                # one kind, first 20 files
+uv sync                                                  # includes torchvision (the server needs it too)
+uv run pkb media-sync --url https://<gateway>/mcp --dry-run   # list what would be sent
+uv run pkb media-sync --url https://<gateway>/mcp             # embed and upload
+uv run pkb media-sync --kinds audio --limit 20                # one kind, first 20 files
 ```
 
 | Option | Default | Meaning |
@@ -340,7 +370,8 @@ uv run --extra media pkb media-sync --kinds audio --limit 20                # on
 It prints one line per file and, at the end, model load time, seconds per image and seconds per
 30-second audio segment. Files already indexed with the current hash and model are skipped, so it
 can run repeatedly. Requires macOS `afconvert` for audio and `sips` for SVG/HEIC; the server needs
-`MEDIA_EMBEDDING_MODEL=jinaai/jina-embeddings-v5-omni-small` with the jina text-small settings.
+`MEDIA_EMBEDDING_MODEL=google/embeddinggemma-2` with the EmbeddingGemma 2 settings from step 1 of
+the [model switch runbook](#switching-the-embedding-model-on-a-small-server-reembed).
 
 To keep new files searchable, run it periodically from a LaunchAgent with `StartInterval` 3600 that
 calls a script running the command above only on AC power (`pmset -g ps | grep -q "AC Power" || exit 0`).
@@ -484,7 +515,7 @@ Other tuning options in `pkb.config.Settings` (overridable via environment varia
 | `EMBEDDING_MODEL` | `BAAI/bge-m3` | sentence-transformers model (1024d, change together with `EMBEDDING_DIMS`) |
 | `EMBED_CONTEXT_PREFIX` | `true` | Include title/section_path prefix in embedding input |
 | `EMBEDDING_DEVICE` | `auto` | Torch device for embedding. `auto` picks mps → cuda → cpu; or pin `cpu`/`mps`/`cuda` |
-| `EMBEDDING_DTYPE` | `float16` | Weight precision for the embedding model on a GPU device (mps/cuda); CPU always uses `float32`. `float16` halves the weights in memory and needs no reindex. Set `float32` to go back |
+| `EMBEDDING_DTYPE` | `float16` | Weight precision for the embedding model on a GPU device (mps/cuda): `float16`, `bfloat16` or `float32`; CPU always uses `float32`. `float16` halves the weights in memory and needs no reindex. Set `float32` to go back. EmbeddingGemma 2 gives NaN or broken vectors in `float16`, so use `bfloat16` with it |
 | `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | CrossEncoder reranker model |
 | `RERANK_DEVICE` | `auto` | Torch device for the reranker (same resolution rule) |
 | `RERANK_BATCH_SIZE` | `8` | CrossEncoder batch size. Small batches measured faster on MPS |
@@ -499,12 +530,13 @@ Other tuning options in `pkb.config.Settings` (overridable via environment varia
 | `MCP_HOST` | `127.0.0.1` | Bind address. Set to `0.0.0.0` only to reach the server from another machine over a trusted LAN/VPN — there is no authentication and `write_file` can write anywhere in the vault. |
 | `WARMUP_ON_START` | `false` | Preload the models when the MCP server starts. Left off, the server idles at ~50MB until the first search |
 | `MODEL_IDLE_SECONDS` | `300` | Seconds after the last use before the embedding/reranker models are unloaded to return memory. The next call loads them again. `0` keeps them loaded |
-| `EMBEDDING_TRUST_REMOTE_CODE` | `false` | Run code from the model repository (needed by `jinaai/jina-embeddings-v5-text-small`). Only for models you trust |
-| `EMBEDDING_TASK` | (empty) | `encode(task=...)` adapter name, e.g. `retrieval` for jina v5 |
-| `EMBEDDING_QUERY_PROMPT` / `EMBEDDING_DOCUMENT_PROMPT` | (empty) | `prompt_name` used for search queries / indexed text, e.g. `query` / `document` for jina v5 |
-| `EMBEDDING_NORMALIZE` | `false` | Pass `normalize_embeddings=True` to `encode` (`true` for jina v5). Task, document prompt and normalization are part of the embedding fingerprint, so changing them re-embeds on the next sync |
+| `EMBEDDING_TRUST_REMOTE_CODE` | `false` | Run code from the model repository (needed by `jinaai/jina-embeddings-v5-text-small`, not by EmbeddingGemma 2). Only for models you trust |
+| `EMBEDDING_TASK` | (empty) | `encode(task=...)` adapter name, e.g. `retrieval` for jina v5. Empty for EmbeddingGemma 2 |
+| `EMBEDDING_QUERY_PROMPT` / `EMBEDDING_DOCUMENT_PROMPT` | (empty) | `prompt_name` used for search queries / indexed text, e.g. `SearchQuery` / `Document` for EmbeddingGemma 2 |
+| `EMBEDDING_NORMALIZE` | `false` | Pass `normalize_embeddings=True` to `encode` (`true` for EmbeddingGemma 2). Task, document prompt and normalization are part of the embedding fingerprint, so changing them re-embeds on the next sync |
+| `EMBEDDING_TEXT_ONLY` | `false` | Load the model without its vision and audio encoders. EmbeddingGemma 2 then loads about 270M parameters instead of 740M, and its query vectors equal the full model's (cosine 1.00). Not part of the fingerprint |
 | `ATTACHMENTS_ROOT` | (empty) | Folder outside the vault for `put_attachment`/`get_attachment` (e.g. meeting audio). Empty disables both tools |
-| `MEDIA_EMBEDDING_MODEL` | (empty) | Model whose image/audio vectors `put_media_embeddings` accepts, e.g. `jinaai/jina-embeddings-v5-omni-small` (requires `EMBEDDING_MODEL=jinaai/jina-embeddings-v5-text-small`, `EMBEDDING_TASK=retrieval`). Empty turns media indexing and `search_media` off |
+| `MEDIA_EMBEDDING_MODEL` | (empty) | Model whose image/audio vectors `put_media_embeddings` accepts: `google/embeddinggemma-2` (requires `EMBEDDING_MODEL=google/embeddinggemma-2` and an empty `EMBEDDING_TASK`). Empty turns media indexing and `search_media` off |
 
 ## Chunking Strategy
 

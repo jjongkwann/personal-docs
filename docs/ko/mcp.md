@@ -247,18 +247,25 @@ uv run pkb doctor
 
 ### 이미지·오디오 검색
 
-이미지와 오디오를 글로 찾습니다. 문서와 같은 벡터 공간을 씁니다. 서버는 미디어 모델을 올리지
-않습니다. 다른 Mac에서 `pkb media-sync`가 `jinaai/jina-embeddings-v5-omni-small`로 파일을
-임베딩해 `put_media_embeddings`로 보냅니다. 이 모델의 텍스트 탑은
-`jinaai/jina-embeddings-v5-text-small`에 고정돼 있어서, 서버가 text-small로 만든 질의 벡터로 찾을
-수 있습니다 (같은 문장을 두 모델에 넣은 코사인: 한국어·영어, 질의·문서 프롬프트 모두 0.9997 이상,
-2026-10 실측).
+이미지와 오디오를 글로 찾습니다. 문서와 같은 벡터 공간을 씁니다. 서버는 이미지·오디오
+인코더를 올리지 않습니다. 다른 Mac에서 `pkb media-sync`가 `google/embeddinggemma-2`(EmbeddingGemma 2)로 파일을
+임베딩해 `put_media_embeddings`로 보냅니다. EmbeddingGemma 2는 글·이미지·오디오가 한 모델이라, 서버가
+같은 모델로 만든 질의 벡터로 찾을 수 있습니다. 서버는 텍스트 탑만 올리고(`EMBEDDING_TEXT_ONLY=true`),
+그 질의 벡터는 전체 모델과 같습니다(코사인 1.00). 볼트 이미지 23개(2026-10-15)에서 "인바디 체성분 측정
+결과지"에는 InBody 결과지를, "시스템 아키텍처 다이어그램"에는 drawio 다이어그램을 jina v5 omni처럼
+1위로 냈고, 23개를 모델 적재 포함 24.5초에 임베딩했습니다(jina v5 omni는 127초).
 
 서버 설정:
 
 ```
-EMBEDDING_MODEL=jinaai/jina-embeddings-v5-text-small   # 다른 jina v5 설정과 함께, EMBEDDING_TASK=retrieval
-MEDIA_EMBEDDING_MODEL=jinaai/jina-embeddings-v5-omni-small
+EMBEDDING_MODEL=google/embeddinggemma-2
+EMBEDDING_DIMS=768
+EMBEDDING_DTYPE=bfloat16
+EMBEDDING_TEXT_ONLY=true
+EMBEDDING_QUERY_PROMPT=SearchQuery
+EMBEDDING_DOCUMENT_PROMPT=Document
+EMBEDDING_NORMALIZE=true
+MEDIA_EMBEDDING_MODEL=google/embeddinggemma-2
 ```
 
 `MEDIA_EMBEDDING_MODEL`이 비어 있으면 미디어 색인과 검색이 꺼집니다. 서버는 미디어 모델을 그와
@@ -272,8 +279,9 @@ svg. 오디오: m4a, mp3, wav, aiff, aif, flac, ogg, opus, aac. 제외 규칙은
 같습니다: 숨김 성분(`.uploads` 포함), 예약 폴더(`_trash`, `_archive`, `_review` 등), Syncthing 충돌
 사본, 심볼릭 링크. Markdown 인제스트는 미디어 파일을 읽지 않습니다.
 
-**청크.** 이미지는 하나, 오디오는 30초 이하 창마다 하나입니다 (모델이 오디오를 Whisper 30초 창으로
-읽습니다. 클라이언트는 거의 무음인 창을 버립니다). 미디어 청크는 텍스트 청크와 같은 색인에
+**청크.** 이미지는 하나, 오디오는 30초 이하 창마다 하나입니다 (모델은 오디오를 5분 남짓까지 받지만,
+창이 짧아야 찾은 곳 가까이에서 재생을 시작합니다. 클라이언트는 거의 무음인 창을 버립니다). 미디어
+청크는 텍스트 청크와 같은 색인에
 `source_type` `image`·`audio`로 들어가며 `title`(확장자 뺀 파일 이름), `category`(루트 아래 첫
 폴더), `date_modified`(파일 mtime), `media_start`/`media_end`(초, 오디오만), `media_sha256`,
 `media_model`, `linked_from`(파일을 가리키는 노트), `content`를 가집니다. `content`는 결과의
@@ -315,20 +323,23 @@ search_media → {"query", "results": [{"doc_id", "kind", "title", "start", "end
 `EMBEDDING_DIMS`개의 유한한 수이고 서버가 단위 길이로 맞춥니다. `sha256`은 지금 파일과 같아야
 합니다.
 
-**클라이언트.** 모델을 돌릴 Mac에서 (`uv sync --extra media`가 클라이언트에만 필요한 torchvision을
-더합니다):
+**클라이언트.** 모델을 돌릴 Mac에서 (`uv sync`가 torchvision도 설치합니다. EmbeddingGemma 2의
+프로세서는 여기서도, 텍스트 탑만 올리는 서버에서도 torchvision을 불러옵니다):
 
 ```bash
-uv run --extra media pkb media-sync --url https://<게이트웨이>/mcp   # Bearer 토큰은 ~/.config/mcp-gateway/token (https만)
-uv run --extra media pkb media-sync --url http://<서버>:8787/mcp --dry-run
-uv run --extra media pkb media-sync --kinds audio --limit 20
+uv run pkb media-sync --url https://<게이트웨이>/mcp   # Bearer 토큰은 ~/.config/mcp-gateway/token (https만)
+uv run pkb media-sync --url http://<서버>:8787/mcp --dry-run
+uv run pkb media-sync --kinds audio --limit 20
 ```
 
-벡터가 없거나 낡은 파일을 `list_media(missing_only=True)`로 받아 `get_media`로 내려받고, 문서 쪽
-(`retrieval` 어댑터, 가능하면 MPS·bf16, 비전이나 오디오 탑만 적재)으로 임베딩해
+벡터가 없거나 낡은 파일을 `list_media(missing_only=True)`로 받아 `get_media`로 내려받고, 한 번 올린
+EmbeddingGemma 2(MPS면 bf16, CPU면 float32, 프롬프트 없이 정규화)로 임베딩해
 `put_media_embeddings`를 부릅니다. 오디오는 macOS `afconvert`로 16 kHz 모노로 풀어 30초 창으로
 자르고, SVG·HEIC는 `sips`로 PNG를 만듭니다. 게이트웨이의 `pkb-…` 도구 이름은 `tools/list`에서
-찾습니다. 다시 실행하면 이미 최신인 파일은 건너뜁니다.
+찾습니다. 다시 실행하면 이미 최신인 파일은 건너뜁니다. 임베딩 모델을 바꾼 뒤에는 `pkb reembed`가 이전
+미디어 모델의 청크를 옮기지 않으므로, `pkb media-sync`를 다시 돌릴 때까지
+`list_media(missing_only=True)`가 그 파일을 보여 줍니다
+([모델 전환 절차](usage.md#작은-서버의-임베딩-모델-전환-reembed) 참고).
 
 ### 다른 환경에서 원본 파일 받기
 
