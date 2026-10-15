@@ -197,7 +197,8 @@ uv run pkb graph reembed [--db <그래프 sqlite, 기본 GRAPH_DB_PATH>] [--batc
 `embedding_fingerprint`만 현재 설정으로 바꿉니다. fingerprint는 같은 설정에서 ingest가 계산하는
 값이라 서버의 다음 `sync`가 이 벡터를 그대로 씁니다. 다시 실행하면 끝난 청크는 건너뜁니다.
 그사이 원본이 바뀌었으면 바뀐 청크만 다시 임베딩하고, 메타데이터만 바뀐 청크는 기존 벡터로
-복사하고, 원본에서 사라진 청크는 지웁니다. 모든 청크가 들어가면 `<target>_docs`를 다시 채우므로
+복사하고, 원본에서 사라진 청크는 지웁니다. 이미지·오디오 청크(`media_model`이 있는 청크)는 미디어 모델의
+벡터를 그대로 두고 복사합니다. 모든 청크가 들어가면 `<target>_docs`를 다시 채우므로
 `index-switch`가 두 alias를 함께 옮길 수 있습니다. `--dry-run`은 할 일만 세고 모델을 올리지
 않습니다. 종료 코드 3은 `--max-batches`에서 멈췄고 남은 일이 있다는 뜻입니다. `graph reembed`는
 모든 개념 벡터를 `이름: 설명`(`graph_store_concepts`가 임베딩하는 문자열)으로 다시 계산하고, 묶음마다
@@ -258,6 +259,8 @@ bge-m3 → `jinaai/jina-embeddings-v5-text-small` 절차. M1 Max(32GB)에서 청
 6. 서버 코드를 갱신하고 `uv sync`, `jina.env`의 줄(`ES_HOST` 제외)을 `.env`에 넣습니다. 첫 검색이
    모델을 내려받지 않게 한 번 올려 둡니다:
    `uv run python -c "from pkb.embeddings import embed_queries; embed_queries(['warmup'])"`.
+   이미지·오디오 검색도 이 설정이 있어야 하므로, 쓰려면 이때 `MEDIA_EMBEDDING_MODEL`도 넣습니다
+   ([이미지·오디오 벡터](#이미지오디오-벡터-media-sync) 참고).
 7. 서버에서 `uv run pkb reembed --target pkb_documents_20261015_jina --dry-run`이
    `임베딩 0 · 복사 0 · 삭제 0`을 보여야 합니다. 서버 설정이 새 인덱스에 저장된 fingerprint를 그대로
    만든다는 확인이라, `sync`가 아무것도 다시 임베딩하지 않습니다.
