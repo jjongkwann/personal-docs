@@ -342,6 +342,10 @@ It prints one line per file and, at the end, model load time, seconds per image 
 can run repeatedly. Requires macOS `afconvert` for audio and `sips` for SVG/HEIC; the server needs
 `MEDIA_EMBEDDING_MODEL=jinaai/jina-embeddings-v5-omni-small` with the jina text-small settings.
 
+To keep new files searchable, run it periodically from a LaunchAgent with `StartInterval` 3600 that
+calls a script running the command above only on AC power (`pmset -g ps | grep -q "AC Power" || exit 0`).
+A run with nothing pending lists the files and exits without loading the model.
+
 ### Stale Nudge (SessionStart Hook)
 
 When `sync` succeeds, it records a timestamp in `data/.logs/last_sync.json`, and `pkb stale` reports

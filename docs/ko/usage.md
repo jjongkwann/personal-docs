@@ -330,6 +330,10 @@ uv run --extra media pkb media-sync --kinds audio --limit 20                  # 
 SVG·HEIC는 `sips`가 필요하고, 서버는 jina text-small 설정과 함께
 `MEDIA_EMBEDDING_MODEL=jinaai/jina-embeddings-v5-omni-small`이어야 합니다.
 
+새 파일도 찾히게 하려면 `StartInterval` 3600인 LaunchAgent로 위 명령을 주기적으로 돌립니다. 배터리에서는
+돌지 않도록 스크립트 첫 줄에서 전원을 확인합니다 (`pmset -g ps | grep -q "AC Power" || exit 0`).
+새 파일이 없으면 목록만 받고 모델을 올리지 않고 끝납니다.
+
 ### 스테일 넛지 (SessionStart 훅)
 
 `sync`가 성공하면 `data/.logs/last_sync.json`에 타임스탬프가 기록되고, `pkb stale`이 그 이후
