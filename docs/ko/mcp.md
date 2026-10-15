@@ -357,6 +357,9 @@ blob을 디코딩해 저장하고 크기와 SHA-256을 검증하면 됩니다. �
 
 서버 업데이트 후 PKB 프로세스를 재시작하고, 게이트웨이를 사용한다면 PKB 도구 목록을
 갱신해야 합니다. 기존 대화가 도구 목록을 캐시하면 MCP를 재연결하거나 새 대화에서 확인하세요.
+MCP ContextForge는 게이트웨이를 다시 띄워도 도구를 다시 찾지 않으므로 관리 API의
+`POST /gateways/<게이트웨이 id>/tools/refresh`를 부릅니다 (예:
+`curl -X POST -H "Authorization: Bearer $(cat ~/.local/share/mcpgateway/.admin-token)" http://127.0.0.1:4444/gateways/<id>/tools/refresh`).
 
 ### Graph RAG
 

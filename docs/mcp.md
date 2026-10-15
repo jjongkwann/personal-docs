@@ -368,6 +368,9 @@ the corpus or search index.
 
 After updating the server, restart the PKB process and refresh its tool inventory in any
 gateway. Reconnect MCP or start a new conversation if the client caches the old tool list.
+With MCP ContextForge, restarting the gateway does not re-discover tools; call
+`POST /gateways/<gateway id>/tools/refresh` on its admin API (for example
+`curl -X POST -H "Authorization: Bearer $(cat ~/.local/share/mcpgateway/.admin-token)" http://127.0.0.1:4444/gateways/<id>/tools/refresh`).
 
 ### Graph RAG
 
