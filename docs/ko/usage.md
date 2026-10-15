@@ -197,8 +197,10 @@ uv run pkb graph reembed [--db <그래프 sqlite, 기본 GRAPH_DB_PATH>] [--batc
 `embedding_fingerprint`만 현재 설정으로 바꿉니다. fingerprint는 같은 설정에서 ingest가 계산하는
 값이라 서버의 다음 `sync`가 이 벡터를 그대로 씁니다. 다시 실행하면 끝난 청크는 건너뜁니다.
 그사이 원본이 바뀌었으면 바뀐 청크만 다시 임베딩하고, 메타데이터만 바뀐 청크는 기존 벡터로
-복사하고, 원본에서 사라진 청크는 지웁니다. 이미지·오디오 청크(`media_model`이 있는 청크)는 미디어 모델의
-벡터를 그대로 두고 복사합니다. 모든 청크가 들어가면 `<target>_docs`를 다시 채우므로
+복사하고, 원본에서 사라진 청크는 지웁니다. 이미지·오디오 청크(`media_model`이 있는 청크) 중
+`media_model`이 `MEDIA_EMBEDDING_MODEL`과 같은 것은 미디어 모델의 벡터를 그대로 두고 복사합니다. 다른
+미디어 모델의 청크는 벡터 공간이 달라 복사하지 않고, 대상에 이미 있으면 지우며, `미디어 제외 N`으로
+셉니다. 전환 뒤 `pkb media-sync`가 다시 만듭니다. 모든 청크가 들어가면 `<target>_docs`를 다시 채우므로
 `index-switch`가 두 alias를 함께 옮길 수 있습니다. `--dry-run`은 할 일만 세고 모델을 올리지
 않습니다. 종료 코드 3은 `--max-batches`에서 멈췄고 남은 일이 있다는 뜻입니다. `graph reembed`는
 모든 개념 벡터를 `이름: 설명`(`graph_store_concepts`가 임베딩하는 문자열)으로 다시 계산하고, 묶음마다
@@ -206,38 +208,55 @@ uv run pkb graph reembed [--db <그래프 sqlite, 기본 GRAPH_DB_PATH>] [--batc
 않았으면 어휘 조회, `graph_query`/`graph_map`의 의미 시드, 임베딩 병합, 새 개념 저장이 두 모델의
 벡터를 비교하지 않고 실패합니다.
 
-bge-m3 → `jinaai/jina-embeddings-v5-text-small` 절차. M1 Max(32GB)에서 청크를 초당 약 8개 임베딩하므로
-1.6만 개에 35~40분, 개념 3.3만 개에 약 10분이 걸립니다.
+아래 절차는 어떤 모델로 바꾸든 같고, 예는 `google/embeddinggemma-2`(EmbeddingGemma 2)로 바꾸는
+경우입니다. 2026-10-15 M1 Max에서 같은 한국어 gold 40문항, 같은 청크 15,440개로 벡터와 질의 임베더만
+바꿔 잰 결과:
 
-1. GPU 머신에서 서버와 같은 커밋을 받아 `uv sync`하고 `jina.env`를 씁니다. fingerprint가 모델·
+| 모델 | RRF MRR@5 | R@5 | nDCG@5 | dense만 MRR@5 | p50 지연 |
+|---|---|---|---|---|---|
+| `google/embeddinggemma-2` | 0.469 | 0.600 | 0.502 | 0.372 | 110 ms |
+| `jinaai/jina-embeddings-v5-text-small` | 0.453 | 0.625 | 0.496 | 0.373 | 186 ms |
+| `BAAI/bge-m3` | 0.485 | 0.575 | 0.508 | 0.325 | 62 ms |
+
+한 문항이 R@5 0.025이므로 셋은 오차 안입니다. 리랭크는 셋 모두 MRR을 낮췄습니다. EmbeddingGemma 2는
+Apache-2.0(jina v5 omni는 CC BY-NC)이고 글·이미지·오디오를 한 모델이 임베딩합니다. M1 Max에서 배치
+32로 청크를 초당 약 10.5개 임베딩하고, 프로세스 RSS는 최대 약 2GB입니다.
+
+1. GPU 머신에서 서버와 같은 커밋을 받아 `uv sync`하고 `eg2.env`를 씁니다. fingerprint가 모델·
    리비전·task·문서 프롬프트·정규화·제목 prefix를 포함하므로 `ES_HOST` 말고는 서버 `.env`와 같아야
    합니다:
 
    ```bash
    ES_HOST=http://127.0.0.1:19200
    ES_INDEX=pkb_current
-   EMBEDDING_MODEL=jinaai/jina-embeddings-v5-text-small
-   EMBEDDING_DIMS=1024
-   EMBEDDING_TRUST_REMOTE_CODE=true
-   EMBEDDING_TASK=retrieval
-   EMBEDDING_QUERY_PROMPT=query
-   EMBEDDING_DOCUMENT_PROMPT=document
+   EMBEDDING_MODEL=google/embeddinggemma-2
+   EMBEDDING_DIMS=768
+   EMBEDDING_DTYPE=bfloat16
+   EMBEDDING_TEXT_ONLY=true
+   EMBEDDING_QUERY_PROMPT=SearchQuery
+   EMBEDDING_DOCUMENT_PROMPT=Document
    EMBEDDING_NORMALIZE=true
    EMBED_CONTEXT_PREFIX=true
-   GRAPH_DEDUP_THRESHOLD=0.89
-   EMBEDDING_BATCH_SIZE=8
+   MEDIA_EMBEDDING_MODEL=google/embeddinggemma-2
    ```
 
-   `EMBEDDING_BATCH_SIZE`는 fingerprint에 들어가지 않습니다. M1 Max에서 jina v5는 8일 때 초당 8.5청크·
-   최대 6.3GB, 32일 때 초당 7.7청크·최대 15.5GB였습니다.
+   이전 모델에만 필요한 설정은 두 머신의 `.env`에서 지웁니다(`source`한 변수는 `.env`를 덮어쓰지만
+   `.env`의 다른 줄을 없애지는 않습니다). jina v5라면 `EMBEDDING_TRUST_REMOTE_CODE`와
+   `EMBEDDING_TASK`이고, 서버는 `EMBEDDING_TASK`가 비어 있을 때만 EmbeddingGemma 2 미디어 벡터를
+   받습니다. EmbeddingGemma 2는 `float16`에서 NaN이나 망가진 벡터를 내므로 GPU에서는 `bfloat16`이어야
+   합니다(CPU는 항상 `float32`). `Document`는 청크를 `title: none | text: …`로 만듭니다. 청크 2,645개
+   표본에서 `title: {title} | text: …`보다 나았으므로(MRR@5 0.713 대 0.640) 제목·섹션 prefix는 text
+   안에 둡니다. `MEDIA_EMBEDDING_MODEL`은 `reembed`가 복사할 이미지·오디오 청크를 정합니다.
+   `EMBEDDING_BATCH_SIZE`는 fingerprint에 들어가지 않습니다. `GRAPH_DEDUP_THRESHOLD`는 모델마다
+   다르고(bge-m3 0.88, jina v5 small 0.89) EmbeddingGemma 2 값은 아직 맞추지 않았습니다.
 
 2. 서버 Elasticsearch(`127.0.0.1:9200`에서 대기)로 터널을 열고, 서버가 기존 인덱스로 계속 서비스하는
    동안 새 인덱스를 채웁니다:
 
    ```bash
    ssh -N -L 19200:127.0.0.1:9200 <서버> &
-   set -a; source jina.env; set +a
-   uv run pkb reembed --target pkb_documents_20261015_jina
+   set -a; source eg2.env; set +a
+   uv run pkb reembed --target pkb_documents_20261015_eg2
    ```
 
 3. 서버에서 SQLite backup 명령으로 그래프를 복사하고 사본의 내용 해시를 남깁니다(`.sha3sum`은 파일
@@ -255,27 +274,34 @@ bge-m3 → `jinaai/jina-embeddings-v5-text-small` 절차. M1 Max(32GB)에서 청
    2단계의 `reembed`를 다시 실행해 그사이 쓰인 내용을 반영합니다. 몇 청크만 임베딩해야 정상입니다.
 5. 그래프를 바꿉니다. `sqlite3 <GRAPH_DB_PATH> .sha3sum`이 `/tmp/pkb_graph.sha3`와 같아야 합니다.
    다르면 복사 뒤 그래프가 바뀐 것이니 3단계를 다시 합니다. 기존 파일은 남겨 둡니다:
-   `mv <GRAPH_DB_PATH> <GRAPH_DB_PATH>.bge` 뒤 다시 계산한 파일을 그 자리에 둡니다.
-6. 서버 코드를 갱신하고 `uv sync`, `jina.env`의 줄(`ES_HOST` 제외)을 `.env`에 넣습니다. 첫 검색이
-   모델을 내려받지 않게 한 번 올려 둡니다:
+   `mv <GRAPH_DB_PATH> <GRAPH_DB_PATH>.prev` 뒤 다시 계산한 파일을 그 자리에 둡니다.
+6. 서버 코드를 갱신하고 `uv sync`합니다. EmbeddingGemma 2의 프로세서가 `EMBEDDING_TEXT_ONLY=true`에서도
+   불러오는 torchvision이 함께 설치됩니다. `.env`의 임베딩 줄을 `eg2.env`의 줄(`ES_HOST` 제외)로 바꾸고
+   이전 모델의 다른 설정을 지웁니다. 첫 검색이 모델을 내려받지 않게 한 번 올려 둡니다:
    `uv run python -c "from pkb.embeddings import embed_queries; embed_queries(['warmup'])"`.
-   이미지·오디오 검색도 이 설정이 있어야 하므로, 쓰려면 이때 `MEDIA_EMBEDDING_MODEL`도 넣습니다
-   ([이미지·오디오 벡터](#이미지오디오-벡터-media-sync) 참고).
-7. 서버에서 `uv run pkb reembed --target pkb_documents_20261015_jina --dry-run`이
+7. 서버에서 `uv run pkb reembed --target pkb_documents_20261015_eg2 --dry-run`이
    `임베딩 0 · 복사 0 · 삭제 0`을 보여야 합니다. 서버 설정이 새 인덱스에 저장된 fingerprint를 그대로
-   만든다는 확인이라, `sync`가 아무것도 다시 임베딩하지 않습니다.
-8. `uv run pkb index-switch pkb_documents_20261015_jina`를 실행하고 출력되는 이전 인덱스를 적어
-   둡니다. 서버를 띄우기 전에 전환해야 합니다. jina 설정의 서버가 bge 인덱스를 읽으면 둘 다
-   1024차원이라 오류 없이 엉뚱한 결과만 나옵니다.
+   만든다는 확인이라, `sync`가 아무것도 다시 임베딩하지 않습니다. `미디어 제외 N`은 새 인덱스에
+   들어가지 않는 이전 미디어 모델의 이미지·오디오 청크 수입니다.
+8. `uv run pkb index-switch pkb_documents_20261015_eg2`를 실행하고 출력되는 이전 인덱스를 적어
+   둡니다. 서버를 띄우기 전에 전환해야 합니다. 새 설정으로 이전 인덱스를 읽으면 차원이 다를 때(여기서는
+   768과 1024) 벡터 검색이 실패하고, 같을 때(bge-m3와 jina v5 small은 둘 다 1024) 오류 없이 엉뚱한
+   결과만 나옵니다.
 9. 서버를 띄우고(`launchctl load ...`) 게이트웨이의 도구 목록을 갱신합니다. MCP ContextForge는
    `POST /gateways/<게이트웨이 id>/tools/refresh`입니다([MCP 연동](mcp.md) 참고).
-10. 확인: `uv run pkb doctor`, `uv run pkb query` 몇 개, `uv run pkb graph query "..."`, 그리고 실제
+10. 미디어를 임베딩하는 Mac에서 `uv run pkb media-sync --url https://<게이트웨이>/mcp`를
+    실행합니다([이미지·오디오 벡터](#이미지오디오-벡터-media-sync) 참고). `reembed`가 이전 미디어 모델의
+    청크를 옮기지 않았으므로, 끝날 때까지 `search_media`는 그 파일을 찾지 못하고
+    `list_media(missing_only=True)`가 그 파일을 보여 줍니다.
+11. 확인: `uv run pkb doctor`, `uv run pkb query` 몇 개, `uv run pkb graph query "..."`, 그리고 실제
     편집 말고는 `embedded=0 added=0`이 나와야 하는 `uv run pkb sync`.
 
 되돌리기: 서버를 멈추고 `uv run pkb index-switch <이전 인덱스>`(그 `_docs` 인덱스는 남아 있음),
-`.env`의 bge 줄과 `<GRAPH_DB_PATH>.bge` 파일을 되돌린 뒤 서버를 띄우고 게이트웨이를 갱신합니다.
-전환 뒤 쓴 내용은 새 인덱스에만 있으므로 `uv run pkb sync`로 이전 인덱스에 넣습니다. 이전 물리
-인덱스와 그 `_docs`는 새 인덱스가 한동안 문제없이 돈 뒤 직접 지웁니다.
+`.env`의 이전 줄과 `<GRAPH_DB_PATH>.prev` 파일을 되돌린 뒤 서버를 띄우고 게이트웨이를 갱신합니다.
+전환 뒤 쓴 내용은 새 인덱스에만 있으므로 `uv run pkb sync`로 이전 인덱스에 넣습니다. 이전 인덱스에
+이미지·오디오 청크가 남아 있지만, 서버는 `src/pkb/media.py`의 `MEDIA_SPACES`에 이전 미디어 모델이 있을
+때만 그것을 검색합니다. 지금 코드에는 `google/embeddinggemma-2`만 있습니다. 이전 물리 인덱스와 그
+`_docs`는 새 인덱스가 한동안 문제없이 돈 뒤 직접 지웁니다.
 
 ---
 
@@ -306,14 +332,14 @@ uv run pkb sync --yes    # 확인 생략
 
 ### 이미지·오디오 벡터 (`media-sync`)
 
-서버는 미디어 모델을 올리지 않습니다. 메모리가 넉넉한 Mac에서 새로 생기거나 바뀐 이미지·녹음을
+서버는 모델의 텍스트 탑만 올리고 이미지·오디오 인코더는 올리지 않습니다. 메모리가 넉넉한 Mac에서 새로 생기거나 바뀐 이미지·녹음을
 임베딩해 서버로(또는 MCP 게이트웨이를 거쳐) 올립니다:
 
 ```bash
-uv sync --extra media                                    # torchvision, 여기서만 필요
-uv run --extra media pkb media-sync --url https://<게이트웨이>/mcp --dry-run   # 보낼 파일 목록만
-uv run --extra media pkb media-sync --url https://<게이트웨이>/mcp             # 임베딩해 올리기
-uv run --extra media pkb media-sync --kinds audio --limit 20                  # 한 종류, 앞의 20개
+uv sync                                                  # torchvision 포함 (서버에도 필요)
+uv run pkb media-sync --url https://<게이트웨이>/mcp --dry-run   # 보낼 파일 목록만
+uv run pkb media-sync --url https://<게이트웨이>/mcp             # 임베딩해 올리기
+uv run pkb media-sync --kinds audio --limit 20                  # 한 종류, 앞의 20개
 ```
 
 | 옵션 | 기본값 | 뜻 |
@@ -327,8 +353,8 @@ uv run --extra media pkb media-sync --kinds audio --limit 20                  # 
 
 파일마다 한 줄을 찍고, 끝에 모델 적재 시간·이미지당 초·30초 오디오 구간당 초를 보여 줍니다. 지금
 해시와 모델로 이미 색인된 파일은 건너뛰므로 여러 번 돌려도 됩니다. 오디오는 macOS `afconvert`,
-SVG·HEIC는 `sips`가 필요하고, 서버는 jina text-small 설정과 함께
-`MEDIA_EMBEDDING_MODEL=jinaai/jina-embeddings-v5-omni-small`이어야 합니다.
+SVG·HEIC는 `sips`가 필요하고, 서버는 [모델 전환 절차](#작은-서버의-임베딩-모델-전환-reembed) 1단계의
+EmbeddingGemma 2 설정과 함께 `MEDIA_EMBEDDING_MODEL=google/embeddinggemma-2`이어야 합니다.
 
 새 파일도 찾히게 하려면 `StartInterval` 3600인 LaunchAgent로 위 명령을 주기적으로 돌립니다. 배터리에서는
 돌지 않도록 스크립트 첫 줄에서 전원을 확인합니다 (`pmset -g ps | grep -q "AC Power" || exit 0`).
@@ -470,7 +496,7 @@ GRAPH_DEDUP_THRESHOLD=0.88
 | `EMBEDDING_MODEL` | `BAAI/bge-m3` | sentence-transformers 모델 (1024d, `EMBEDDING_DIMS`와 함께 변경) |
 | `EMBED_CONTEXT_PREFIX` | `true` | 임베딩 입력에 title·section_path prefix 포함 |
 | `EMBEDDING_DEVICE` | `auto` | 임베딩 torch 디바이스. `auto`는 mps → cuda → cpu 순 선택, `cpu`/`mps`/`cuda` 고정 가능 |
-| `EMBEDDING_DTYPE` | `float16` | GPU 디바이스(mps/cuda)에서 임베딩 모델 가중치의 정밀도. CPU는 항상 `float32`. `float16`은 메모리의 가중치를 절반으로 줄이며 재색인이 필요 없음. 되돌리려면 `float32` |
+| `EMBEDDING_DTYPE` | `float16` | GPU 디바이스(mps/cuda)에서 임베딩 모델 가중치의 정밀도: `float16`, `bfloat16`, `float32`. CPU는 항상 `float32`. `float16`은 메모리의 가중치를 절반으로 줄이며 재색인이 필요 없음. 되돌리려면 `float32`. EmbeddingGemma 2는 `float16`에서 NaN이나 망가진 벡터를 내므로 `bfloat16`을 씀 |
 | `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | CrossEncoder 리랭커 모델 |
 | `RERANK_DEVICE` | `auto` | 리랭커 torch 디바이스 (동일한 해석 규칙) |
 | `RERANK_BATCH_SIZE` | `8` | CrossEncoder 배치 크기. MPS에서는 작은 배치가 더 빠른 것으로 측정됨 |
@@ -485,12 +511,13 @@ GRAPH_DEDUP_THRESHOLD=0.88
 | `MCP_HOST` | `127.0.0.1` | 바인딩 주소. 서버를 다른 머신에 두고 신뢰하는 LAN/VPN에서 붙을 때만 `0.0.0.0`으로. 인증이 없고 `write_file`이 볼트 어디든 쓸 수 있음. |
 | `WARMUP_ON_START` | `false` | MCP 서버 기동 시 모델 예열. 끄면 첫 검색까지 서버가 ~50MB로 유휴 |
 | `MODEL_IDLE_SECONDS` | `300` | 마지막 사용 뒤 이 시간(초)이 지나면 임베딩·리랭커 모델을 내려 메모리를 돌려줍니다. 다음 호출 때 다시 올립니다. `0`이면 계속 유지 |
-| `EMBEDDING_TRUST_REMOTE_CODE` | `false` | 모델 저장소의 코드를 실행 (`jinaai/jina-embeddings-v5-text-small`에 필요). 믿는 모델에만 |
-| `EMBEDDING_TASK` | (빈 값) | `encode(task=...)` 어댑터 이름. jina v5는 `retrieval` |
-| `EMBEDDING_QUERY_PROMPT` / `EMBEDDING_DOCUMENT_PROMPT` | (빈 값) | 검색 질의 / 색인 텍스트의 `prompt_name`. jina v5는 `query` / `document` |
-| `EMBEDDING_NORMALIZE` | `false` | `encode`에 `normalize_embeddings=True` (jina v5는 `true`). task·문서 프롬프트·정규화는 임베딩 fingerprint에 들어가 바꾸면 다음 sync에서 재임베딩 |
+| `EMBEDDING_TRUST_REMOTE_CODE` | `false` | 모델 저장소의 코드를 실행 (`jinaai/jina-embeddings-v5-text-small`에 필요, EmbeddingGemma 2는 불필요). 믿는 모델에만 |
+| `EMBEDDING_TASK` | (빈 값) | `encode(task=...)` 어댑터 이름. jina v5는 `retrieval`. EmbeddingGemma 2는 비움 |
+| `EMBEDDING_QUERY_PROMPT` / `EMBEDDING_DOCUMENT_PROMPT` | (빈 값) | 검색 질의 / 색인 텍스트의 `prompt_name`. EmbeddingGemma 2는 `SearchQuery` / `Document` |
+| `EMBEDDING_NORMALIZE` | `false` | `encode`에 `normalize_embeddings=True` (EmbeddingGemma 2는 `true`). task·문서 프롬프트·정규화는 임베딩 fingerprint에 들어가 바꾸면 다음 sync에서 재임베딩 |
+| `EMBEDDING_TEXT_ONLY` | `false` | 비전·오디오 인코더 없이 모델을 올림. EmbeddingGemma 2는 740M 대신 약 270M 파라미터만 올라가고 질의 벡터는 전체 모델과 같음(코사인 1.00). fingerprint에 들어가지 않음 |
 | `ATTACHMENTS_ROOT` | (빈 값) | `put_attachment`/`get_attachment`가 쓰는 볼트 밖 폴더 (예: 회의 오디오). 비우면 두 도구가 꺼짐 |
-| `MEDIA_EMBEDDING_MODEL` | (빈 값) | `put_media_embeddings`가 받는 이미지·오디오 벡터의 모델. 예: `jinaai/jina-embeddings-v5-omni-small` (`EMBEDDING_MODEL=jinaai/jina-embeddings-v5-text-small`, `EMBEDDING_TASK=retrieval` 필요). 비우면 미디어 색인과 `search_media`가 꺼짐 |
+| `MEDIA_EMBEDDING_MODEL` | (빈 값) | `put_media_embeddings`가 받는 이미지·오디오 벡터의 모델: `google/embeddinggemma-2` (`EMBEDDING_MODEL=google/embeddinggemma-2`, 빈 `EMBEDDING_TASK` 필요). 비우면 미디어 색인과 `search_media`가 꺼짐 |
 
 ## 청킹 전략
 

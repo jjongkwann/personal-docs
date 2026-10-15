@@ -256,17 +256,26 @@ Download: call `get_attachment(path, offset, length)` until `eof` is true, decod
 ### Image and audio search
 
 Images and audio are searched with text, in the same vector space as the documents. The server
-never loads the media model: `pkb media-sync` on another Mac embeds the files with
-`jinaai/jina-embeddings-v5-omni-small` and sends the vectors with `put_media_embeddings`. That
-model's text tower is locked to `jinaai/jina-embeddings-v5-text-small`, so the query vector the
-server computes with text-small finds them (same sentence through both models, Korean and English,
-query and document prompts: cosine ≥ 0.9997, measured 2026-10).
+never loads the image and audio encoders: `pkb media-sync` on another Mac embeds the files with
+`google/embeddinggemma-2` (EmbeddingGemma 2) and sends the vectors with `put_media_embeddings`.
+EmbeddingGemma 2 is one model for text, images and audio, so the query vector the server computes
+with the same model finds them. The server loads only its text tower (`EMBEDDING_TEXT_ONLY=true`),
+whose query vectors equal the full model's (cosine 1.00). On 23 vault images (2026-10-15) it ranked
+the InBody sheet first for "인바디 체성분 측정 결과지" and the drawio diagram first for
+"시스템 아키텍처 다이어그램", as jina v5 omni did, and embedded the 23 images in 24.5 s including model
+load (jina v5 omni: 127 s).
 
 Server settings:
 
 ```
-EMBEDDING_MODEL=jinaai/jina-embeddings-v5-text-small   # with the other jina v5 settings, EMBEDDING_TASK=retrieval
-MEDIA_EMBEDDING_MODEL=jinaai/jina-embeddings-v5-omni-small
+EMBEDDING_MODEL=google/embeddinggemma-2
+EMBEDDING_DIMS=768
+EMBEDDING_DTYPE=bfloat16
+EMBEDDING_TEXT_ONLY=true
+EMBEDDING_QUERY_PROMPT=SearchQuery
+EMBEDDING_DOCUMENT_PROMPT=Document
+EMBEDDING_NORMALIZE=true
+MEDIA_EMBEDDING_MODEL=google/embeddinggemma-2
 ```
 
 An empty `MEDIA_EMBEDDING_MODEL` turns media indexing and search off. The server accepts a media
@@ -281,8 +290,9 @@ Markdown ingest: hidden components (including `.uploads`), the reserved folders 
 `_archive`, `_review`, …), Syncthing conflict copies, and symlinks. Markdown ingest never reads
 media files.
 
-**Chunks.** One per image, and one per audio window of at most 30 seconds (the model reads audio
-through a 30-second Whisper window; the client drops near-silent windows). Media chunks live in the
+**Chunks.** One per image, and one per audio window of at most 30 seconds (the model accepts about
+5 minutes of audio, but a short window lets playback start near the match; the client drops
+near-silent windows). Media chunks live in the
 chunk index next to the text chunks with `source_type` `image` or `audio`, `title` (file name
 without extension), `category` (top folder under its root), `date_modified` (file mtime),
 `media_start`/`media_end` (seconds, audio only), `media_sha256`, `media_model`, `linked_from` (the
@@ -325,21 +335,23 @@ without `start`/`end` for an image, non-overlapping windows of at most 30 s for 
 each vector `EMBEDDING_DIMS` finite numbers (the server rescales it to unit length). `sha256` must
 match the file as it is now.
 
-**Client.** On a Mac with the model (`uv sync --extra media` adds torchvision, which only the client
-needs):
+**Client.** On a Mac with the model (`uv sync` installs torchvision, which EmbeddingGemma 2's
+processor imports here and on the server, even when the server loads only the text tower):
 
 ```bash
-uv run --extra media pkb media-sync --url https://<gateway>/mcp      # Bearer token from ~/.config/mcp-gateway/token (https only)
-uv run --extra media pkb media-sync --url http://<server>:8787/mcp --dry-run
-uv run --extra media pkb media-sync --kinds audio --limit 20
+uv run pkb media-sync --url https://<gateway>/mcp      # Bearer token from ~/.config/mcp-gateway/token (https only)
+uv run pkb media-sync --url http://<server>:8787/mcp --dry-run
+uv run pkb media-sync --kinds audio --limit 20
 ```
 
 It lists files without current vectors (`list_media(missing_only=True)`), downloads each with
-`get_media`, embeds it on the document side (`retrieval` adapter, MPS with bf16 where available,
-loading only the vision or audio tower), and calls `put_media_embeddings`. Audio is decoded with
-macOS `afconvert` to 16 kHz mono and cut into 30-second windows; SVG and HEIC go through `sips`.
-A gateway's `pkb-…` tool names are detected from `tools/list`. Re-running does nothing for files
-that are already current.
+`get_media`, embeds it with EmbeddingGemma 2 loaded once (bf16 on MPS, float32 on CPU; no prompt,
+normalized), and calls `put_media_embeddings`. Audio is decoded with macOS `afconvert` to 16 kHz
+mono and cut into 30-second windows; SVG and HEIC go through `sips`. A gateway's `pkb-…` tool names
+are detected from `tools/list`. Re-running does nothing for files that are already current. After an
+embedding model switch, `pkb reembed` leaves out media chunks from the previous media model, so
+`list_media(missing_only=True)` lists those files until `pkb media-sync` runs again (see
+[the model switch runbook](usage.md#switching-the-embedding-model-on-a-small-server-reembed)).
 
 ### Receiving original files on another client
 
