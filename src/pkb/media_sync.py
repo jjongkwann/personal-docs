@@ -1,12 +1,11 @@
 """`pkb media-sync`: 이 Mac에서 이미지·오디오 벡터를 만들어 PKB 서버에 올린다.
 
-PKB 서버(메모리 8GB mini)는 미디어 모델을 올리지 않는다. 흐름은 list_media(missing_only) →
-get_media → EmbeddingGemma 2 → put_media_embeddings.
+PKB 서버(메모리 8GB mini)는 같은 모델의 텍스트 탑만 올리고 이미지·오디오 인코더는 올리지 않는다.
+흐름은 list_media(missing_only) → get_media → EmbeddingGemma 2 → put_media_embeddings.
 서버 URL은 PKB 서버(`http://<host>:8787/mcp`)나 MCP 게이트웨이 어느 쪽이든 된다. 게이트웨이는 도구를
 `pkb-` + 하이픈 이름으로 내놓으므로 tools/list에서 이름을 찾는다.
 
-의존성: `uv sync --extra media` (모델 프로세서가 torchvision을 쓴다). 오디오는 macOS afconvert로
-16 kHz 모노로 풀고, PIL이 못 여는 SVG·HEIC는 macOS sips로 PNG를 만든다.
+오디오는 macOS afconvert로 16 kHz 모노로 풀고, PIL이 못 여는 SVG·HEIC는 macOS sips로 PNG를 만든다.
 """
 
 from __future__ import annotations
@@ -112,15 +111,8 @@ class MediaEmbedder:
     """EmbeddingGemma 2로 이미지·오디오 벡터를 만든다 (MPS면 bf16). 미디어에는 프롬프트를 붙이지 않는다."""
 
     def __init__(self, device: str = "auto", model_id: str = MODEL) -> None:
-        import importlib.util
-
         from pkb.config import resolve_device
 
-        # 이미지 프로세서가 torchvision을 쓴다
-        if importlib.util.find_spec("torchvision") is None:
-            raise ToolError(
-                "torchvision이 없습니다. `uv sync --extra media` 뒤 `uv run --extra media pkb media-sync`로 실행하세요."
-            )
         self.device = resolve_device(device)
         self.model_id = model_id
         self._model = None

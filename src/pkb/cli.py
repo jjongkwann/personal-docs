@@ -291,8 +291,7 @@ def media_sync(
 ):
     """이 Mac에서 이미지·오디오 벡터를 만들어 PKB 서버에 올립니다 (미색인 파일만).
 
-    EmbeddingGemma 2를 쓰므로 `uv sync --extra media`가 필요하다. 서버에는
-    MEDIA_EMBEDDING_MODEL이 같은 모델로 설정돼 있어야 한다.
+    EmbeddingGemma 2로 만든다. 서버에는 MEDIA_EMBEDDING_MODEL이 같은 모델로 설정돼 있어야 한다.
     """
     from pkb.media_sync import McpClient, MediaEmbedder, ToolError, run
 

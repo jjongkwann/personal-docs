@@ -1512,13 +1512,9 @@ dependencies = [
     { name = "pyyaml" },
     { name = "sentence-transformers" },
     { name = "tiktoken" },
+    { name = "torchvision" },
     { name = "transformers" },
     { name = "typer" },
-]
-
-[package.optional-dependencies]
-media = [
-    { name = "torchvision" },
 ]
 
 [package.dev-dependencies]
@@ -1540,11 +1536,10 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "sentence-transformers", specifier = ">=6.1" },
     { name = "tiktoken", specifier = ">=0.8" },
-    { name = "torchvision", marker = "extra == 'media'", specifier = ">=0.26,<0.27" },
+    { name = "torchvision", specifier = ">=0.26,<0.27" },
     { name = "transformers", specifier = ">=5.13" },
     { name = "typer", specifier = ">=0.15" },
 ]
-provides-extras = ["media"]
 
 [package.metadata.requires-dev]
 dev = [
