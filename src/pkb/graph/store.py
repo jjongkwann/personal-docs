@@ -1,9 +1,11 @@
 """개념 그래프 CRUD 레이어."""
 
 import contextlib
+import json
 import re
 import sqlite3
 import struct
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from pkb.config import settings
@@ -90,6 +92,120 @@ def _cosine(a: list[float], b: list[float]) -> float:
     if na == 0 or nb == 0:
         return 0.0
     return dot / (na * nb)
+
+
+# ---------- Embedding model ----------
+
+# graph_meta 키. embedding_model은 개념 벡터를 만든 임베딩 식별자(ingest.embedding_identity),
+# embedding_reembed는 `pkb graph reembed`가 도는 동안의 {"identity", "last_id"}.
+EMBEDDING_MODEL_KEY = "embedding_model"
+EMBEDDING_REEMBED_KEY = "embedding_reembed"
+# 기록이 생기기 전 운영 그래프의 벡터는 bge-m3로 만들었다. 그보다 앞선 384차원 MiniLM 벡터도
+# 남아 있지만 _cosine이 차원이 다른 벡터를 0으로 보아 비교에서 빠진다. graph reembed가 모두 바꾼다.
+LEGACY_EMBEDDING_MODEL = "BAAI/bge-m3"
+
+
+class EmbeddingModelMismatchError(ValueError):
+    """개념 벡터와 현재 임베딩 설정의 벡터는 비교할 수 없다."""
+
+
+def _meta(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM graph_meta WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def _set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO graph_meta (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+
+
+def graph_embedding_model(conn: sqlite3.Connection) -> str | None:
+    """개념 벡터를 만든 임베딩 식별자. 벡터가 하나도 없으면 None."""
+    recorded = _meta(conn, EMBEDDING_MODEL_KEY)
+    if recorded is not None:
+        return recorded
+    if conn.execute("SELECT 1 FROM concepts WHERE embedding IS NOT NULL LIMIT 1").fetchone() is None:
+        return None
+    return LEGACY_EMBEDDING_MODEL
+
+
+def check_embedding_model(conn: sqlite3.Connection) -> str:
+    """개념 벡터를 현재 설정의 벡터와 비교하거나 더해도 되면 현재 식별자를 돌려준다.
+
+    모델이 다른 벡터의 코사인은 오류 없이 뜻 없는 값을 낸다. 병합·시드·어휘 조회가 조용히
+    틀리지 않게, 기록된 모델이 다르거나 재계산이 끝나지 않았으면 EmbeddingModelMismatchError.
+    """
+    from pkb.ingest import embedding_identity
+
+    if _meta(conn, EMBEDDING_REEMBED_KEY) is not None:
+        raise EmbeddingModelMismatchError(
+            "개념 벡터를 다시 계산하는 중입니다. `pkb graph reembed`를 끝까지 실행하세요."
+        )
+    current = embedding_identity()
+    recorded = graph_embedding_model(conn)
+    if recorded is not None and recorded != current:
+        raise EmbeddingModelMismatchError(
+            f"개념 벡터는 '{recorded}', 현재 임베딩은 '{current}'입니다. "
+            "`pkb graph reembed`로 개념 벡터를 다시 계산하세요."
+        )
+    return current
+
+
+def concept_embedding_text(name: str, description: str) -> str:
+    """개념 벡터의 입력. graph_store_concepts와 graph reembed가 같은 문자열을 임베딩한다."""
+    return f"{name}: {description}".strip(": ")
+
+
+def reembed_concepts(
+    conn: sqlite3.Connection,
+    embed: Callable[[list[str]], list[list[float]]],
+    identity: str,
+    *,
+    batch_size: int = 256,
+    max_batches: int = 0,
+    progress: Callable[[int, int], None] | None = None,
+) -> dict:
+    """모든 개념 벡터를 embed로 다시 계산하고 embedding_model에 identity를 기록한다.
+
+    묶음마다 벡터와 마지막 개념 id를 함께 커밋하므로 중단 뒤 다시 부르면 이어서 한다. 도는 동안에는
+    check_embedding_model이 벡터 비교를 막는다. 이미 identity로 기록된 그래프는 건드리지 않는다.
+    """
+    total = conn.execute("SELECT count(*) FROM concepts").fetchone()[0]
+    raw_state = _meta(conn, EMBEDDING_REEMBED_KEY)
+    state = json.loads(raw_state) if raw_state else None
+    if state is None and _meta(conn, EMBEDDING_MODEL_KEY) == identity:
+        return {"updated": 0, "total": total, "complete": True}
+    last_id = state["last_id"] if state and state["identity"] == identity else 0
+    updated = batches = 0
+    while True:
+        rows = conn.execute(
+            "SELECT id, name, description FROM concepts WHERE id > ? ORDER BY id LIMIT ?",
+            (last_id, batch_size),
+        ).fetchall()
+        if not rows:
+            break
+        if max_batches and batches >= max_batches:
+            return {"updated": updated, "total": total, "complete": False}
+        vectors = embed([concept_embedding_text(row["name"], row["description"] or "") for row in rows])
+        conn.executemany(
+            "UPDATE concepts SET embedding = ? WHERE id = ?",
+            [(_pack_embedding(vector), row["id"]) for row, vector in zip(rows, vectors, strict=True)],
+        )
+        last_id = rows[-1]["id"]
+        _set_meta(conn, EMBEDDING_REEMBED_KEY, json.dumps({"identity": identity, "last_id": last_id}))
+        conn.commit()
+        updated += len(rows)
+        batches += 1
+        if progress:
+            done = conn.execute("SELECT count(*) FROM concepts WHERE id <= ?", (last_id,)).fetchone()[0]
+            progress(done, total)
+    conn.execute("DELETE FROM graph_meta WHERE key = ?", (EMBEDDING_REEMBED_KEY,))
+    _set_meta(conn, EMBEDDING_MODEL_KEY, identity)
+    conn.commit()
+    return {"updated": updated, "total": total, "complete": True}
 
 
 # ---------- Concepts ----------
@@ -208,6 +324,7 @@ def find_concept_by_embedding(
     category: str | None = None,
 ) -> tuple[sqlite3.Row, float] | None:
     """임베딩 유사도가 threshold 이상인 가장 가까운 개념을 반환."""
+    check_embedding_model(conn)
     if threshold is None:
         threshold = settings.graph_dedup_threshold
 
@@ -233,6 +350,7 @@ def top_concepts_by_embedding(
 
     검색 쿼리를 코퍼스 개념 어휘로 바꿔 재질의하는 시드용.
     """
+    check_embedding_model(conn)
     # ponytail: 파이썬 코사인 풀스캔 — 개인 규모 N이면 충분
     scored: list[tuple[sqlite3.Row, float]] = []
     for row in conn.execute("SELECT * FROM concepts WHERE embedding IS NOT NULL"):
@@ -266,6 +384,12 @@ def upsert_concept(
         raise ValueError("정규화 후 빈 slug가 되는 개념명은 저장할 수 없습니다.")
     identity_namespace = _effective_namespace(namespace, category)
     now = _now()
+    if embedding:
+        # 다른 모델의 벡터를 섞지 않는다. 벡터가 없던 그래프에는 첫 벡터의 모델을 기록한다.
+        conn.execute(
+            "INSERT OR IGNORE INTO graph_meta (key, value) VALUES (?, ?)",
+            (EMBEDDING_MODEL_KEY, check_embedding_model(conn)),
+        )
 
     # 1. slug 일치.  A category/namespace mismatch is a real identity
     # conflict, not a spelling variant; in that case we continue below and

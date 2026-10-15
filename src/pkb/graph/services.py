@@ -238,7 +238,7 @@ def store_concepts(items_json: str) -> str:
                         continue
                     valid_concepts.append(concept)
                 names_and_descriptions = [
-                    f"{concept.get('name', '')}: {concept.get('description', '')}".strip(": ")
+                    graph_store.concept_embedding_text(concept.get("name", ""), concept.get("description", ""))
                     for concept in valid_concepts
                 ]
                 vectors = embed_documents(names_and_descriptions) if names_and_descriptions else []

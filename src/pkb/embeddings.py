@@ -1,3 +1,6 @@
+import contextlib
+from collections.abc import Iterator
+
 from sentence_transformers import SentenceTransformer
 
 from pkb.config import resolve_device, settings
@@ -47,8 +50,44 @@ def _encode_options(prompt_name: str) -> dict:
     return options
 
 
-def _embed(texts: list[str], options: dict) -> list[list[float]]:
-    with _model.use() as model:
+@contextlib.contextmanager
+def _padded_to_multiple(model: SentenceTransformer, multiple: int) -> Iterator[None]:
+    """encode 동안 토큰 길이를 multiple의 배수로 늘려 입력 모양의 가짓수를 줄인다.
+
+    MPS는 입력 모양마다 버퍼를 따로 잡아 두어, 길이가 제각각인 청크를 대량으로 임베딩하면
+    empty_cache()를 해도 드라이버 메모리가 계속 는다 (jina v5, 256청크 묶음 4개: 7.5→17.5GB).
+    128 배수로 맞추면 5.4GB에서 멈춘다. 늘린 자리는 attention_mask 0이라 벡터는 그대로다.
+    MPS가 아니거나 multiple이 0이면 아무것도 바꾸지 않는다.
+    """
+    if not multiple or model.device.type != "mps":
+        yield
+        return
+    preprocess = model.preprocess
+    tokenizer = model.tokenizer
+
+    def padded(*args, **kwargs):
+        features = preprocess(*args, **kwargs)
+        length = features["input_ids"].shape[1]
+        extra = -length % multiple
+        if extra:
+            from torch.nn.functional import pad
+
+            side = (extra, 0) if tokenizer.padding_side == "left" else (0, extra)
+            for key, value in features.items():
+                if hasattr(value, "dim") and value.dim() == 2 and value.shape[1] == length:
+                    fill = tokenizer.pad_token_id if key == "input_ids" else 0
+                    features[key] = pad(value, side, value=fill)
+        return features
+
+    model.preprocess = padded
+    try:
+        yield
+    finally:
+        del model.preprocess
+
+
+def _embed(texts: list[str], options: dict, pad_to_multiple_of: int = 0) -> list[list[float]]:
+    with _model.use() as model, _padded_to_multiple(model, pad_to_multiple_of):
         is_mps = model.device.type == "mps"
         if is_mps and len(texts) > _MPS_ENCODE_WINDOW:
             import torch
@@ -79,9 +118,13 @@ def _embed(texts: list[str], options: dict) -> list[list[float]]:
     return vectors.tolist()
 
 
-def embed_documents(texts: list[str]) -> list[list[float]]:
-    """색인할 텍스트(청크·개념 설명)를 벡터로 변환."""
-    return _embed(texts, _encode_options(settings.embedding_document_prompt))
+def embed_documents(texts: list[str], *, pad_to_multiple_of: int = 0) -> list[list[float]]:
+    """색인할 텍스트(청크·개념 설명)를 벡터로 변환.
+
+    pad_to_multiple_of>0이면 MPS에서 토큰 길이를 그 배수로 맞춘다 — 전량 재임베딩처럼 길이가 다른
+    입력을 오래 넣을 때 메모리가 늘지 않게 (_padded_to_multiple).
+    """
+    return _embed(texts, _encode_options(settings.embedding_document_prompt), pad_to_multiple_of)
 
 
 def embed_queries(texts: list[str]) -> list[list[float]]:

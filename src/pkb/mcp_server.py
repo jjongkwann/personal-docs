@@ -220,7 +220,10 @@ def search_knowledge(
             ]
             if pairs:
                 hit_concepts = gstore.mentions_for_chunks(conn, pairs)
-            top = gstore.top_concepts_by_embedding(conn, query_vector[0])
+            try:
+                top = gstore.top_concepts_by_embedding(conn, query_vector[0])
+            except gstore.EmbeddingModelMismatchError as exc:
+                top, vocab_line = [], f"코퍼스 개념 어휘 생략: {exc}"
             if top:
                 terms = []
                 for row, _score in top:
