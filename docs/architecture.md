@@ -319,15 +319,16 @@ Boundaries the MCP server enforces:
 
 ## 5. Secondary Interface (CLI)
 
-`src/pkb/cli.py` is used for operations and verification. 21 top-level commands: `init`, `reindex`,
-`index-switch`, `doc-index`, `sync`, `convert`, `add`, `write`, `show`, `reindex-doc`, `list`, `query`, `delete`,
-`archive`, `restore`, `doctor`, `eval`, `purge-archived`, `stale`, `watch`, `media-sync`. Plus 9 `graph`
-subcommands: `stats`, `explain`, `path`, `query`, `affected`, `map`, `reset-evidence`,
+`src/pkb/cli.py` is used for operations and verification. 22 top-level commands: `init`, `reindex`,
+`index-switch`, `doc-index`, `reembed`, `sync`, `convert`, `add`, `write`, `show`, `reindex-doc`, `list`, `query`, `delete`,
+`archive`, `restore`, `doctor`, `eval`, `purge-archived`, `stale`, `watch`, `media-sync`. Plus 10 `graph`
+subcommands: `stats`, `reembed`, `explain`, `path`, `query`, `affected`, `map`, `reset-evidence`,
 `finalize-evidence`, `rebuild-evidence-local`.
 
 Most capabilities exist on both the CLI and MCP sides (`sync` ↔ `sync_corpus`, `show` ↔
 `get_document`, `graph explain` ↔ `graph_explain`, `graph map` ↔ `graph_map`, etc.). CLI-only:
-`init`, `reindex`, `index-switch` (read-alias switch), `doc-index` (document-level index backfill), `delete`, `purge-archived`, `eval`,
+`init`, `reindex`, `index-switch` (read-alias switch), `doc-index` (document-level index backfill),
+`reembed`/`graph reembed` (embedding model switch), `delete`, `purge-archived`, `eval`,
 `graph stats`, `graph reset-evidence`, `graph rebuild-evidence-local`,
 `graph finalize-evidence` (heavy evidence migration), `stale`, `watch` (for hooks/daemons),
 `media-sync` (client that embeds images/audio and calls the media tools).

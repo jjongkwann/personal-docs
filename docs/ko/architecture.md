@@ -304,15 +304,15 @@ MCP 서버가 지키는 경계:
 
 ## 5. 보조 인터페이스 (CLI)
 
-`src/pkb/cli.py`는 운영과 검증에 사용합니다. 최상위 명령 21개: `init`, `reindex`, `index-switch`,
-`doc-index`, `sync`, `convert`, `add`, `write`, `show`, `reindex-doc`, `list`, `query`, `delete`, `archive`,
-`restore`, `doctor`, `eval`, `purge-archived`, `stale`, `watch`, `media-sync`. 여기에 `graph` 하위 명령 9개:
-`stats`, `explain`, `path`, `query`, `affected`, `map`, `reset-evidence`, `finalize-evidence`,
+`src/pkb/cli.py`는 운영과 검증에 사용합니다. 최상위 명령 22개: `init`, `reindex`, `index-switch`,
+`doc-index`, `reembed`, `sync`, `convert`, `add`, `write`, `show`, `reindex-doc`, `list`, `query`, `delete`, `archive`,
+`restore`, `doctor`, `eval`, `purge-archived`, `stale`, `watch`, `media-sync`. 여기에 `graph` 하위 명령 10개:
+`stats`, `reembed`, `explain`, `path`, `query`, `affected`, `map`, `reset-evidence`, `finalize-evidence`,
 `rebuild-evidence-local`.
 
 대부분의 능력은 CLI와 MCP 양쪽에 있습니다(`sync` ↔ `sync_corpus`, `show` ↔ `get_document`,
 `graph explain` ↔ `graph_explain`, `graph map` ↔ `graph_map` 등). CLI 전용: `init`, `reindex`,
-`index-switch`(읽기 alias 전환), `doc-index`(문서 단위 색인 백필), `delete`, `purge-archived`, `eval`, `graph stats`,
+`index-switch`(읽기 alias 전환), `doc-index`(문서 단위 색인 백필), `reembed`·`graph reembed`(임베딩 모델 전환), `delete`, `purge-archived`, `eval`, `graph stats`,
 `graph reset-evidence`, `graph rebuild-evidence-local`, `graph finalize-evidence`
 (무거운 evidence 마이그레이션), `stale`,
 `watch`(훅·데몬용), `media-sync`(이미지·오디오를 임베딩해 미디어 도구를 부르는 클라이언트). MCP 전용: `graph_list_concepts`,
