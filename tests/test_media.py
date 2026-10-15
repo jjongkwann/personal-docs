@@ -13,13 +13,12 @@ from pkb import media
 from pkb.config import settings
 from pkb.retrieve import hybrid_search, related_documents
 
-OMNI = "jinaai/jina-embeddings-v5-omni-small"
-TEXT = "jinaai/jina-embeddings-v5-text-small"
+MODEL = "google/embeddinggemma-2"
 
 
 @pytest.fixture
 def roots(tmp_path, monkeypatch):
-    """볼트 안에 data 루트, 볼트 밖에 첨부 루트. 미디어 공간은 omni-small ↔ text-small."""
+    """볼트 안에 data 루트, 볼트 밖에 첨부 루트. 미디어 공간은 EmbeddingGemma 2 하나."""
     vault = tmp_path / "vault"
     data = vault / "PKB"
     attachments = tmp_path / "attachments"
@@ -28,9 +27,9 @@ def roots(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "obsidian_path", str(vault))
     monkeypatch.setattr(settings, "data_root", str(data))
     monkeypatch.setattr(settings, "attachments_root", str(attachments))
-    monkeypatch.setattr(settings, "embedding_model", TEXT)
-    monkeypatch.setattr(settings, "embedding_task", "retrieval")
-    monkeypatch.setattr(settings, "media_embedding_model", OMNI)
+    monkeypatch.setattr(settings, "embedding_model", MODEL)
+    monkeypatch.setattr(settings, "embedding_task", "")
+    monkeypatch.setattr(settings, "media_embedding_model", MODEL)
     monkeypatch.setattr(settings, "embedding_dims", 4)
     monkeypatch.setattr(media, "_sha_cache", {})
     monkeypatch.setattr(media, "_note_cache", {})
@@ -74,7 +73,7 @@ def test_list_media_enumerates_three_roots_with_ingest_exclusions(roots):
 
     listing = media.list_media(_es())
 
-    assert listing["model"] == OMNI
+    assert listing["model"] == MODEL
     assert [(m["doc_id"], m["kind"]) for m in listing["media"]] == [
         ("data/study/chart.png", "image"),
         ("obsidian/assets/Diagram.SVG", "image"),
@@ -94,8 +93,8 @@ def test_indexed_means_same_sha_and_current_model(roots):
     _write(vault / "c.png", b"c")
     sha = {name: hashlib.sha256(name.encode()).hexdigest() for name in "abc"}
     es = _es({
-        "obsidian/a.jpg": (sha["a"], OMNI),  # 그대로
-        "obsidian/b.jpg": ("0" * 64, OMNI),  # 파일이 바뀜
+        "obsidian/a.jpg": (sha["a"], MODEL),  # 그대로
+        "obsidian/b.jpg": ("0" * 64, MODEL),  # 파일이 바뀜
         "obsidian/c.png": (sha["c"], "old/model"),  # 모델이 바뀜
     })
 
@@ -113,7 +112,7 @@ def test_list_media_reports_null_model_when_media_is_off_or_incompatible(roots, 
     _write(vault / "a.jpg")
     monkeypatch.setattr(settings, "embedding_model", "BAAI/bge-m3")
     monkeypatch.setattr(settings, "embedding_task", "")
-    listing = media.list_media(_es({"obsidian/a.jpg": (hashlib.sha256(b"x").hexdigest(), OMNI)}))
+    listing = media.list_media(_es({"obsidian/a.jpg": (hashlib.sha256(b"x").hexdigest(), MODEL)}))
     assert listing["model"] is None
     assert listing["media"][0]["indexed"] is False
 
@@ -190,11 +189,11 @@ def test_get_media_refuses_symlinks(roots, tmp_path):
 # ---------- 벡터 공간 ----------
 
 def test_media_model_requires_setting_and_a_known_space(monkeypatch, roots):
-    assert media.media_model() == OMNI
-    monkeypatch.setattr(settings, "embedding_task", "text-matching")
+    assert media.media_model() == MODEL
+    monkeypatch.setattr(settings, "embedding_task", "retrieval")
     with pytest.raises(ValueError, match="같은 공간"):
         media.media_model()
-    monkeypatch.setattr(settings, "embedding_task", "retrieval")
+    monkeypatch.setattr(settings, "embedding_task", "")
     monkeypatch.setattr(settings, "embedding_model", "BAAI/bge-m3")
     with pytest.raises(ValueError, match="같은 공간"):
         media.media_model()
@@ -235,12 +234,12 @@ def test_put_audio_builds_one_chunk_per_window_with_note_context(roots, captured
     captured["existing"] = {i: {"chunk_index": i} for i in range(4)}
 
     result = media.put_media_embeddings(
-        MagicMock(), "attachments/meetings/2026/w/others.m4a", "audio", _sha(audio), OMNI,
+        MagicMock(), "attachments/meetings/2026/w/others.m4a", "audio", _sha(audio), MODEL,
         [{"start": 30, "end": 60, "vector": [0, 3, 0, 4]}, {"start": 0, "end": 30, "vector": [1, 0, 0, 0]}],
     )
 
     assert result == {"doc_id": "attachments/meetings/2026/w/others.m4a", "kind": "audio", "segments": 2,
-                      "sha256": _sha(audio), "model": OMNI, "linked_from": ["data/meetings/2026/w.md"]}
+                      "sha256": _sha(audio), "model": MODEL, "linked_from": ["data/meetings/2026/w.md"]}
     first, second = captured["chunks"]
     assert (first["media_start"], first["media_end"], first["section_path"]) == (0.0, 30.0, "0:00–0:30")
     assert second["embedding"] == pytest.approx([0, 0.6, 0, 0.8])  # 단위 길이로 맞춘다
@@ -248,7 +247,7 @@ def test_put_audio_builds_one_chunk_per_window_with_note_context(roots, captured
     assert first["occurred_at"] == "2026-10-14T10:00:00+09:00" and first["people"] == ["김민수"]
     assert first["linked_from"] == ["data/meetings/2026/w.md"]
     assert "주간 회의" in first["content"] and first["content_hash"]
-    assert first["media_sha256"] == _sha(audio) and first["media_model"] == OMNI
+    assert first["media_sha256"] == _sha(audio) and first["media_model"] == MODEL
     assert captured["deleted"] == [2, 3]  # 남는 옛 창은 지운다
     assert captured["rows"] == ["attachments/meetings/2026/w/others.m4a"]
 
@@ -262,7 +261,7 @@ def test_put_image_takes_context_from_embedding_notes(roots, captured):
     _write(vault / "other.md", "# 무관\n![[dog.jpg]]\n")
     captured["existing"] = {0: {"chunk_index": 0, "archived_at": "2026-01-01T00:00:00+00:00"}}
 
-    media.put_media_embeddings(MagicMock(), "obsidian/photos/my cat.jpg", "image", _sha(image), OMNI,
+    media.put_media_embeddings(MagicMock(), "obsidian/photos/my cat.jpg", "image", _sha(image), MODEL,
                                [{"vector": [1, 1, 1, 1]}])
 
     (chunk,) = captured["chunks"]
@@ -292,14 +291,14 @@ def test_put_validates_segments(roots, captured, kind, segments, match):
     path = vault / ("a.jpg" if kind == "image" else "a.m4a")
     _write(path)
     with pytest.raises(ValueError, match=match):
-        media.put_media_embeddings(MagicMock(), f"obsidian/{path.name}", kind, _sha(path), OMNI, segments)
+        media.put_media_embeddings(MagicMock(), f"obsidian/{path.name}", kind, _sha(path), MODEL, segments)
     assert "chunks" not in captured
 
 
 def test_put_refuses_wrong_model_kind_hash_and_space(roots, captured, monkeypatch):
     vault, _, _ = roots
     _write(vault / "a.jpg")
-    good = {"doc_id": "obsidian/a.jpg", "kind": "image", "sha256": _sha(vault / "a.jpg"), "model": OMNI,
+    good = {"doc_id": "obsidian/a.jpg", "kind": "image", "sha256": _sha(vault / "a.jpg"), "model": MODEL,
             "segments": [{"vector": [1, 0, 0, 0]}]}
     for change, match in (({"model": "other"}, "model"), ({"kind": "audio"}, "kind"),
                           ({"sha256": "0" * 64}, "바뀌었")):
@@ -326,7 +325,7 @@ def test_search_media_runs_knn_over_media_chunks_only(roots, monkeypatch):
 
     knn = es.search.call_args.kwargs["knn"]
     assert knn["query_vector"] == [0.5, 0.5, 0.5, 0.5] and knn["k"] == 3
-    assert {"term": {"media_model": OMNI}} in knn["filter"]
+    assert {"term": {"media_model": MODEL}} in knn["filter"]
     assert {"terms": {"source_type": ["audio"]}} in knn["filter"]
     assert {"terms": {"people": ["김민수"]}} in knn["filter"]
     assert {"bool": {"must_not": {"exists": {"field": "archived_at"}}}} in knn["filter"]

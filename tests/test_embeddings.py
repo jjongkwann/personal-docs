@@ -74,6 +74,23 @@ def test_trust_remote_code_reaches_the_loader(monkeypatch):
     assert calls[-1]["trust_remote_code"] is True
 
 
+def test_text_only_and_bfloat16_reach_the_loader(monkeypatch):
+    import torch
+
+    calls: list[dict] = []
+    monkeypatch.setattr(embeddings, "SentenceTransformer", lambda name, **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(settings, "embedding_device", "mps")
+
+    embeddings._load()
+    assert "config_kwargs" not in calls[-1]
+
+    monkeypatch.setattr(settings, "embedding_text_only", True)
+    monkeypatch.setattr(settings, "embedding_dtype", "bfloat16")
+    embeddings._load()
+    assert calls[-1]["config_kwargs"] == {"vision_config": None, "audio_config": None}
+    assert calls[-1]["model_kwargs"] == {"dtype": torch.bfloat16}
+
+
 def test_fingerprint_changes_with_document_encoding_but_not_query_prompt(monkeypatch):
     chunk = {"content": "본문", "title": "", "section_path": ""}
     default = embedding_fingerprint(chunk)

@@ -163,8 +163,9 @@ def test_rerun_skips_done_chunks_and_catches_up_with_source_changes(embedded, ba
     assert set(es.data[TARGET]) == {"data/a.md_0", "data/b.md_0"}
 
 
-def test_media_chunks_keep_their_vector_and_have_no_fingerprint(embedded, backfilled):
+def test_media_chunks_keep_their_vector_and_have_no_fingerprint(embedded, backfilled, monkeypatch):
     """이미지·오디오 청크의 벡터는 미디어 모델이 만들었다. content(설명)로 다시 임베딩하지 않는다."""
+    monkeypatch.setattr(settings, "media_embedding_model", "omni")
     text = _chunk("data/a.md", 0, "본문")
     image = _chunk("data/a.png", 0, "사진 설명", source_type="image", media_model="omni", embedding=[0.3, 0.4])
     del image["embedding_fingerprint"]
@@ -176,6 +177,20 @@ def test_media_chunks_keep_their_vector_and_have_no_fingerprint(embedded, backfi
     assert embedded == [[embed_input(text)]]
     assert es.data[TARGET]["data/a.png_0"] == image
     assert reembed.reembed_index(es, source="pkb_current", target=TARGET).unchanged == 2
+
+
+def test_media_chunks_of_another_media_model_are_left_for_media_sync(embedded, backfilled, monkeypatch):
+    """미디어 모델을 바꾸면 옛 미디어 벡터는 공간·차원이 달라 옮기지 않는다. 대상에 남은 것도 지운다."""
+    monkeypatch.setattr(settings, "media_embedding_model", "new-media")
+    text = _chunk("data/a.md", 0, "본문")
+    image = _chunk("data/a.png", 0, "사진 설명", source_type="image", media_model="omni", embedding=[0.3, 0.4])
+    del image["embedding_fingerprint"]
+    es = FakeES({SOURCE: _source(text, image), TARGET: {"data/a.png_0": image}})
+
+    result = reembed.reembed_index(es, source=SOURCE, target=TARGET)
+
+    assert (result.embedded, result.copied, result.media_dropped, result.deleted) == (1, 0, 1, 1)
+    assert set(es.data[TARGET]) == {"data/a.md_0"}
 
 
 def test_max_batches_stops_before_finishing(embedded, backfilled):

@@ -14,6 +14,8 @@ def _load() -> SentenceTransformer:
         kwargs["revision"] = settings.embedding_revision
     if settings.embedding_trust_remote_code:
         kwargs["trust_remote_code"] = True
+    if settings.embedding_text_only:
+        kwargs["config_kwargs"] = {"vision_config": None, "audio_config": None}
     if device != "cpu" and settings.embedding_dtype != "float32":
         import torch
 

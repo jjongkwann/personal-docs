@@ -12,9 +12,13 @@ class Settings(BaseSettings):
     embedding_dims: int = 1024
     embedding_device: str = "auto"  # auto | cpu | mps | cuda
     # 2026-10 mini(8GB) 실측: float16은 gold 57문항에서 Recall@5·근거 Recall 동일, MRR@5 0.526→0.523, 적재 17→6초
-    embedding_dtype: Literal["float32", "float16"] = "float16"  # GPU(mps·cuda)에서만 적용, CPU는 항상 float32
+    # EmbeddingGemma 2는 float16에서 NaN이나 망가진 벡터를 내므로 bfloat16을 쓴다.
+    # GPU(mps·cuda)에서만 적용, CPU는 항상 float32
+    embedding_dtype: Literal["float32", "float16", "bfloat16"] = "float16"
     embedding_batch_size: int = 32  # sentence-transformers 기본값. RAM 8GB 머신의 대량 색인에선 8까지 낮출 것
     # 질의와 문서에 다른 입력을 쓰는 모델용. 비워 두면(bge-m3) encode에 아무것도 더하지 않는다.
+    # google/embeddinggemma-2: dims=768, dtype=bfloat16, text_only=true,
+    # query_prompt=SearchQuery, document_prompt=Document, normalize=true
     # jinaai/jina-embeddings-v5-text-small: trust_remote_code=true, task=retrieval,
     # query_prompt=query, document_prompt=document, normalize=true (peft 필요)
     embedding_trust_remote_code: bool = False  # 모델 저장소의 코드를 실행한다 — 믿는 모델만
@@ -22,6 +26,8 @@ class Settings(BaseSettings):
     embedding_query_prompt: str = ""  # 질의 encode의 prompt_name
     embedding_document_prompt: str = ""  # 문서 encode의 prompt_name
     embedding_normalize: bool = False  # encode(normalize_embeddings=True)
+    # 이미지·오디오 인코더를 빼고 텍스트 탑만 올린다 (EmbeddingGemma 2: 740M → 270M). 질의·청크는 글뿐이다
+    embedding_text_only: bool = False
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
     rerank_revision: str = ""  # 선택: 모델 저장소 commit/tag 고정
     # 2026-07 벤치: BGE-M3 후보 풀에서 bge/qwen3 리랭커 모두 no-rerank(MRR 0.517)보다 낮아 기본 off

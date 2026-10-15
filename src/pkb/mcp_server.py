@@ -504,7 +504,7 @@ def put_media_embeddings(doc_id: str, kind: str, sha256: str, model: str, segmen
         doc_id: list_media의 doc_id
         kind: image 또는 audio (파일 종류와 같아야 함)
         sha256: 벡터를 만든 파일의 SHA-256
-        model: 벡터를 만든 모델 id (예: jinaai/jina-embeddings-v5-omni-small)
+        model: 벡터를 만든 모델 id (예: google/embeddinggemma-2)
         segments: [{start, end, vector}]. 이미지는 하나(start·end 생략), 오디오는 겹치지 않는
             30초 이하 창마다 하나(초 단위). 최대 1000개.
 
