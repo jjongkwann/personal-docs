@@ -70,6 +70,8 @@ ALLOWLIST_CLI_ONLY = {
     "watch",
     "doc-index",  # 문서 색인 전량 백필 — 배포 때 한 번 돌리는 운영 명령
     "media-sync",  # 서버의 list_media·put_media_embeddings를 부르는 클라이언트 (이미지·오디오 임베딩)
+    "reembed",  # 임베딩 모델 교체 — GPU 머신에서 새 물리 색인을 채우는 운영 명령
+    "graph reembed",  # 임베딩 모델 교체 — 그래프 사본의 개념 벡터 재계산
 }
 
 # Claude 루프 셀프추출·큐레이션·병합(graph_*) + obsidian 전용 재조정.

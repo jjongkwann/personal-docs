@@ -132,6 +132,68 @@ def doc_index():
 
 
 @app.command()
+def reembed(
+    target: str = typer.Option(..., help="채울 새 물리 인덱스 (예: pkb_documents_20261015_jina)"),
+    source: str = typer.Option(None, help="원본 인덱스 또는 alias (기본: ES_INDEX)"),
+    batch_size: int = typer.Option(256, min=1, help="한 번에 읽고 임베딩해 bulk로 쓸 청크 수"),
+    max_batches: int = typer.Option(0, min=0, help="0=완료까지, 양수=임베딩한 묶음이 이만큼 차면 멈춤"),
+    dry_run: bool = typer.Option(False, help="쓰지 않고 할 일만 센다 (모델을 올리지 않음)"),
+):
+    """현재 임베딩 설정으로 원본 청크를 새 물리 인덱스에 다시 임베딩합니다 (재실행하면 이어서).
+
+    _id·본문·메타데이터는 그대로 두고 embedding·embedding_fingerprint만 바꿉니다. 끝나면
+    '<target>_docs' 문서 색인까지 채우므로 바로 `pkb index-switch <target>`를 할 수 있습니다.
+    멈추고 남은 일이 있으면 종료 코드 3.
+    """
+    import time
+
+    from pkb.ingest import embedding_identity
+    from pkb.reembed import reembed_index
+    from pkb.store import get_client
+
+    source = source or settings.es_index
+    typer.echo(f"임베딩: {embedding_identity()} ({settings.embedding_dims}차원)")
+    typer.echo(f"{source} → {target}{' (dry-run)' if dry_run else ''}")
+    started = time.perf_counter()
+
+    def report(r) -> None:
+        rate = f", {r.embedded / r.embed_seconds:.1f}청크/초" if r.embed_seconds else ""
+        typer.echo(
+            f"  읽음 {r.scanned} · 임베딩 {r.embedded} · 복사 {r.copied} · 그대로 {r.unchanged}"
+            f" ({time.perf_counter() - started:.0f}초{rate})"
+        )
+
+    try:
+        r = reembed_index(
+            get_client(),
+            source=source,
+            target=target,
+            batch_size=batch_size,
+            max_batches=max_batches,
+            dry_run=dry_run,
+            progress=report,
+        )
+    except ValueError as e:
+        typer.echo(f"오류: {e}")
+        raise typer.Exit(1) from None
+
+    if dry_run:
+        typer.echo(
+            f"할 일: 임베딩 {r.embedded} · 복사 {r.copied} · 삭제 {r.deleted} "
+            f"(그대로 {r.unchanged} / 원본 {r.scanned})"
+        )
+        return
+    report(r)
+    if not r.complete:
+        typer.echo(f"임베딩 묶음 {max_batches}개에서 멈춤. 다시 실행하면 이어서 합니다.")
+        raise typer.Exit(3)
+    typer.echo(
+        f"완료: 원본에 없는 청크 {r.deleted}개 삭제, 문서 색인 '{target}_docs' 문서 "
+        f"{r.documents['documents']}개. 전환: uv run pkb index-switch {target}"
+    )
+
+
+@app.command()
 def sync(
     yes: bool = typer.Option(False, "--yes", "-y", help="대량 삭제 확인 생략"),
 ):
@@ -841,6 +903,46 @@ def graph_stats():
     typer.echo(f"DB: {settings.graph_db_path}")
     for k, v in s.items():
         typer.echo(f"  {k}: {v}")
+
+
+@graph_app.command("reembed")
+def graph_reembed(
+    db: Path = typer.Option(None, help="그래프 SQLite 파일 (기본: GRAPH_DB_PATH)"),
+    batch_size: int = typer.Option(256, min=1, help="한 번에 임베딩해 커밋할 개념 수"),
+    max_batches: int = typer.Option(0, min=0, help="0=완료까지, 양수=해당 묶음만 실행"),
+):
+    """모든 개념 벡터를 현재 임베딩 설정으로 다시 계산합니다 (재실행하면 이어서).
+
+    끝나면 graph_meta에 임베딩 식별자를 기록합니다. 기록과 설정이 다르면 벡터를 쓰는 그래프
+    기능(어휘 조회·시드·병합·개념 저장)이 비교하지 않고 실패합니다. 멈추고 남은 일이 있으면 종료 코드 3.
+    """
+    from functools import partial
+
+    from pkb.embeddings import embed_documents
+    from pkb.graph import store as gstore
+    from pkb.graph.schema import graph_connection
+    from pkb.ingest import embedding_identity
+
+    path = db or Path(settings.graph_db_path)
+    if not path.is_file():
+        typer.echo(f"그래프 DB가 없습니다: {path}")
+        raise typer.Exit(1)
+    identity = embedding_identity()
+    typer.echo(f"DB: {path}\n임베딩: {identity}")
+
+    def report(done: int, total: int) -> None:
+        typer.echo(f"  {done}/{total}")
+
+    with graph_connection(str(path)) as conn:
+        # 개념 텍스트는 대부분 70토큰 이하라 32 배수로 길이를 맞춘다 (MPS 메모리, embed_documents 참고)
+        embed = partial(embed_documents, pad_to_multiple_of=32)
+        result = gstore.reembed_concepts(
+            conn, embed, identity, batch_size=batch_size, max_batches=max_batches, progress=report
+        )
+    if not result["complete"]:
+        typer.echo(f"{result['updated']}개 계산 후 멈춤. 다시 실행하면 이어서 합니다.")
+        raise typer.Exit(3)
+    typer.echo(f"완료: 개념 {result['updated']}개 다시 계산 (전체 {result['total']}개)")
 
 
 def _echo_graph_json(result: dict) -> None:

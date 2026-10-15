@@ -99,12 +99,7 @@ def embed_input(chunk: dict) -> str:
     return f"{prefix}\n{chunk['content']}" if prefix else chunk["content"]
 
 
-def embedding_fingerprint(chunk: dict) -> str:
-    """벡터 재사용 판정 키 — 모델·전처리 버전·임베딩 입력이 모두 같을 때만 재사용.
-
-    content_hash는 '본문이 같은가'(그래프 pending 추적)만 답한다. 모델 교체나
-    prefix 토글처럼 본문이 같아도 벡터가 달라져야 하는 변경은 이 키가 잡는다.
-    """
+def _embedding_identity_parts() -> list[str]:
     parts = [settings.embedding_model]
     if settings.embedding_revision:
         parts.append(settings.embedding_revision)
@@ -116,7 +111,21 @@ def embedding_fingerprint(chunk: dict) -> str:
     ]
     if any(encoding):
         parts.append(" ".join(item for item in encoding if item))
-    key = "\n".join([*parts, EMBED_PREPROC_VERSION, embed_input(chunk)])
+    return parts
+
+
+def embedding_identity() -> str:
+    """문서 벡터를 만드는 모델·리비전·encode 인자. 기본 설정(bge-m3)이면 모델 이름 그대로다."""
+    return " ".join(_embedding_identity_parts())
+
+
+def embedding_fingerprint(chunk: dict) -> str:
+    """벡터 재사용 판정 키 — 모델·전처리 버전·임베딩 입력이 모두 같을 때만 재사용.
+
+    content_hash는 '본문이 같은가'(그래프 pending 추적)만 답한다. 모델 교체나
+    prefix 토글처럼 본문이 같아도 벡터가 달라져야 하는 변경은 이 키가 잡는다.
+    """
+    key = "\n".join([*_embedding_identity_parts(), EMBED_PREPROC_VERSION, embed_input(chunk)])
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 

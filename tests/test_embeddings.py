@@ -88,3 +88,30 @@ def test_fingerprint_changes_with_document_encoding_but_not_query_prompt(monkeyp
 
     monkeypatch.setattr(settings, "embedding_model", "jinaai/jina-embeddings-v5-text-small")
     assert embedding_fingerprint(chunk) != default
+
+
+def test_pad_to_multiple_pads_tokens_only_during_mps_encode():
+    import torch
+
+    class _Tokenizer:
+        padding_side = "right"
+        pad_token_id = 9
+
+    class _MpsModel:
+        device = type("Device", (), {"type": "mps"})()
+        tokenizer = _Tokenizer()
+
+        def preprocess(self, texts, **kwargs):
+            return {"input_ids": torch.ones(2, 5, dtype=torch.long), "attention_mask": torch.ones(2, 5), "n": 2}
+
+    model = _MpsModel()
+    with embeddings._padded_to_multiple(model, 4):
+        features = model.preprocess(["a", "b"])
+    assert features["input_ids"].tolist() == [[1] * 5 + [9] * 3] * 2
+    assert features["attention_mask"].tolist() == [[1.0] * 5 + [0.0] * 3] * 2
+    assert features["n"] == 2
+    assert model.preprocess(["a", "b"])["input_ids"].shape == (2, 5)  # 끝나면 원래대로
+
+    model.device = type("Device", (), {"type": "cpu"})()
+    with embeddings._padded_to_multiple(model, 4):
+        assert model.preprocess(["a", "b"])["input_ids"].shape == (2, 5)  # MPS가 아니면 그대로
