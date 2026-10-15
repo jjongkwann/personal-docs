@@ -9,6 +9,7 @@ from elasticsearch import Elasticsearch
 from pkb.config import settings
 from pkb.embeddings import embed_queries
 from pkb.items import normalize_person
+from pkb.media import exclude_media_filter
 from pkb.query import analyze_query, normalize_legal_filters
 
 RRF_K = 60  # Reciprocal Rank Fusion 상수 (Elastic 기본값)
@@ -432,13 +433,14 @@ def hybrid_search(
             이때 현재의 아카이브/만료 대신 법률상 유효기간으로 판단한다.
         query_plan_out: 분석한 질문 계획을 append할 선택적 출력 목록.
         doc_ids, source_types, people, date_from, date_to, path_prefix: 검색 범위 필터
-            (scope_filter). BM25·kNN·이웃 확장에 똑같이 적용한다.
+            (scope_filter). BM25·kNN·이웃 확장에 똑같이 적용한다. 이미지·오디오 청크는
+            source_types에 image·audio를 넣을 때만 나온다.
     """
     profile = _resolve_profile(profile, retrieval_profile)
     scope_filters = scope_filter(
         doc_ids=doc_ids, source_types=source_types, people=people,
         date_from=date_from, date_to=date_to, path_prefix=path_prefix,
-    )
+    ) + exclude_media_filter(source_types)
     if fusion not in {"rrf", "linear"}:
         raise ValueError(f"알 수 없는 fusion: {fusion!r}")
     if not isfinite(lexical_weight) or not 0 <= lexical_weight <= 1:
@@ -734,7 +736,7 @@ def related_documents(
 ) -> list[dict]:
     """문서 벡터가 가까운 다른 문서. 문서 색인 kNN 한 번이며 자기 자신은 뺀다.
 
-    범위 필터는 hybrid_search와 같고, 아카이브·만료 문서는 기본으로 뺀다.
+    범위 필터는 hybrid_search와 같고, 아카이브·만료 문서와 이미지·오디오는 기본으로 뺀다.
     반환 행에는 doc_vector가 없고 score(코사인 기반, 클수록 가깝다)가 붙는다.
     """
     from elasticsearch import NotFoundError
@@ -750,6 +752,7 @@ def related_documents(
             doc_ids=doc_ids, source_types=source_types, people=people,
             date_from=date_from, date_to=date_to, path_prefix=path_prefix,
         ),
+        *exclude_media_filter(source_types),
     ]
     index = doc_index_name()
     if not es.indices.exists(index=index):

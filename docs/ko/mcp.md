@@ -189,6 +189,10 @@ uv run pkb doctor
 | `get_file` | `data/` 원본 파일을 MCP embedded resource의 base64 blob으로 전송. 파일명·MIME·크기·SHA-256 포함, 파일당 최대 10 MiB |
 | `put_attachment` | 볼트 밖 첨부 폴더(`ATTACHMENTS_ROOT`, 예: 회의 오디오)에 최대 4 MiB 조각으로 업로드. 마지막 조각의 SHA-256이 맞아야 파일이 생기고, 이미 있는 파일은 덮어쓰지 않음. 색인하지 않음 |
 | `get_attachment` | `ATTACHMENTS_ROOT` 아래 파일을 최대 4 MiB 조각으로 내려받음. `data_base64`를 담은 JSON 텍스트, 마지막 조각에 파일 SHA-256 |
+| `search_media` | 글로 이미지·오디오를 찾음 (미디어 벡터만 kNN). 오디오는 30초 구간 단위로 `start`/`end`와 함께 나오며, 한 파일의 여러 구간이 순위에 들 수 있음. [이미지·오디오 검색](#이미지오디오-검색) 참고 |
+| `get_media` | `list_media`·`search_media`가 돌려준 이미지·오디오를 최대 4 MiB 조각으로 내려받음. `get_attachment`와 같은 JSON에 `doc_id`, `kind`, `mime_type`이 더해짐 |
+| `list_media` | `data/`, 볼트, `ATTACHMENTS_ROOT`의 이미지·오디오와 크기·수정 시각·SHA-256, 지금 벡터가 있는지. `pkb media-sync`가 씀 |
+| `put_media_embeddings` | 클라이언트가 만든 벡터로 파일 하나의 미디어 청크를 통째로 바꿈. 모델·파일 해시·차원·벡터 공간이 맞지 않으면 거부 |
 | `add_document` | `data/` 하위 파일 인제스트 (md/txt/pdf/docx/pptx/xlsx/html) |
 | `convert_and_ingest` | 외부 PDF/DOCX/PPTX/XLSX/HTML을 `.md`로 변환해 `data/<category>/`에 저장하고 인제스트. 변환본 상단에 provenance frontmatter(`source`·`converted_from`·`converted_at`) 기록, PDF는 페이지 마커(`## p.N`) 보존 |
 | `sync_corpus` | `data/` 코퍼스를 ES와 재조정: 업서트 + 코퍼스에 없는 문서 정리 (`confirm_prune=True`로 대량 삭제 승인). Syncthing 충돌 사본(`*.sync-conflict-*`)은 색인하지 않고, 색인에 남아 있으면 확인 없이 지움 |
@@ -240,6 +244,91 @@ uv run pkb doctor
 
 내려받기: `eof`가 true가 될 때까지 `get_attachment(path, offset, length)`를 부르고 각
 `data_base64`를 디코딩해 이어 붙인 뒤 마지막 응답의 `sha256`으로 검증합니다.
+
+### 이미지·오디오 검색
+
+이미지와 오디오를 글로 찾습니다. 문서와 같은 벡터 공간을 씁니다. 서버는 미디어 모델을 올리지
+않습니다. 다른 Mac에서 `pkb media-sync`가 `jinaai/jina-embeddings-v5-omni-small`로 파일을
+임베딩해 `put_media_embeddings`로 보냅니다. 이 모델의 텍스트 탑은
+`jinaai/jina-embeddings-v5-text-small`에 고정돼 있어서, 서버가 text-small로 만든 질의 벡터로 찾을
+수 있습니다 (같은 문장을 두 모델에 넣은 코사인: 한국어·영어, 질의·문서 프롬프트 모두 0.9997 이상,
+2026-10 실측).
+
+서버 설정:
+
+```
+EMBEDDING_MODEL=jinaai/jina-embeddings-v5-text-small   # 다른 jina v5 설정과 함께, EMBEDDING_TASK=retrieval
+MEDIA_EMBEDDING_MODEL=jinaai/jina-embeddings-v5-omni-small
+```
+
+`MEDIA_EMBEDDING_MODEL`이 비어 있으면 미디어 색인과 검색이 꺼집니다. 서버는 미디어 모델을 그와
+공간이 같은 텍스트 모델·어댑터와 함께일 때만 받습니다 (`src/pkb/media.py`의 `MEDIA_SPACES`).
+다른 텍스트 모델(예: bge-m3)이면 `put_media_embeddings`와 `search_media`가 거부하고
+`list_media`는 `"model": null`을 돌려줍니다.
+
+**대상.** `data/…`(`DATA_ROOT`), `obsidian/…`(`OBSIDIAN_PATH`에서 `DATA_ROOT` 제외),
+`attachments/…`(`ATTACHMENTS_ROOT`). 이미지: png, jpg, jpeg, gif, webp, bmp, tif, tiff, heic, avif,
+svg. 오디오: m4a, mp3, wav, aiff, aif, flac, ogg, opus, aac. 제외 규칙은 Markdown 인제스트와
+같습니다: 숨김 성분(`.uploads` 포함), 예약 폴더(`_trash`, `_archive`, `_review` 등), Syncthing 충돌
+사본, 심볼릭 링크. Markdown 인제스트는 미디어 파일을 읽지 않습니다.
+
+**청크.** 이미지는 하나, 오디오는 30초 이하 창마다 하나입니다 (모델이 오디오를 Whisper 30초 창으로
+읽습니다. 클라이언트는 거의 무음인 창을 버립니다). 미디어 청크는 텍스트 청크와 같은 색인에
+`source_type` `image`·`audio`로 들어가며 `title`(확장자 뺀 파일 이름), `category`(루트 아래 첫
+폴더), `date_modified`(파일 mtime), `media_start`/`media_end`(초, 오디오만), `media_sha256`,
+`media_model`, `linked_from`(파일을 가리키는 노트), `content`를 가집니다. `content`는 결과의
+`context`로 보이는 짧은 설명입니다: 경로, 연결된 노트마다 제목·`occurred_at`·`people`, 이미지면
+`![[이름]]`이나 `![](경로)` 주변 줄. `ATTACHMENTS_ROOT`의 오디오는 노트 frontmatter의
+`attachments` 목록으로 연결됩니다. `occurred_at`과 `people`은 연결된 노트에서 오므로 기간·사람
+필터가 미디어에도 먹힙니다.
+
+**맥락 갱신.** `sync_corpus`, `sync_obsidian`, `pkb sync`가 색인된 미디어의 노트 맥락을 다시
+계산해 바뀐 것만 고칩니다. 다시 임베딩하지 않습니다 — 회의 노트 이름을 바꾸거나 people을 고치면
+`linked_from`과 필터가 따라옵니다.
+
+**다른 도구.** `search_knowledge`와 `related_documents`는 `source_types`에 `image`나 `audio`를
+넣을 때만 미디어를 냅니다. `list_documents`와 `list_categories`는 미디어를 세지 않습니다
+(`list_media`를 쓰세요). 개념 그래프 추출도 미디어 청크를 건너뜁니다.
+
+**정리.** 파일이 남아 있는 미디어는 "원본에 없는 문서"가 되지 않습니다. 파일이 사라지면 평소
+목록에 들어갑니다: `sync_corpus`는 `data/`와 `attachments/`(`confirm_prune=True`일 때만 삭제),
+`sync_obsidian`은 `obsidian/`, `pkb sync`는 셋 다. `ATTACHMENTS_ROOT`를 설정했는데 폴더가
+없으면(볼륨이 빠졌을 때 등) `attachments/`는 정리하지 않고, 설정을 지우면 남은 `attachments/`
+항목을 모두 정리 대상으로 보여 줍니다.
+
+응답 (JSON 텍스트):
+
+```
+list_media   → {"total": N, "model": "<서버가 받는 미디어 모델>" | null,
+                "media": [{"doc_id", "kind": "image"|"audio", "size_bytes", "modified" (ISO 8601 UTC),
+                           "sha256", "indexed": bool, "model": "<저장된 벡터의 모델>" | null}]}
+get_media    → {"doc_id", "kind", "mime_type", "offset", "length", "total_size", "eof",
+                "data_base64", "sha256" (eof일 때만)}
+put_media_embeddings → {"doc_id", "kind", "segments": N, "sha256", "model", "linked_from": [doc_id]}
+search_media → {"query", "results": [{"doc_id", "kind", "title", "start", "end", "score",
+                                      "context", "linked_from": [doc_id]}]}
+```
+
+`start`/`end`는 초 단위이며 이미지는 `null`입니다. `score`는 Elasticsearch 코사인 점수
+`(1 + cos) / 2`입니다. `put_media_embeddings`는 `segments=[{"start", "end", "vector"}]`를 받습니다:
+이미지는 `start`/`end` 없이 하나, 오디오는 겹치지 않는 30초 이하 창(최대 1000개). 벡터는
+`EMBEDDING_DIMS`개의 유한한 수이고 서버가 단위 길이로 맞춥니다. `sha256`은 지금 파일과 같아야
+합니다.
+
+**클라이언트.** 모델을 돌릴 Mac에서 (`uv sync --extra media`가 클라이언트에만 필요한 torchvision을
+더합니다):
+
+```bash
+uv run --extra media pkb media-sync --url https://<게이트웨이>/mcp   # Bearer 토큰은 ~/.config/mcp-gateway/token (https만)
+uv run --extra media pkb media-sync --url http://<서버>:8787/mcp --dry-run
+uv run --extra media pkb media-sync --kinds audio --limit 20
+```
+
+벡터가 없거나 낡은 파일을 `list_media(missing_only=True)`로 받아 `get_media`로 내려받고, 문서 쪽
+(`retrieval` 어댑터, 가능하면 MPS·bf16, 비전이나 오디오 탑만 적재)으로 임베딩해
+`put_media_embeddings`를 부릅니다. 오디오는 macOS `afconvert`로 16 kHz 모노로 풀어 30초 창으로
+자르고, SVG·HEIC는 `sips`로 PNG를 만듭니다. 게이트웨이의 `pkb-…` 도구 이름은 `tools/list`에서
+찾습니다. 다시 실행하면 이미 최신인 파일은 건너뜁니다.
 
 ### 다른 환경에서 원본 파일 받기
 
@@ -311,6 +400,11 @@ list_files(directory="data", offset=0, limit=100)
 get_file(file_path)
 put_attachment(path, data_base64, offset, total_size, sha256="")
 get_attachment(path, offset=0, length=4194304)
+list_media(kinds=None, missing_only=False, limit=200, offset=0)
+get_media(doc_id, offset=0, length=4194304)
+put_media_embeddings(doc_id, kind, sha256, model, segments)
+search_media(query, kinds=None, top_k=12, include_archived=False, doc_ids=None, people=None,
+             date_from=None, date_to=None, path_prefix=None)
 add_document(file_path, tags="")
 convert_and_ingest(input_path, category, output_name="", ingest=True)
 get_document(doc_id, include_content=False, chunk_range="")

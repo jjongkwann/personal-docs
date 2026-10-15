@@ -150,7 +150,10 @@ def test_list_categories_counts_documents_by_category():
     assert store.list_categories(es) == {"meetings": 3, "study": 7}
     call = es.search.call_args.kwargs
     assert call["size"] == 0
-    assert call["query"] == {"bool": {"must_not": {"exists": {"field": "archived_at"}}}}
+    assert call["query"] == {"bool": {"filter": [
+        {"bool": {"must_not": {"terms": {"source_type": ["image", "audio"]}}}},
+        {"bool": {"must_not": {"exists": {"field": "archived_at"}}}},
+    ]}}
 
 
 def test_list_categories_requires_doc_index():

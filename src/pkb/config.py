@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     data_root: str = "data"  # 개인 코퍼스 루트. 볼트 하위 절대경로로 두면 Obsidian과 원본 공유(SSOT)
     # 볼트 밖 첨부(회의 오디오 등) 루트. put_attachment/get_attachment가 이 아래만 다룬다. 비우면 꺼짐
     attachments_root: str = ""
+    # 이미지·오디오 벡터를 만드는 모델 (클라이언트 `pkb media-sync`가 돌린다). 비우면 미디어 색인·검색 꺼짐.
+    # EMBEDDING_MODEL과 벡터 공간이 같은 모델만 받는다 (pkb.media.MEDIA_SPACES)
+    media_embedding_model: str = ""
     graph_db_path: str = "data/.graph/pkb_graph.sqlite"  # 개념 그래프 SQLite 파일
     graph_dedup_threshold: float = 0.88  # 임베딩 유사도 기반 개념 병합 임계값
 

@@ -208,8 +208,39 @@ Configuration defines the expected state. Behavior by case:
 | Was configured, now removed | Offers to delete all remaining `obsidian/*` (requires confirmation) |
 | Vault path changed | Ingest the new vault + clean up old documents |
 
+Images and audio are not ingested by `sync`, but an indexed image or recording whose file still
+exists is never treated as missing; one whose file is gone is cleaned up like any other document
+(step 3 covers `ATTACHMENTS_ROOT`). `sync` also refreshes the note context of indexed media
+without re-embedding (see [Image and audio search](mcp.md#image-and-audio-search)).
+
 Unlike `reindex` (full rebuild), `sync` only processes deltas, so it's meant for day-to-day
 maintenance. `doctor` warns about config-index mismatches (e.g. integration turned off but documents remain).
+
+### Image and Audio Vectors (`media-sync`)
+
+The server does not load the media model. On a Mac with enough memory, embed new or changed images
+and recordings and upload the vectors to the server (or through the MCP gateway):
+
+```bash
+uv sync --extra media                                    # torchvision, needed only here
+uv run --extra media pkb media-sync --url https://<gateway>/mcp --dry-run   # list what would be sent
+uv run --extra media pkb media-sync --url https://<gateway>/mcp             # embed and upload
+uv run --extra media pkb media-sync --kinds audio --limit 20                # one kind, first 20 files
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--url` | `http://127.0.0.1:8787/mcp` (`PKB_MCP_URL`) | PKB MCP server or gateway |
+| `--token-file` | `~/.config/mcp-gateway/token` | Bearer token, sent only to `https://` URLs and only if the file exists |
+| `--kinds` | `image,audio` | Which media to process |
+| `--limit` | `0` (all) | Maximum files this run |
+| `--dry-run` | off | Print the files without downloading or embedding |
+| `--device` | `auto` | `mps`, `cuda` or `cpu` |
+
+It prints one line per file and, at the end, model load time, seconds per image and seconds per
+30-second audio segment. Files already indexed with the current hash and model are skipped, so it
+can run repeatedly. Requires macOS `afconvert` for audio and `sips` for SVG/HEIC; the server needs
+`MEDIA_EMBEDDING_MODEL=jinaai/jina-embeddings-v5-omni-small` with the jina text-small settings.
 
 ### Stale Nudge (SessionStart Hook)
 
@@ -366,6 +397,7 @@ Other tuning options in `pkb.config.Settings` (overridable via environment varia
 | `EMBEDDING_QUERY_PROMPT` / `EMBEDDING_DOCUMENT_PROMPT` | (empty) | `prompt_name` used for search queries / indexed text, e.g. `query` / `document` for jina v5 |
 | `EMBEDDING_NORMALIZE` | `false` | Pass `normalize_embeddings=True` to `encode` (`true` for jina v5). Task, document prompt and normalization are part of the embedding fingerprint, so changing them re-embeds on the next sync |
 | `ATTACHMENTS_ROOT` | (empty) | Folder outside the vault for `put_attachment`/`get_attachment` (e.g. meeting audio). Empty disables both tools |
+| `MEDIA_EMBEDDING_MODEL` | (empty) | Model whose image/audio vectors `put_media_embeddings` accepts, e.g. `jinaai/jina-embeddings-v5-omni-small` (requires `EMBEDDING_MODEL=jinaai/jina-embeddings-v5-text-small`, `EMBEDDING_TASK=retrieval`). Empty turns media indexing and `search_media` off |
 
 ## Chunking Strategy
 

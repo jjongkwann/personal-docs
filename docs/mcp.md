@@ -194,6 +194,10 @@ For each client, verify the connection with `claude` → `/mcp`, `codex mcp list
 | `get_file` | Transfers an original `data/` file as an embedded MCP resource containing a base64 blob, with name, MIME type, byte size and SHA-256. Maximum 10 MiB per file |
 | `put_attachment` | Uploads a file outside the vault (`ATTACHMENTS_ROOT`, e.g. meeting audio) in chunks of up to 4 MiB. The file appears only after the last chunk's SHA-256 matches; existing files are never overwritten. Not indexed |
 | `get_attachment` | Downloads a file under `ATTACHMENTS_ROOT` in chunks of up to 4 MiB as JSON text with `data_base64`; the last chunk carries the file's SHA-256 |
+| `search_media` | Finds images and audio by a text description (kNN over media vectors only). Audio comes back per 30-second segment with `start`/`end`; several segments of one file can rank. See [Image and audio search](#image-and-audio-search) |
+| `get_media` | Downloads an image or audio file returned by `list_media`/`search_media` in chunks of up to 4 MiB, same JSON shape as `get_attachment` plus `doc_id`, `kind`, `mime_type` |
+| `list_media` | Lists images and audio under `data/`, the vault and `ATTACHMENTS_ROOT` with size, mtime, SHA-256 and whether current vectors exist. Used by `pkb media-sync` |
+| `put_media_embeddings` | Replaces one file's media chunks with vectors computed by a client. Refuses unless the model, file hash, dimensions and vector space match |
 | `add_document` | Ingests a file under `data/` (md/txt/pdf/docx/pptx/xlsx/html) |
 | `convert_and_ingest` | Converts an external PDF/DOCX/PPTX/XLSX/HTML file to `.md`, saves it under `data/<category>/`, and ingests it. The converted file's frontmatter records provenance (`source`, `converted_from`, `converted_at`); PDFs keep page markers (`## p.N`) |
 | `sync_corpus` | Reconciles the `data/` corpus with ES: upserts, then lists documents no longer in the corpus. Nothing is deleted unless `confirm_prune=True` — with a Syncthing-replicated corpus a freshly written file may not have arrived yet. Syncthing conflict copies (`*.sync-conflict-*`) are never indexed, and any that are still in the index are removed without confirmation |
@@ -248,6 +252,94 @@ same `sha256` reports completion.
 
 Download: call `get_attachment(path, offset, length)` until `eof` is true, decode each
 `data_base64`, and verify the concatenation against the `sha256` in the last response.
+
+### Image and audio search
+
+Images and audio are searched with text, in the same vector space as the documents. The server
+never loads the media model: `pkb media-sync` on another Mac embeds the files with
+`jinaai/jina-embeddings-v5-omni-small` and sends the vectors with `put_media_embeddings`. That
+model's text tower is locked to `jinaai/jina-embeddings-v5-text-small`, so the query vector the
+server computes with text-small finds them (same sentence through both models, Korean and English,
+query and document prompts: cosine ≥ 0.9997, measured 2026-10).
+
+Server settings:
+
+```
+EMBEDDING_MODEL=jinaai/jina-embeddings-v5-text-small   # with the other jina v5 settings, EMBEDDING_TASK=retrieval
+MEDIA_EMBEDDING_MODEL=jinaai/jina-embeddings-v5-omni-small
+```
+
+An empty `MEDIA_EMBEDDING_MODEL` turns media indexing and search off. The server accepts a media
+model only with the text model and adapter it shares a space with (`MEDIA_SPACES` in
+`src/pkb/media.py`). With any other text model (bge-m3, for example) `put_media_embeddings` and
+`search_media` refuse and `list_media` reports `"model": null`.
+
+**Sources.** `data/…` (`DATA_ROOT`), `obsidian/…` (`OBSIDIAN_PATH` minus `DATA_ROOT`) and
+`attachments/…` (`ATTACHMENTS_ROOT`). Images: png, jpg, jpeg, gif, webp, bmp, tif, tiff, heic,
+avif, svg. Audio: m4a, mp3, wav, aiff, aif, flac, ogg, opus, aac. The exclusions are those of
+Markdown ingest: hidden components (including `.uploads`), the reserved folders (`_trash`,
+`_archive`, `_review`, …), Syncthing conflict copies, and symlinks. Markdown ingest never reads
+media files.
+
+**Chunks.** One per image, and one per audio window of at most 30 seconds (the model reads audio
+through a 30-second Whisper window; the client drops near-silent windows). Media chunks live in the
+chunk index next to the text chunks with `source_type` `image` or `audio`, `title` (file name
+without extension), `category` (top folder under its root), `date_modified` (file mtime),
+`media_start`/`media_end` (seconds, audio only), `media_sha256`, `media_model`, `linked_from` (the
+notes that point at the file) and `content`, a short description shown as `context`: the path, plus
+for each linked note its title, `occurred_at` and `people`, and for an image the lines around
+`![[name]]` or `![](path)`. Audio under `ATTACHMENTS_ROOT` is linked by the `attachments` list in
+a note's frontmatter. `occurred_at` and `people` come from the linked notes, so the date and people
+filters work on media too.
+
+**Keeping context current.** `sync_corpus`, `sync_obsidian` and `pkb sync` recompute the note
+context of indexed media and rewrite only what changed, without re-embedding — renaming a meeting
+note or editing its people moves `linked_from` and the filters along.
+
+**Elsewhere.** `search_knowledge` and `related_documents` leave media out unless `source_types`
+names `image` or `audio`. `list_documents` and `list_categories` never list media (use
+`list_media`). Concept-graph extraction skips media chunks.
+
+**Removal.** A media file that still exists is never reported as missing. When it disappears, its
+doc_id joins the usual list: `data/` and `attachments/` in `sync_corpus` (deleted only with
+`confirm_prune=True`), `obsidian/` in `sync_obsidian`, all three in `pkb sync`. If
+`ATTACHMENTS_ROOT` is set but the folder is missing (an unmounted volume), nothing under
+`attachments/` is pruned; if it is unset, every remaining `attachments/` entry is listed.
+
+Responses (JSON text):
+
+```
+list_media   → {"total": N, "model": "<accepted media model>" | null,
+                "media": [{"doc_id", "kind": "image"|"audio", "size_bytes", "modified" (ISO 8601 UTC),
+                           "sha256", "indexed": bool, "model": "<model of stored vectors>" | null}]}
+get_media    → {"doc_id", "kind", "mime_type", "offset", "length", "total_size", "eof",
+                "data_base64", "sha256" (only when eof)}
+put_media_embeddings → {"doc_id", "kind", "segments": N, "sha256", "model", "linked_from": [doc_id]}
+search_media → {"query", "results": [{"doc_id", "kind", "title", "start", "end", "score",
+                                      "context", "linked_from": [doc_id]}]}
+```
+
+`start`/`end` are seconds and `null` for images. `score` is Elasticsearch's cosine score
+`(1 + cos) / 2`. `put_media_embeddings` takes `segments=[{"start", "end", "vector"}]`: one segment
+without `start`/`end` for an image, non-overlapping windows of at most 30 s for audio (at most 1000),
+each vector `EMBEDDING_DIMS` finite numbers (the server rescales it to unit length). `sha256` must
+match the file as it is now.
+
+**Client.** On a Mac with the model (`uv sync --extra media` adds torchvision, which only the client
+needs):
+
+```bash
+uv run --extra media pkb media-sync --url https://<gateway>/mcp      # Bearer token from ~/.config/mcp-gateway/token (https only)
+uv run --extra media pkb media-sync --url http://<server>:8787/mcp --dry-run
+uv run --extra media pkb media-sync --kinds audio --limit 20
+```
+
+It lists files without current vectors (`list_media(missing_only=True)`), downloads each with
+`get_media`, embeds it on the document side (`retrieval` adapter, MPS with bf16 where available,
+loading only the vision or audio tower), and calls `put_media_embeddings`. Audio is decoded with
+macOS `afconvert` to 16 kHz mono and cut into 30-second windows; SVG and HEIC go through `sips`.
+A gateway's `pkb-…` tool names are detected from `tools/list`. Re-running does nothing for files
+that are already current.
 
 ### Receiving original files on another client
 
@@ -321,6 +413,11 @@ list_files(directory="data", offset=0, limit=100)
 get_file(file_path)
 put_attachment(path, data_base64, offset, total_size, sha256="")
 get_attachment(path, offset=0, length=4194304)
+list_media(kinds=None, missing_only=False, limit=200, offset=0)
+get_media(doc_id, offset=0, length=4194304)
+put_media_embeddings(doc_id, kind, sha256, model, segments)
+search_media(query, kinds=None, top_k=12, include_archived=False, doc_ids=None, people=None,
+             date_from=None, date_to=None, path_prefix=None)
 add_document(file_path, tags="")
 convert_and_ingest(input_path, category, output_name="", ingest=True)
 get_document(doc_id, include_content=False, chunk_range="")

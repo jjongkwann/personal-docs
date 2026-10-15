@@ -203,7 +203,37 @@ uv run pkb sync --yes    # 확인 생략
 | 설정했다가 제거함 | 잔존 `obsidian/*` 전체 삭제 제안 (확인 필요) |
 | 볼트 경로 변경 | 새 볼트 인제스트 + 옛 문서 정리 |
 
+이미지·오디오는 `sync`가 인제스트하지 않지만, 파일이 남아 있는 미디어 색인은 "원본에 없는 문서"가
+되지 않고 파일이 사라지면 다른 문서처럼 정리합니다(`ATTACHMENTS_ROOT`는 3단계). `sync`는 색인된
+미디어의 노트 맥락도 다시 임베딩하지 않고 고칩니다 ([이미지·오디오 검색](mcp.md#이미지오디오-검색) 참고).
+
 `reindex`(전체 재구축)와 달리 `sync`는 델타만 처리하므로 일상 유지보수용입니다. `doctor`가 설정-인덱스 불일치(연동 껐는데 문서 잔존)를 경고합니다.
+
+### 이미지·오디오 벡터 (`media-sync`)
+
+서버는 미디어 모델을 올리지 않습니다. 메모리가 넉넉한 Mac에서 새로 생기거나 바뀐 이미지·녹음을
+임베딩해 서버로(또는 MCP 게이트웨이를 거쳐) 올립니다:
+
+```bash
+uv sync --extra media                                    # torchvision, 여기서만 필요
+uv run --extra media pkb media-sync --url https://<게이트웨이>/mcp --dry-run   # 보낼 파일 목록만
+uv run --extra media pkb media-sync --url https://<게이트웨이>/mcp             # 임베딩해 올리기
+uv run --extra media pkb media-sync --kinds audio --limit 20                  # 한 종류, 앞의 20개
+```
+
+| 옵션 | 기본값 | 뜻 |
+|---|---|---|
+| `--url` | `http://127.0.0.1:8787/mcp` (`PKB_MCP_URL`) | PKB MCP 서버나 게이트웨이 |
+| `--token-file` | `~/.config/mcp-gateway/token` | Bearer 토큰. `https://` 주소에만, 파일이 있을 때만 보냄 |
+| `--kinds` | `image,audio` | 처리할 종류 |
+| `--limit` | `0` (전부) | 이번 실행의 최대 파일 수 |
+| `--dry-run` | 꺼짐 | 내려받거나 임베딩하지 않고 목록만 출력 |
+| `--device` | `auto` | `mps`, `cuda`, `cpu` |
+
+파일마다 한 줄을 찍고, 끝에 모델 적재 시간·이미지당 초·30초 오디오 구간당 초를 보여 줍니다. 지금
+해시와 모델로 이미 색인된 파일은 건너뛰므로 여러 번 돌려도 됩니다. 오디오는 macOS `afconvert`,
+SVG·HEIC는 `sips`가 필요하고, 서버는 jina text-small 설정과 함께
+`MEDIA_EMBEDDING_MODEL=jinaai/jina-embeddings-v5-omni-small`이어야 합니다.
 
 ### 스테일 넛지 (SessionStart 훅)
 
@@ -358,6 +388,7 @@ GRAPH_DEDUP_THRESHOLD=0.88
 | `EMBEDDING_QUERY_PROMPT` / `EMBEDDING_DOCUMENT_PROMPT` | (빈 값) | 검색 질의 / 색인 텍스트의 `prompt_name`. jina v5는 `query` / `document` |
 | `EMBEDDING_NORMALIZE` | `false` | `encode`에 `normalize_embeddings=True` (jina v5는 `true`). task·문서 프롬프트·정규화는 임베딩 fingerprint에 들어가 바꾸면 다음 sync에서 재임베딩 |
 | `ATTACHMENTS_ROOT` | (빈 값) | `put_attachment`/`get_attachment`가 쓰는 볼트 밖 폴더 (예: 회의 오디오). 비우면 두 도구가 꺼짐 |
+| `MEDIA_EMBEDDING_MODEL` | (빈 값) | `put_media_embeddings`가 받는 이미지·오디오 벡터의 모델. 예: `jinaai/jina-embeddings-v5-omni-small` (`EMBEDDING_MODEL=jinaai/jina-embeddings-v5-text-small`, `EMBEDDING_TASK=retrieval` 필요). 비우면 미디어 색인과 `search_media`가 꺼짐 |
 
 ## 청킹 전략
 

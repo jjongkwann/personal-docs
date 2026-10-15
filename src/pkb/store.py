@@ -9,6 +9,7 @@ from elasticsearch import Elasticsearch, NotFoundError
 from pkb.config import settings
 from pkb.items import ITEM_MAPPING_PROPERTIES, ITEM_METADATA_FIELDS
 from pkb.legal import LEGAL_MAPPING_PROPERTIES
+from pkb.media import MEDIA_MAPPING_PROPERTIES, exclude_media_filter
 from pkb.search_log import log_change
 
 INDEX_SETTINGS = {
@@ -69,6 +70,8 @@ INDEX_SETTINGS = {
             # 수집 항목 메타데이터 (pkb.items). 기존 색인에는 ensure_item_mapping이 더한다.
             **ITEM_MAPPING_PROPERTIES,
             **LEGAL_MAPPING_PROPERTIES,
+            # 이미지·오디오 청크 (pkb.media). 기존 색인에는 ensure_item_mapping이 더한다.
+            **MEDIA_MAPPING_PROPERTIES,
         }
     },
 }
@@ -151,7 +154,7 @@ def create_index(es: Elasticsearch) -> None:
 
 
 def ensure_item_mapping(es: Elasticsearch) -> None:
-    """기존 청크 색인에 항목 메타데이터 필드를 더한다. 재색인 없이 put_mapping 한 번.
+    """기존 청크 색인에 항목·미디어 메타데이터 필드를 더한다. 재색인 없이 put_mapping 한 번.
 
     매핑이 없으면 동적 매핑이 people·links를 text로 잡아 term 필터가 맞지 않으므로 첫
     인제스트 전에 명시한다. 같은 매핑을 다시 넣는 것은 ES에서 아무 일도 하지 않는다.
@@ -160,7 +163,7 @@ def ensure_item_mapping(es: Elasticsearch) -> None:
     index = settings.es_index
     if index in _item_mapping_checked or not es.indices.exists(index=index):
         return
-    es.indices.put_mapping(index=index, properties=ITEM_MAPPING_PROPERTIES)
+    es.indices.put_mapping(index=index, properties={**ITEM_MAPPING_PROPERTIES, **MEDIA_MAPPING_PROPERTIES})
     _item_mapping_checked.add(index)
 
 
@@ -446,15 +449,14 @@ def backfill_document_index(es: Elasticsearch) -> dict:
 
 
 def list_categories(es: Elasticsearch, include_archived: bool = False) -> dict[str, int]:
-    """카테고리별 문서 수. 문서 색인 집계 한 번이라 문서 수와 무관하게 빠르다."""
+    """카테고리별 문서 수. 문서 색인 집계 한 번이라 문서 수와 무관하게 빠르다. 이미지·오디오는 세지 않는다."""
     index = doc_index_name()
     if not es.indices.exists(index=index):
         raise ValueError("문서 색인이 없습니다. 서버에서 `uv run pkb doc-index`로 채우세요.")
-    query = (
-        {"match_all": {}}
-        if include_archived
-        else {"bool": {"must_not": {"exists": {"field": "archived_at"}}}}
-    )
+    clauses = list(exclude_media_filter(None))
+    if not include_archived:
+        clauses.append({"bool": {"must_not": {"exists": {"field": "archived_at"}}}})
+    query = {"bool": {"filter": clauses}}
     result = es.search(
         index=index,
         query=query,
@@ -617,20 +619,17 @@ def list_documents(
     category: str | None = None,
     include_archived: bool = False,
 ) -> list[dict]:
-    """저장된 고유 문서 목록 반환. 기본적으로 archived 문서는 제외.
+    """저장된 고유 문서 목록 반환. 기본적으로 archived 문서는 제외. 이미지·오디오는 list_media가 다룬다.
 
     문서 색인이 있으면 그 행을 읽는다. 없으면(`pkb doc-index` 전) 청크를 doc_id로 묶어
     세는데, 문서가 많으면 카테고리 없이 부를 때 시간 초과가 난다. 반환 형태는 같다.
     """
-    clauses: list[dict] = []
+    clauses: list[dict] = list(exclude_media_filter(None))
     if category:
         clauses.append({"term": {"category": category}})
     if not include_archived:
         clauses.append({"bool": {"must_not": {"exists": {"field": "archived_at"}}}})
-    if clauses:
-        query: dict = {"bool": {"must": clauses}}
-    else:
-        query = {"match_all": {}}
+    query: dict = {"bool": {"must": clauses}}
 
     if es.indices.exists(index=doc_index_name()):
         return _list_document_rows(es, query)

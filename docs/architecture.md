@@ -31,7 +31,7 @@ The core architecture has four layers:
   ↓
 [Claude Code]
   ↓ MCP (Streamable HTTP, 127.0.0.1:8787)
-[PKB MCP Server]  src/pkb/mcp_server.py  (30 tools)
+[PKB MCP Server]  src/pkb/mcp_server.py  (34 tools)
   ├─ search_knowledge        → ES hybrid search
   ├─ write_file / add_document / convert_and_ingest  → write/ingest into data/
   ├─ list_documents / get_document / reindex_document
@@ -294,12 +294,13 @@ core is what actually makes the CLI↔MCP parity above true. `tests/test_cli_mcp
 the *surface* by introspection — it fails when a newly registered command or tool isn't declared in
 its capability map or an allowlist — but it never compares behavior; the shared core does that.
 
-30 tools provided:
+34 tools provided:
 
 | Category | Tools |
 |------|------|
-| Search | `search_knowledge`, `related_documents` |
+| Search | `search_knowledge`, `related_documents`, `search_media` |
 | File/document | `write_file`, `read_file`, `patch_file`, `list_files`, `get_file`, `put_attachment`, `get_attachment`, `list_documents`, `list_categories`, `add_document`, `convert_and_ingest`, `get_document`, `reindex_document`, `sync_corpus`, `sync_obsidian` |
+| Image/audio | `list_media`, `get_media`, `put_media_embeddings` (vectors come from `pkb media-sync` on another machine) |
 | Lifecycle | `archive_document`, `restore_document` |
 | Status | `doctor` |
 | Graph RAG | `graph_explain`, `graph_path`, `graph_query`, `graph_affected`, `graph_map`, `graph_list_concepts`, `graph_list_chunks`, `graph_store_concepts`, `graph_curate`, `graph_merge` |
@@ -318,9 +319,9 @@ Boundaries the MCP server enforces:
 
 ## 5. Secondary Interface (CLI)
 
-`src/pkb/cli.py` is used for operations and verification. 20 top-level commands: `init`, `reindex`,
+`src/pkb/cli.py` is used for operations and verification. 21 top-level commands: `init`, `reindex`,
 `index-switch`, `doc-index`, `sync`, `convert`, `add`, `write`, `show`, `reindex-doc`, `list`, `query`, `delete`,
-`archive`, `restore`, `doctor`, `eval`, `purge-archived`, `stale`, `watch`. Plus 9 `graph`
+`archive`, `restore`, `doctor`, `eval`, `purge-archived`, `stale`, `watch`, `media-sync`. Plus 9 `graph`
 subcommands: `stats`, `explain`, `path`, `query`, `affected`, `map`, `reset-evidence`,
 `finalize-evidence`, `rebuild-evidence-local`.
 
@@ -328,19 +329,22 @@ Most capabilities exist on both the CLI and MCP sides (`sync` ↔ `sync_corpus`,
 `get_document`, `graph explain` ↔ `graph_explain`, `graph map` ↔ `graph_map`, etc.). CLI-only:
 `init`, `reindex`, `index-switch` (read-alias switch), `doc-index` (document-level index backfill), `delete`, `purge-archived`, `eval`,
 `graph stats`, `graph reset-evidence`, `graph rebuild-evidence-local`,
-`graph finalize-evidence` (heavy evidence migration), `stale`, `watch` (for hooks/daemons).
+`graph finalize-evidence` (heavy evidence migration), `stale`, `watch` (for hooks/daemons),
+`media-sync` (client that embeds images/audio and calls the media tools).
 MCP-only: `graph_list_concepts`,
 `graph_list_chunks`, `graph_store_concepts`, `graph_curate`, `graph_merge` (Claude self-extraction
 loop), `sync_obsidian` (vault-only reconciliation), `list_categories`, `related_documents`,
-`put_attachment`, `get_attachment` (remote clients). This mapping is guarded by
+`put_attachment`, `get_attachment`, `list_media`, `get_media`, `put_media_embeddings`,
+`search_media` (remote clients). This mapping is guarded by
 `tests/test_cli_mcp_parity.py`.
 
 ### Tool profile (`PKB_MCP_PROFILE`)
 
-Set `PKB_MCP_PROFILE=core` on the MCP server process to expose only the 17 tools in
-`CORE_TOOLS` (`mcp_server.py`) instead of all 30 — the ones that actually get called, plus
-`graph_map` so the graph stays viewable without dropping to the CLI, and `list_categories`,
-`related_documents`, `put_attachment`, `get_attachment` for the meeting-notes app. Default is `full`.
+Set `PKB_MCP_PROFILE=core` on the MCP server process to expose only the 21 tools in
+`CORE_TOOLS` (`mcp_server.py`) instead of all 34 — the ones that actually get called, plus
+`graph_map` so the graph stays viewable without dropping to the CLI, `list_categories`,
+`related_documents`, `put_attachment`, `get_attachment`, `search_media`, `get_media` for the
+meeting-notes app, and `list_media`, `put_media_embeddings` for `pkb media-sync`. Default is `full`.
 The server `instructions` adapt to the profile so they never advertise a pruned tool;
 `tests/test_cli_mcp_parity.py` guards that.
 

@@ -32,7 +32,9 @@ def scan_pending_chunks(
     *,
     query: dict | None = None,
 ) -> tuple[list[dict], int]:
-    """ES 청크를 search_after로 전량 순회해 (pending source, 전체 수)를 반환."""
+    """ES 청크를 search_after로 전량 순회해 (pending source, 전체 수)를 반환. 이미지·오디오 청크는 뺀다."""
+    from pkb.media import exclude_media_filter
+
     by_idx, _ = graph_store.extracted_markers(conn)
     input_by_idx = graph_store.extracted_input_markers(conn)
     pending: list[dict] = []
@@ -41,7 +43,7 @@ def scan_pending_chunks(
     while True:
         scan = es.search(
             index=settings.es_index,
-            query=query or {"match_all": {}},
+            query={"bool": {"must": [query or {"match_all": {}}], "filter": exclude_media_filter(None)}},
             size=SCAN_PAGE_SIZE,
             source_includes=["doc_id", "chunk_index", "content_hash", "content", "title", "section_path", "category"],
             sort=[{"doc_id": "asc"}, {"chunk_index": "asc"}],
