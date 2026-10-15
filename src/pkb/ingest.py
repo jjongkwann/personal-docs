@@ -1160,7 +1160,9 @@ def reconcile(
     """root를 ES와 재조정. (stats, stale_doc_ids) 반환.
 
     prune(삭제)/confirm 판단은 호출자 책임 — 여기서는 절대 삭제하지 않는다.
+    이미지·오디오(pkb.media)는 인제스트하지 않지만, 파일이 있으면 stale로 보지 않는다.
     """
+    from pkb.media import media_doc_ids
     from pkb.store import list_doc_ids
 
     # 마커 타임스탬프는 파일 스캔 시작 직전 캡처 — 완료 시점(now)으로 기록하면
@@ -1169,6 +1171,7 @@ def reconcile(
     files = find_ingestable_files(root, exclude=exclude)
     stats = ingest_files(files, base_dir=root, doc_id_prefix=prefix, category_override=category_override)
     expected = {f"{prefix}{_nfc(str(f.relative_to(root)))}" for f in files}
+    expected |= media_doc_ids(root, prefix, exclude)
     stale = sorted(list_doc_ids(es, prefix) - expected)
 
     write_sync_marker(scan_ts)

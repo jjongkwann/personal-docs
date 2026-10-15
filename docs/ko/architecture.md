@@ -30,7 +30,7 @@ PKB는 **두 가지 일**을 합니다.
   ↓
 [Claude Code]
   ↓ MCP (Streamable HTTP, 127.0.0.1:8787)
-[PKB MCP 서버]  src/pkb/mcp_server.py  (도구 30개)
+[PKB MCP 서버]  src/pkb/mcp_server.py  (도구 34개)
   ├─ search_knowledge        → ES 하이브리드 검색
   ├─ write_file / add_document / convert_and_ingest  → data/ 작성·인제스트
   ├─ list_documents / get_document / reindex_document
@@ -280,12 +280,13 @@ uv run pkb <command> ───────────────────�
 *표면*을 가드해 — 새로 등록된 명령·도구가 capability 맵이나 allowlist에 선언되지 않으면 실패 —
 동작 자체를 비교하지는 않습니다. 동작 일치는 공유 코어가 담당합니다.
 
-제공 도구 30개:
+제공 도구 34개:
 
 | 범주 | 도구 |
 |------|------|
-| 검색 | `search_knowledge`, `related_documents` |
+| 검색 | `search_knowledge`, `related_documents`, `search_media` |
 | 파일/문서 | `write_file`, `read_file`, `patch_file`, `list_files`, `get_file`, `put_attachment`, `get_attachment`, `list_documents`, `list_categories`, `add_document`, `convert_and_ingest`, `get_document`, `reindex_document`, `sync_corpus`, `sync_obsidian` |
+| 이미지·오디오 | `list_media`, `get_media`, `put_media_embeddings` (벡터는 다른 Mac의 `pkb media-sync`가 만듦) |
 | 생명주기 | `archive_document`, `restore_document` |
 | 상태 | `doctor` |
 | Graph RAG | `graph_explain`, `graph_path`, `graph_query`, `graph_affected`, `graph_map`, `graph_list_concepts`, `graph_list_chunks`, `graph_store_concepts`, `graph_curate`, `graph_merge` |
@@ -303,9 +304,9 @@ MCP 서버가 지키는 경계:
 
 ## 5. 보조 인터페이스 (CLI)
 
-`src/pkb/cli.py`는 운영과 검증에 사용합니다. 최상위 명령 20개: `init`, `reindex`, `index-switch`,
+`src/pkb/cli.py`는 운영과 검증에 사용합니다. 최상위 명령 21개: `init`, `reindex`, `index-switch`,
 `doc-index`, `sync`, `convert`, `add`, `write`, `show`, `reindex-doc`, `list`, `query`, `delete`, `archive`,
-`restore`, `doctor`, `eval`, `purge-archived`, `stale`, `watch`. 여기에 `graph` 하위 명령 9개:
+`restore`, `doctor`, `eval`, `purge-archived`, `stale`, `watch`, `media-sync`. 여기에 `graph` 하위 명령 9개:
 `stats`, `explain`, `path`, `query`, `affected`, `map`, `reset-evidence`, `finalize-evidence`,
 `rebuild-evidence-local`.
 
@@ -314,17 +315,19 @@ MCP 서버가 지키는 경계:
 `index-switch`(읽기 alias 전환), `doc-index`(문서 단위 색인 백필), `delete`, `purge-archived`, `eval`, `graph stats`,
 `graph reset-evidence`, `graph rebuild-evidence-local`, `graph finalize-evidence`
 (무거운 evidence 마이그레이션), `stale`,
-`watch`(훅·데몬용). MCP 전용: `graph_list_concepts`,
+`watch`(훅·데몬용), `media-sync`(이미지·오디오를 임베딩해 미디어 도구를 부르는 클라이언트). MCP 전용: `graph_list_concepts`,
 `graph_list_chunks`, `graph_store_concepts`, `graph_curate`, `graph_merge`(Claude 셀프추출
 루프), `sync_obsidian`(볼트 전용 재조정), `list_categories`, `related_documents`, `put_attachment`,
-`get_attachment`(원격 클라이언트용). 이 매핑은 `tests/test_cli_mcp_parity.py`가 가드합니다.
+`get_attachment`, `list_media`, `get_media`, `put_media_embeddings`, `search_media`(원격 클라이언트용).
+이 매핑은 `tests/test_cli_mcp_parity.py`가 가드합니다.
 
 ### 도구 프로파일 (`PKB_MCP_PROFILE`)
 
-MCP 서버 프로세스에 `PKB_MCP_PROFILE=core`를 주면 전체 30개 대신 `CORE_TOOLS`
-(`mcp_server.py`)의 17개만 노출합니다 — 실제로 호출되던 것들에 `graph_map`을 더해 그래프를
+MCP 서버 프로세스에 `PKB_MCP_PROFILE=core`를 주면 전체 34개 대신 `CORE_TOOLS`
+(`mcp_server.py`)의 21개만 노출합니다 — 실제로 호출되던 것들에 `graph_map`을 더해 그래프를
 보려고 CLI로 나갈 일을 없앴고, meeting-notes 앱이 쓰는 `list_categories`, `related_documents`,
-`put_attachment`, `get_attachment`를 더했습니다. 기본값은 `full`입니다.
+`put_attachment`, `get_attachment`, `search_media`, `get_media`와 `pkb media-sync`가 쓰는
+`list_media`, `put_media_embeddings`를 더했습니다. 기본값은 `full`입니다.
 서버 `instructions`도 프로파일에 따라 바뀌어 없는 도구를 안내하지 않으며,
 `tests/test_cli_mcp_parity.py`가 이를 가드합니다.
 

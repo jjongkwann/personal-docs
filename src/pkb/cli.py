@@ -138,8 +138,10 @@ def sync(
     """데이터 코퍼스·Obsidian 볼트를 ES와 재조정 (업서트 + 원본에 없는 유령 문서 정리).
 
     설정이 곧 기대 상태: OBSIDIAN_PATH를 제거했다면 잔존 obsidian/* 문서를 정리한다.
+    이미지·오디오 색인은 파일이 사라졌을 때만 정리한다 (첨부 폴더 포함).
     """
     from pkb.ingest import format_delta_stats
+    from pkb.media import refresh_media_links, stale_attachment_media
     from pkb.operations import graph_prune_summary, prune_documents, sync_tree
     from pkb.store import (
         PRUNE_CONFIRM_THRESHOLD,
@@ -193,11 +195,77 @@ def sync(
         typer.echo("2. Obsidian 연동 꺼짐 (OBSIDIAN_PATH 미설정)")
         prune(sorted(list_doc_ids(es, "obsidian/")))
 
+    # 3) 첨부 폴더 — 인제스트하지 않고, 파일이 사라진 이미지·오디오 색인만 정리
+    attachments = Path(settings.attachments_root).expanduser() if settings.attachments_root else None
+    if attachments is not None and not attachments.is_dir():
+        typer.echo(f"3. ATTACHMENTS_ROOT 디렉터리 없음 — 건너뜀 (정리 안 함): {attachments}")
+    else:
+        attachment_stale = stale_attachment_media(es)
+        typer.echo(f"3. 첨부 폴더 미디어: 파일이 사라진 색인 {len(attachment_stale)}개")
+        prune(attachment_stale)
+
     graph_summary = graph_prune_summary(es)
     if graph_summary:
         typer.echo(graph_summary)
+    refreshed = refresh_media_links(es)
+    if refreshed:
+        typer.echo(f"미디어 노트 맥락 갱신: {refreshed}개")
 
     typer.echo("\n완료.")
+
+
+@app.command("media-sync")
+def media_sync(
+    url: str = typer.Option(
+        "http://127.0.0.1:8787/mcp", envvar="PKB_MCP_URL", help="PKB MCP 서버 또는 MCP 게이트웨이 주소"
+    ),
+    token_file: Path = typer.Option(
+        Path("~/.config/mcp-gateway/token"), help="Bearer 토큰 파일. https 주소에만, 파일이 있을 때만 보낸다"
+    ),
+    kinds: str = typer.Option("image,audio", help="쉼표 구분: image, audio"),
+    limit: int = typer.Option(0, min=0, help="이번에 처리할 최대 파일 수 (0=전부)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="색인할 파일 목록만 보여 주고 끝낸다"),
+    device: str = typer.Option("auto", help="auto | mps | cuda | cpu"),
+):
+    """이 Mac에서 이미지·오디오 벡터를 만들어 PKB 서버에 올립니다 (미색인 파일만).
+
+    jina-embeddings-v5-omni-small을 쓰므로 `uv sync --extra media`가 필요하다. 서버에는
+    MEDIA_EMBEDDING_MODEL이 같은 모델로 설정돼 있어야 한다.
+    """
+    from pkb.media_sync import McpClient, OmniEmbedder, ToolError, run
+
+    wanted = [kind.strip() for kind in kinds.split(",") if kind.strip()]
+    if not wanted or any(kind not in {"image", "audio"} for kind in wanted):
+        typer.echo(f"--kinds는 image, audio 중에서 고르세요: {kinds}")
+        raise typer.Exit(2)
+    # 평문 http(LAN의 PKB 서버)로는 게이트웨이 토큰을 흘리지 않는다
+    token_path = token_file.expanduser()
+    token = (
+        token_path.read_text(encoding="utf-8").strip()
+        if url.startswith("https://") and token_path.is_file()
+        else None
+    )
+    client = McpClient(url, token=token)
+    try:
+        stats = run(client, None if dry_run else OmniEmbedder(device), wanted, limit, dry_run, typer.echo)
+    except ToolError as exc:
+        typer.echo(f"중단: {exc}")
+        raise typer.Exit(1) from exc
+    if dry_run:
+        return
+    typer.echo(
+        f"완료: 색인 {stats['indexed']}개, 건너뜀 {stats['skipped']}개, 실패 {stats['failed']}개 "
+        f"({stats['wall_seconds']:.1f}s, 그중 모델 적재 {stats['load_seconds']:.1f}s)"
+    )
+    if stats["images"]:
+        typer.echo(f"   이미지 {stats['images']}개, 장당 {stats['image_seconds'] / stats['images']:.2f}s (임베딩)")
+    if stats["segments"]:
+        typer.echo(
+            f"   오디오 {stats['audio_duration']:.0f}초 → 30초 구간 {stats['segments']}개, "
+            f"구간당 {stats['audio_seconds'] / stats['segments']:.2f}s (임베딩)"
+        )
+    if stats["failed"]:
+        raise typer.Exit(1)
 
 
 @app.command()

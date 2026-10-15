@@ -59,6 +59,7 @@ mcp = MCPServer(
 원본 첨부파일은 list_files로 data/ 경로를 찾고 get_file로 받으세요. get_file은 파일명·MIME·
 SHA-256과 원본 바이트를 MCP blob으로 반환하므로 클라이언트에서 디코딩해 저장할 수 있습니다.
 볼트 밖 첨부(회의 오디오 등)는 put_attachment/get_attachment로 4 MiB 조각씩 주고받습니다.
+이미지·오디오를 내용으로 찾으려면 search_media를 쓰고, 찾은 파일은 get_media로 받습니다.
 카테고리 목록은 list_categories, 내용이 비슷한 문서는 related_documents로 찾으세요.
 {_GRAPH_HINT}
 개념 지도를 사람이 볼 형태로 원하면 graph_map이 오프라인 HTML을 만들고 경로를 돌려줍니다.
@@ -83,6 +84,17 @@ def _tool_guard(func):
             return f"오류: {type(exc).__name__}: {exc}"
 
     return guarded
+
+
+def _sync_summaries(es) -> str:
+    """동기화 뒤 그래프 정리와 미디어 노트 맥락 갱신(벡터는 그대로)을 반영하고 요약한다."""
+    from pkb.media import refresh_media_links
+
+    lines = [_graph_prune_summary(es)]
+    refreshed = refresh_media_links(es)
+    if refreshed:
+        lines.append(f"미디어 노트 맥락 갱신: {refreshed}개")
+    return "\n".join(line for line in lines if line)
 
 
 def _frontmatter_warnings(content: str) -> list[str]:
@@ -432,6 +444,121 @@ def get_attachment(path: str, offset: int = 0, length: int = 4 * 1024 * 1024) ->
 
 @mcp.tool()
 @_tool_guard
+def list_media(kinds: list[str] | None = None, missing_only: bool = False, limit: int = 200, offset: int = 0) -> str:
+    """색인 대상 이미지·오디오 파일과 색인 상태를 JSON으로 반환합니다 (data/, obsidian/, attachments/).
+
+    숨김 경로·예약 폴더(_trash 등)·Syncthing 충돌 사본·심볼릭 링크는 뺍니다. indexed는 지금 파일의
+    sha256과 서버 MEDIA_EMBEDDING_MODEL로 만든 벡터가 색인에 있는지입니다. 최상위 model은 서버가
+    받는 미디어 모델이며, 미디어 색인이 꺼져 있거나 EMBEDDING_MODEL과 공간이 다르면 null입니다.
+
+    Args:
+        kinds: ["image"], ["audio"] 또는 둘 다. 비우면 둘 다.
+        missing_only: True면 indexed=false인 파일만.
+        limit: 페이지 크기 (1~1000).
+        offset: 시작 위치.
+
+    Returns: JSON {total, model, media:[{doc_id, kind, size_bytes, modified, sha256, indexed, model}]}
+    """
+    from pkb.media import list_media as _list_media
+    from pkb.store import get_client
+
+    return json.dumps(_list_media(get_client(), kinds, missing_only, limit, offset), ensure_ascii=False)
+
+
+@mcp.tool()
+def get_media(doc_id: str, offset: int = 0, length: int = 4 * 1024 * 1024) -> CallToolResult:
+    """list_media의 이미지·오디오 파일을 조각으로 내려받습니다 (get_attachment와 같은 방식).
+
+    응답 text는 JSON {doc_id, kind, mime_type, offset, length, total_size, eof, data_base64,
+    sha256(eof일 때)}입니다. eof가 false면 offset+length부터 다시 부르고, 이어 붙인 바이트를
+    마지막 응답의 sha256으로 검증하세요.
+
+    Args:
+        doc_id: list_media·search_media가 돌려준 doc_id (예: attachments/meetings/2026/x/me.m4a)
+        offset: 시작 바이트
+        length: 최대 바이트 수 (1~4 MiB)
+    """
+    from pkb.media import get_media as _get_media
+
+    try:
+        payload = _get_media(doc_id, offset, length)
+    except (OSError, ValueError) as exc:
+        return CallToolResult(is_error=True, content=[TextContent(type="text", text=f"오류: {exc}")])
+    return CallToolResult(content=[TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))])
+
+
+@mcp.tool()
+@_tool_guard
+def put_media_embeddings(doc_id: str, kind: str, sha256: str, model: str, segments: list[dict]) -> str:
+    """클라이언트가 만든 이미지·오디오 벡터로 그 파일의 미디어 청크를 통째로 바꿉니다.
+
+    model은 서버의 MEDIA_EMBEDDING_MODEL과 같아야 하고, 그 모델은 EMBEDDING_MODEL(질의 벡터)과
+    같은 공간이어야 합니다. sha256은 지금 파일과 같아야 합니다(list_media 값). 벡터는 EMBEDDING_DIMS
+    차원의 유한한 수이며 서버가 단위 길이로 맞춥니다. 검색 맥락(content)은 서버가 그 파일을 넣은
+    노트(![[이름]]·![](경로))나 frontmatter attachments로 단 노트에서 만듭니다.
+
+    Args:
+        doc_id: list_media의 doc_id
+        kind: image 또는 audio (파일 종류와 같아야 함)
+        sha256: 벡터를 만든 파일의 SHA-256
+        model: 벡터를 만든 모델 id (예: jinaai/jina-embeddings-v5-omni-small)
+        segments: [{start, end, vector}]. 이미지는 하나(start·end 생략), 오디오는 겹치지 않는
+            30초 이하 창마다 하나(초 단위). 최대 1000개.
+
+    Returns: JSON {doc_id, kind, segments, sha256, model, linked_from}
+    """
+    from pkb.media import put_media_embeddings as _put
+    from pkb.store import get_client
+
+    return json.dumps(_put(get_client(), doc_id, kind, sha256, model, segments), ensure_ascii=False)
+
+
+@mcp.tool()
+@_tool_guard
+def search_media(
+    query: str,
+    kinds: list[str] | None = None,
+    top_k: int = 12,
+    include_archived: bool = False,
+    doc_ids: list[str] | None = None,
+    people: list[str] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    path_prefix: str | None = None,
+) -> str:
+    """텍스트로 이미지·오디오를 찾습니다 (미디어 벡터 kNN). 오디오는 30초 구간 단위로 반환합니다.
+
+    한 오디오 파일의 여러 구간이 순위대로 함께 나올 수 있습니다. score는 ES 코사인 점수
+    (1+cos)/2로 클수록 가깝습니다. 받은 파일은 get_media로 내려받습니다.
+
+    Args:
+        query: 찾을 장면·내용 설명 (예: "화이트보드에 그린 아키텍처", "예산 삭감 논의")
+        kinds: ["image"], ["audio"] 또는 둘 다. 비우면 둘 다.
+        top_k: 반환 수 (1~100)
+        include_archived: True면 아카이브/만료 문서도 포함.
+        doc_ids: 이 미디어 doc_id들 안에서만.
+        people: 연결된 노트의 people 필터.
+        date_from: occurred_at 시작 (ISO 8601, 포함). 미디어는 연결된 노트의 occurred_at을 씁니다.
+        date_to: occurred_at 끝 (ISO 8601, 포함).
+        path_prefix: doc_id 접두사 (예: attachments/meetings/2026/).
+
+    Returns: JSON {query, results:[{doc_id, kind, title, start, end, score, context, linked_from}]}
+        이미지의 start·end는 null.
+    """
+    from pkb.media import search_media as _search_media
+    from pkb.store import get_client
+
+    return json.dumps(
+        _search_media(
+            get_client(), query, kinds=kinds, top_k=top_k, include_archived=include_archived,
+            doc_ids=doc_ids, people=people, date_from=date_from, date_to=date_to, path_prefix=path_prefix,
+        ),
+        ensure_ascii=False,
+    )
+
+
+@mcp.tool()
+@_tool_guard
 def patch_file(
     file_path: str,
     old: str,
@@ -763,7 +890,7 @@ def sync_obsidian(path: str = "", confirm_prune: bool = False) -> str:
 
     def _finish(msg: str) -> str:
         # sync 완료(ES 상태 변경)마다 그래프-코퍼스 재조정도 함께 반영.
-        summary = _graph_prune_summary(es)
+        summary = _sync_summaries(es)
         return f"{msg}\n{summary}" if summary else msg
 
     # 연동 꺼짐 (켰다가 끔 케이스): 기대 상태 = 빈 집합
@@ -809,6 +936,9 @@ def sync_obsidian(path: str = "", confirm_prune: bool = False) -> str:
 def sync_corpus(confirm_prune: bool = False) -> str:
     """data/ 코퍼스 재조정+유령정리: 업서트 + 코퍼스에 없는 문서 정리.
 
+    이미지·오디오는 인제스트하지 않지만 파일이 있으면 정리 대상이 아니고, 파일이 사라진 미디어
+    색인(data/와 첨부 폴더 attachments/)은 다른 문서처럼 정리 대상으로 보고합니다.
+
     삭제는 confirm_prune=True일 때만 한다. 코퍼스가 여러 기기에 복제돼 있으면(Syncthing)
     한쪽에서 막 쓴 파일이 다른 쪽에는 아직 없어 "원본에 없는 문서"로 보이므로, 소량이라도
     자동 삭제하지 않는다 — 먼저 목록을 보고 판단한다. 예외로 Syncthing 충돌 사본
@@ -819,6 +949,7 @@ def sync_corpus(confirm_prune: bool = False) -> str:
     """
     from pkb.config import data_dir
     from pkb.ingest import format_delta_stats, is_sync_conflict
+    from pkb.media import stale_attachment_media
     from pkb.operations import OperationError, prune_documents, sync_tree
     from pkb.store import get_client
 
@@ -830,6 +961,7 @@ def sync_corpus(confirm_prune: bool = False) -> str:
         return f"data 코퍼스 루트 없음 (정리하지 않음): {root}"
     conflicts = [doc_id for doc_id in outcome.stale if is_sync_conflict(doc_id)]
     stale = [doc_id for doc_id in outcome.stale if not is_sync_conflict(doc_id)]
+    stale += stale_attachment_media(es)
     result = f"data 코퍼스 동기화: {format_delta_stats(outcome.stats)}\n경로: {outcome.root}"
     if conflicts:
         prune_documents(es, conflicts)
@@ -837,7 +969,7 @@ def sync_corpus(confirm_prune: bool = False) -> str:
 
     def _finish(msg: str) -> str:
         # sync 완료(ES 상태 변경)마다 그래프-코퍼스 재조정도 함께 반영.
-        summary = _graph_prune_summary(es)
+        summary = _sync_summaries(es)
         return f"{msg}\n{summary}" if summary else msg
 
     if not stale:
@@ -1237,6 +1369,7 @@ def graph_list_chunks(
 
     from pkb.config import settings as _settings
     from pkb.graph.services import graph_input_hash
+    from pkb.media import exclude_media_filter
     from pkb.store import get_client
 
     if not category and not doc_id:
@@ -1249,8 +1382,9 @@ def graph_list_chunks(
         filters.append({"term": {"category": category}})
     if doc_id:
         filters.append({"term": {"doc_id": doc_id}})
+    filters.extend(exclude_media_filter(None))  # 이미지·오디오 청크에서는 개념을 뽑지 않는다
 
-    query = {"bool": {"filter": filters}} if filters else {"match_all": {}}
+    query = {"bool": {"filter": filters}}
     count_resp = es.count(index=_settings.es_index, query=query)
     total = count_resp["count"]
 
@@ -1489,6 +1623,10 @@ CORE_TOOLS = frozenset(
         "related_documents",  # 문서 벡터 기준 관련 문서
         "put_attachment",  # 볼트 밖 첨부 업로드 (회의 오디오 등)
         "get_attachment",
+        "search_media",  # 이미지·오디오 검색 — 회의 앱이 녹음 구간을 찾는다
+        "get_media",
+        "list_media",  # pkb media-sync가 게이트웨이로 부른다
+        "put_media_embeddings",
     }
 )
 

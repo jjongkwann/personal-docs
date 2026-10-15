@@ -69,6 +69,7 @@ ALLOWLIST_CLI_ONLY = {
     "stale",
     "watch",
     "doc-index",  # 문서 색인 전량 백필 — 배포 때 한 번 돌리는 운영 명령
+    "media-sync",  # 서버의 list_media·put_media_embeddings를 부르는 클라이언트 (이미지·오디오 임베딩)
 }
 
 # Claude 루프 셀프추출·큐레이션·병합(graph_*) + obsidian 전용 재조정.
@@ -90,6 +91,10 @@ ALLOWLIST_MCP_ONLY = {
     "related_documents",  # 원격 앱·에이전트의 관련 문서 조회
     "put_attachment",  # 볼트 밖 첨부 원격 업로드 — 로컬에선 파일을 직접 복사
     "get_attachment",
+    "list_media",  # media-sync 클라이언트 전용 — 로컬 CLI는 서버 도구를 거친다
+    "get_media",
+    "put_media_embeddings",
+    "search_media",  # 원격 앱의 이미지·오디오 검색
 }
 
 

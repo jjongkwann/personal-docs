@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 from pkb import store
 from pkb.ingest import _diff_metadata, process_file
 from pkb.items import ITEM_METADATA_FIELDS, normalize_item_metadata, normalize_person
+from pkb.media import MEDIA_MAPPING_PROPERTIES
 from pkb.operations import frontmatter_warnings
 from pkb.store import DOC_INDEX_SETTINGS, INDEX_SETTINGS, ensure_item_mapping
 
@@ -98,7 +99,7 @@ def test_existing_index_gets_item_fields_once_per_process(monkeypatch):
 
     es.indices.put_mapping.assert_called_once()
     properties = es.indices.put_mapping.call_args.kwargs["properties"]
-    assert set(properties) == set(ITEM_METADATA_FIELDS)
+    assert set(properties) == set(ITEM_METADATA_FIELDS) | set(MEDIA_MAPPING_PROPERTIES)
 
 
 def test_missing_index_is_left_for_create_index(monkeypatch):

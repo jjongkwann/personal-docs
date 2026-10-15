@@ -90,6 +90,8 @@ def fake_sync(monkeypatch, tmp_path):
     pruned: list = []
     monkeypatch.setattr("pkb.operations.prune_documents", lambda es, ids: pruned.extend(ids))
     monkeypatch.setattr("pkb.mcp_server._graph_prune_summary", lambda es: "")
+    monkeypatch.setattr("pkb.media.stale_attachment_media", lambda es: [])
+    monkeypatch.setattr("pkb.media.refresh_media_links", lambda es: 0)
     return pruned
 
 
@@ -117,6 +119,8 @@ def test_sync_corpus_drops_indexed_sync_conflict_copies_without_confirm(monkeypa
     pruned: list = []
     monkeypatch.setattr("pkb.operations.prune_documents", lambda es, ids: pruned.extend(ids))
     monkeypatch.setattr("pkb.mcp_server._graph_prune_summary", lambda es: "")
+    monkeypatch.setattr("pkb.media.stale_attachment_media", lambda es: [])
+    monkeypatch.setattr("pkb.media.refresh_media_links", lambda es: 0)
 
     out = sync_corpus()
 
