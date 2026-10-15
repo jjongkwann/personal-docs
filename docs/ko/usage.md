@@ -167,6 +167,21 @@ uv run pkb index-switch pkb_documents_v2
 (`store.switch_read_alias`). 이전 물리 인덱스는 절대 자동 삭제하지 않으므로, 새 인덱스를 검증한
 뒤 직접 지우면 됩니다.
 
+문서 단위 색인은 청크 색인을 따라갑니다. 새 청크 색인을 만들 때 `<ES_INDEX>_docs`도 함께
+생기고(위 1단계가 `pkb_documents_v2_docs`도 채움), `index-switch`가 `<alias>_docs` alias를 같은
+요청에서 옮깁니다. 대상의 문서 색인이 없으면 실패합니다.
+
+### 문서 단위 색인 (`doc-index`)
+
+```bash
+uv run pkb doc-index
+```
+
+`<ES_INDEX>_docs`가 없으면 만들고, 청크 색인에서 문서마다 한 행(메타데이터, 청크 수,
+`doc_vector` = 저장된 청크 임베딩 평균의 L2 정규화 — 재임베딩 없음)을 다시 씁니다. 청크 색인에
+없는 문서의 행은 지웁니다. 처음 한 번 실행한 뒤에는 인제스트·삭제·아카이브·복구·purge가 행을
+함께 고칩니다. `list_categories`와 `related_documents`에 필요하고, `list_documents`는 있으면 씁니다.
+
 ---
 
 ## 동기화 (재조정)
@@ -338,6 +353,11 @@ GRAPH_DEDUP_THRESHOLD=0.88
 | `MCP_HOST` | `127.0.0.1` | 바인딩 주소. 서버를 다른 머신에 두고 신뢰하는 LAN/VPN에서 붙을 때만 `0.0.0.0`으로. 인증이 없고 `write_file`이 볼트 어디든 쓸 수 있음. |
 | `WARMUP_ON_START` | `false` | MCP 서버 기동 시 모델 예열. 끄면 첫 검색까지 서버가 ~50MB로 유휴 |
 | `MODEL_IDLE_SECONDS` | `300` | 마지막 사용 뒤 이 시간(초)이 지나면 임베딩·리랭커 모델을 내려 메모리를 돌려줍니다. 다음 호출 때 다시 올립니다. `0`이면 계속 유지 |
+| `EMBEDDING_TRUST_REMOTE_CODE` | `false` | 모델 저장소의 코드를 실행 (`jinaai/jina-embeddings-v5-text-small`에 필요). 믿는 모델에만 |
+| `EMBEDDING_TASK` | (빈 값) | `encode(task=...)` 어댑터 이름. jina v5는 `retrieval` |
+| `EMBEDDING_QUERY_PROMPT` / `EMBEDDING_DOCUMENT_PROMPT` | (빈 값) | 검색 질의 / 색인 텍스트의 `prompt_name`. jina v5는 `query` / `document` |
+| `EMBEDDING_NORMALIZE` | `false` | `encode`에 `normalize_embeddings=True` (jina v5는 `true`). task·문서 프롬프트·정규화는 임베딩 fingerprint에 들어가 바꾸면 다음 sync에서 재임베딩 |
+| `ATTACHMENTS_ROOT` | (빈 값) | `put_attachment`/`get_attachment`가 쓰는 볼트 밖 폴더 (예: 회의 오디오). 비우면 두 도구가 꺼짐 |
 
 ## 청킹 전략
 

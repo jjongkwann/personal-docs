@@ -187,12 +187,16 @@ For each client, verify the connection with `claude` → `/mcp`, `codex mcp list
 | `write_file` | Writes `.md` files under `data/`. MCP default is `ingest=False`; a batch is indexed once with `sync_corpus`. Documents still under review carry `status: draft` (excluded from `curated`/`evidence` search) |
 | `read_file` | Returns the on-disk source of a `data/**.md` file plus its `content_hash` (`get_document` serves ES chunks, which cannot be reassembled into the original) |
 | `patch_file` | Replaces one exact occurrence of `old` with `new` in an existing document — partial edits without resending the whole file. Same policy check and optimistic lock (`expected_hash`) as `write_file` |
-| `list_documents` | Lists documents stored in ES. Shows the top `limit` (default 50) sorted by `date_modified` descending. Set `limit<=0` to list everything |
+| `list_documents` | Lists documents stored in ES. Shows the top `limit` (default 50) sorted by `date_modified` descending. Set `limit<=0` to list everything. Reads the document-level index when it exists, so it no longer times out without a `category` |
+| `list_categories` | Returns `{"documents": N, "categories": {name: count}}` from one aggregation on the document-level index. Use it instead of `list_documents`/`doctor` when only the category list is needed |
+| `related_documents` | Returns documents whose whole-document vector (mean of chunk embeddings) is closest to a given `doc_id`, excluding the document itself. Accepts the same scope filters as `search_knowledge` |
 | `list_files` | Lists immediate files and folders under `data/`, including unindexed `_origin` attachments. Continue with `next_offset` |
 | `get_file` | Transfers an original `data/` file as an embedded MCP resource containing a base64 blob, with name, MIME type, byte size and SHA-256. Maximum 10 MiB per file |
+| `put_attachment` | Uploads a file outside the vault (`ATTACHMENTS_ROOT`, e.g. meeting audio) in chunks of up to 4 MiB. The file appears only after the last chunk's SHA-256 matches; existing files are never overwritten. Not indexed |
+| `get_attachment` | Downloads a file under `ATTACHMENTS_ROOT` in chunks of up to 4 MiB as JSON text with `data_base64`; the last chunk carries the file's SHA-256 |
 | `add_document` | Ingests a file under `data/` (md/txt/pdf/docx/pptx/xlsx/html) |
 | `convert_and_ingest` | Converts an external PDF/DOCX/PPTX/XLSX/HTML file to `.md`, saves it under `data/<category>/`, and ingests it. The converted file's frontmatter records provenance (`source`, `converted_from`, `converted_at`); PDFs keep page markers (`## p.N`) |
-| `sync_corpus` | Reconciles the `data/` corpus with ES: upserts, then lists documents no longer in the corpus. Nothing is deleted unless `confirm_prune=True` — with a Syncthing-replicated corpus a freshly written file may not have arrived yet |
+| `sync_corpus` | Reconciles the `data/` corpus with ES: upserts, then lists documents no longer in the corpus. Nothing is deleted unless `confirm_prune=True` — with a Syncthing-replicated corpus a freshly written file may not have arrived yet. Syncthing conflict copies (`*.sync-conflict-*`) are never indexed, and any that are still in the index are removed without confirmation |
 | `sync_obsidian` | Reconciles the Obsidian vault with ES: upserts plus pruning of documents no longer in the vault. Categories are derived dynamically from the vault's top-level folder name (same rule as `data/`). If `OBSIDIAN_PATH` isn't set, it proposes pruning all remaining `obsidian/*` documents (`confirm_prune=True` required) |
 | `get_document` | Fetches a document. By default (`include_content=False`), returns only metadata (title, category, modified date) plus a chunk table of contents. Use `chunk_range` (e.g. `"3-7"`) to get the full text of that range, or `include_content=True` for the full text |
 | `reindex_document` | Re-reads a specific source document and re-ingests it into ES |
@@ -204,6 +208,46 @@ For each client, verify the connection with `claude` → `/mcp`, `codex mcp list
 `EXPAND_CONTEXT`). `max_context_tokens` (256–32000, default 4000) caps the rendered result,
 including source labels, concept vocabulary, hit bodies, and neighboring context. A larger
 `top_k` or expansion window does not bypass that output budget.
+
+### Item metadata, scope filters and the document-level index
+
+Ingest indexes these optional frontmatter keys on every chunk. Notes without them are unaffected.
+
+| Key | Meaning |
+|---|---|
+| `source_type` | `meeting`, `event`, `email`, `drive`, `note` (stored lowercase) |
+| `occurred_at` | ISO 8601 date or time the item happened. Unparseable values are dropped with a write warning |
+| `people` | Attendees, senders, owners. Email addresses are lowercased; names are kept |
+| `source_id`, `source_link` | ID and URL in the original service. `source_link` is stored but not searchable |
+| `links` | doc_ids of related items |
+| `attachments` | Paths relative to `ATTACHMENTS_ROOT` |
+
+`search_knowledge` and `related_documents` accept the same scope filters, applied to both the
+BM25 and kNN legs: `doc_ids` (search only inside these documents, e.g. the items linked to a
+meeting), `source_types`, `people`, `date_from`/`date_to` (inclusive range on `occurred_at`; a
+date without a time covers the whole UTC day, and documents without `occurred_at` drop out) and
+`path_prefix` (doc_id prefix). Empty lists mean no restriction.
+
+The document-level index (`<ES_INDEX>_docs`) holds one row per document with its metadata, chunk
+count and `doc_vector`, the L2-normalized mean of the chunk embeddings. Ingest, delete, archive,
+restore and purge keep it in sync once it exists. Create and fill it from the stored chunk vectors
+(no re-embedding) with `uv run pkb doc-index`. Until then `list_documents` falls back to
+aggregating chunks, and `list_categories`/`related_documents` return an error asking for it.
+
+### Attachments outside the vault
+
+Set `ATTACHMENTS_ROOT` (for example `/Volumes/PKBData/attachments`) to enable `put_attachment` and
+`get_attachment`. Paths are relative to that folder; absolute paths, `..`, hidden components and
+anything resolving outside it are rejected.
+
+Upload: send chunks in order with `offset` equal to the bytes the server has received (the
+`received` field of the previous response). `offset=0` restarts. The last chunk must carry the
+whole file's `sha256`; on a match the file is moved into place atomically, otherwise the partial
+upload is discarded. A path that already holds a file is never overwritten — retrying with the
+same `sha256` reports completion.
+
+Download: call `get_attachment(path, offset, length)` until `eof` is true, decode each
+`data_base64`, and verify the concatenation against the `sha256` in the last response.
 
 ### Receiving original files on another client
 
@@ -262,14 +306,21 @@ Exact signatures as registered in `src/pkb/mcp_server.py`:
 search_knowledge(query, category="", top_k=5, include_archived=False,
                  include_obsidian=True, query_variants=[], profile="all",
                  canonical_group=True, canonical_boost=0.15,
-                 expand_context=None, max_context_tokens=4000)
+                 expand_context=None, max_context_tokens=4000,
+                 doc_ids=None, source_types=None, people=None,
+                 date_from=None, date_to=None, path_prefix=None)
 read_file(file_path)
 patch_file(file_path, old, new, expected_hash="", ingest=False, dry_run=False, strict_policy=True)
 write_file(file_path, content, ingest=False, dry_run=False,
            expected_hash="", strict_policy=True)
 list_documents(category="", include_archived=False, limit=50)
+list_categories(include_archived=False)
+related_documents(doc_id, top_k=5, include_archived=False, doc_ids=None, source_types=None,
+                  people=None, date_from=None, date_to=None, path_prefix=None)
 list_files(directory="data", offset=0, limit=100)
 get_file(file_path)
+put_attachment(path, data_base64, offset, total_size, sha256="")
+get_attachment(path, offset=0, length=4194304)
 add_document(file_path, tags="")
 convert_and_ingest(input_path, category, output_name="", ingest=True)
 get_document(doc_id, include_content=False, chunk_range="")

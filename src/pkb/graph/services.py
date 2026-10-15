@@ -157,7 +157,7 @@ def _chunk_versions(keys: list[tuple[str, int]]) -> dict[tuple[str, int], tuple[
 
 def store_concepts(items_json: str) -> str:
     """추출된 개념/관계 JSON을 증분·evidence 규칙에 맞춰 그래프에 저장."""
-    from pkb.embeddings import embed
+    from pkb.embeddings import embed_documents
     from pkb.graph.schema import graph_connection
 
     try:
@@ -239,7 +239,7 @@ def store_concepts(items_json: str) -> str:
                     f"{concept.get('name', '')}: {concept.get('description', '')}".strip(": ")
                     for concept in valid_concepts
                 ]
-                vectors = embed(names_and_descriptions) if names_and_descriptions else []
+                vectors = embed_documents(names_and_descriptions) if names_and_descriptions else []
 
                 for concept, vector in zip(valid_concepts, vectors, strict=False):
                     name = concept.get("name", "").strip()

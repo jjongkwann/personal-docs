@@ -110,7 +110,7 @@ def _stub_search(monkeypatch) -> list[list[str]]:
     monkeypatch.setattr("pkb.store.get_client", lambda: object())
     monkeypatch.setattr("pkb.config.settings.rerank_enabled", False)
     monkeypatch.setattr(
-        "pkb.retrieve.embed",
+        "pkb.retrieve.embed_queries",
         lambda texts: embed_calls.append(list(texts)) or [[1.0, 0.0] for _ in texts],
     )
     return embed_calls

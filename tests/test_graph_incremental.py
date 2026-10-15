@@ -79,7 +79,7 @@ def fake_es(monkeypatch):
         ]
     )
     monkeypatch.setattr("pkb.store.get_client", lambda: es)
-    monkeypatch.setattr("pkb.embeddings.embed", lambda texts: [[0.0, 0.0, 0.0] for _ in texts])
+    monkeypatch.setattr("pkb.embeddings.embed_documents", lambda texts: [[0.0, 0.0, 0.0] for _ in texts])
     return es
 
 
@@ -348,7 +348,7 @@ def test_pending_only_loop_with_marking_returns_each_chunk_exactly_once(graph_db
         ]
     )
     monkeypatch.setattr("pkb.store.get_client", lambda: es)
-    monkeypatch.setattr("pkb.embeddings.embed", lambda texts: [[0.0, 0.0, 0.0] for _ in texts])
+    monkeypatch.setattr("pkb.embeddings.embed_documents", lambda texts: [[0.0, 0.0, 0.0] for _ in texts])
 
     seen: list[int] = []
     for _ in range(10):  # 무한루프 방어

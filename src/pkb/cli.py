@@ -114,6 +114,23 @@ def index_switch(
     typer.echo(f"alias 전환 완료: {settings.es_index} → {new_index}{prev}")
 
 
+@app.command("doc-index")
+def doc_index():
+    """문서 단위 색인을 청크 색인에서 만들고 다시 채웁니다 (청크에 저장된 벡터 평균, 재임베딩 없음).
+
+    문서 색인이 생긴 뒤에는 인제스트·삭제·아카이브가 행을 함께 고친다. 처음 한 번, 또는
+    청크 색인을 다른 경로로 바꾼 뒤에 실행한다.
+    """
+    from pkb.store import backfill_document_index, doc_index_name, get_client
+
+    result = backfill_document_index(get_client())
+    created = " (새로 만듦)" if result["created"] else ""
+    typer.echo(
+        f"문서 색인 '{doc_index_name()}'{created}: 문서 {result['documents']}개, "
+        f"청크 없는 행 {result['removed']}개 삭제"
+    )
+
+
 @app.command()
 def sync(
     yes: bool = typer.Option(False, "--yes", "-y", help="대량 삭제 확인 생략"),
@@ -398,6 +415,12 @@ def query(
     case_id: str = typer.Option(None, help="판결 식별자"),
     legal_version: str = typer.Option(None, help="법률 자료 버전"),
     legal_kind: str = typer.Option(None, help="statute|judgment"),
+    doc_id: builtins.list[str] = typer.Option(None, help="이 doc_id 안에서만 검색 (반복 가능)"),
+    source_type: builtins.list[str] = typer.Option(None, help="source_type 필터 (반복 가능)"),
+    person: builtins.list[str] = typer.Option(None, help="people 필터 (반복 가능)"),
+    date_from: str = typer.Option(None, help="occurred_at 시작 (ISO 8601, 포함)"),
+    date_to: str = typer.Option(None, help="occurred_at 끝 (ISO 8601, 포함)"),
+    path_prefix: str = typer.Option(None, help="doc_id 접두사"),
 ):
     """하이브리드 검색 (BM25 + kNN + RRF + 옵션 리랭커)."""
     from pkb.context import render_query_plan, render_search_results
@@ -420,6 +443,8 @@ def query(
         analyze=analyze, issues=issue, needed_sources=needed_source, variants=query_variant,
         as_of=as_of, law_id=law_id, article_id=article_id, case_id=case_id,
         legal_version=legal_version, legal_kind=legal_kind, query_plan_out=plan,
+        doc_ids=doc_id, source_types=source_type, people=person,
+        date_from=date_from, date_to=date_to, path_prefix=path_prefix,
     )
 
     typer.echo(render_search_results(results, max_tokens=context_tokens,
@@ -819,13 +844,13 @@ def graph_query(
     evidence_limit: int = typer.Option(3, min=0, max=20, help="관계별 근거 수 상한"),
 ):
     """자연어 질문으로 개념 시드를 찾고 주변 관계 하위 그래프를 조회."""
-    from pkb.embeddings import embed
+    from pkb.embeddings import embed_queries
     from pkb.graph import query as graph_queries
     from pkb.graph.schema import graph_connection
 
     if not query.strip():
         raise typer.BadParameter("query는 비어 있을 수 없습니다.")
-    query_embedding = embed([query])[0]
+    query_embedding = embed_queries([query])[0]
     with graph_connection(settings.graph_db_path) as conn:
         result = graph_queries.query_subgraph(
             conn,
@@ -890,9 +915,9 @@ def graph_map(
 
     query_embedding = None
     if query:
-        from pkb.embeddings import embed
+        from pkb.embeddings import embed_queries
 
-        query_embedding = embed([query])[0]
+        query_embedding = embed_queries([query])[0]
 
     with graph_connection(settings.graph_db_path) as conn:
         try:

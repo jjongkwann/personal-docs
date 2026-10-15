@@ -68,6 +68,7 @@ ALLOWLIST_CLI_ONLY = {
     "graph rebuild-evidence-local",
     "stale",
     "watch",
+    "doc-index",  # 문서 색인 전량 백필 — 배포 때 한 번 돌리는 운영 명령
 }
 
 # Claude 루프 셀프추출·큐레이션·병합(graph_*) + obsidian 전용 재조정.
@@ -85,6 +86,10 @@ ALLOWLIST_MCP_ONLY = {
     "graph_curate",
     "graph_merge",
     "sync_obsidian",
+    "list_categories",  # 원격 앱의 카테고리 목록 — 로컬 CLI는 list로 충분
+    "related_documents",  # 원격 앱·에이전트의 관련 문서 조회
+    "put_attachment",  # 볼트 밖 첨부 원격 업로드 — 로컬에선 파일을 직접 복사
+    "get_attachment",
 }
 
 

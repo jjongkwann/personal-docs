@@ -31,7 +31,7 @@ and the concept graph all stay on your machine.
 | --- | --- |
 | Local first | Personal documents and the search index stay local; no LLM API key required. |
 | Hybrid search | Combines nori BM25 with dense vector kNN (BGE-M3) via RRF. CrossEncoder reranking is optional. |
-| MCP-first interface | Search, file writing, conversion, sync, document management, and native graph traversal via 26 MCP tools. |
+| MCP-first interface | Search, file writing, conversion, sync, document management, and native graph traversal via 30 MCP tools. |
 | Broad document ingestion | Chunks Markdown, text, PDF, DOCX, PPTX, XLSX, and HTML, re-embedding only what changed. |
 | Obsidian integration | Keep the corpus inside your vault and manage original Markdown and backlinks directly. |
 | Graph RAG | Stores concepts and evidence in SQLite, supports native explain/path/subgraph traversal, and renders an offline Evidence Map. |
@@ -257,7 +257,7 @@ personal-docs/
 
 ## Documentation
 
-- [MCP integration guide](docs/mcp.md) — running the server, client registration, the 26 tools with examples
+- [MCP integration guide](docs/mcp.md) — running the server, client registration, the 30 tools with examples
 - [Architecture](docs/architecture.md) — components, data flow, sync responsibilities
 - [CLI usage](docs/usage.md) — ingestion, search, document management, evaluation and operations
 - [Graph RAG](docs/graph-rag.md) — concept extraction, graph storage, and native queries

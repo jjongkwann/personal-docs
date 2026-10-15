@@ -74,11 +74,12 @@ def test_legal_only_delta_updates_metadata_without_embedding(tmp_path, monkeypat
     old = process_file(note, tmp_path)[0]
     _note(tmp_path, metadata=STATUTE | {"original_location": "제12조의2 제2항", "effective_to": None})
     es = MagicMock()
+    es.indices.exists.return_value = False  # 문서 색인 없음 — 청크 bulk만 본다
     es.search.return_value = {"hits": {"hits": [{"_source": old}]}}
     es.bulk.return_value = {"errors": False}
     embed = MagicMock()
     monkeypatch.setattr("pkb.store.get_client", lambda: es)
-    monkeypatch.setattr("pkb.embeddings.embed", embed)
+    monkeypatch.setattr("pkb.embeddings.embed_documents", embed)
     monkeypatch.setattr(settings, "graph_db_path", str(tmp_path / "absent.sqlite"))
 
     stats = ingest_files([note], tmp_path)
@@ -99,11 +100,12 @@ def test_replaced_and_moved_legacy_source_retains_stored_legal_metadata(tmp_path
     body = "# Changed\nRevised content without frontmatter."
     note.write_text(body + ("\n" + old["content"] if moved else ""))
     es = MagicMock()
+    es.indices.exists.return_value = False  # 문서 색인 없음 — 청크 bulk만 본다
     es.search.return_value = {"hits": {"hits": [{"_source": old}]}}
     es.mget.return_value = {"docs": [{"found": True, "_source": {"chunk_index": 0, "embedding": [9.0]}}]}
     es.bulk.return_value = {"errors": False}
     monkeypatch.setattr("pkb.store.get_client", lambda: es)
-    monkeypatch.setattr("pkb.embeddings.embed", lambda texts: [[1.0] for _ in texts])
+    monkeypatch.setattr("pkb.embeddings.embed_documents", lambda texts: [[1.0] for _ in texts])
     monkeypatch.setattr(settings, "graph_db_path", str(tmp_path / "absent.sqlite"))
 
     ingest_files([note], tmp_path)

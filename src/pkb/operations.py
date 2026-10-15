@@ -441,6 +441,7 @@ def preview_write(
 def frontmatter_warnings(content: str) -> tuple[str, ...]:
     """저장 전 frontmatter 품질 경고. 작업 자체는 막지 않는다."""
     from pkb.ingest import parse_expires_at, parse_frontmatter
+    from pkb.items import parse_occurred_at
 
     fm, _ = parse_frontmatter(content)
     if not fm:
@@ -457,6 +458,8 @@ def frontmatter_warnings(content: str) -> tuple[str, ...]:
         warnings.append(f"tags는 문자열(쉼표 구분) 또는 문자열 리스트여야 합니다: {tags!r}")
     if "expires_at" in fm and parse_expires_at(fm["expires_at"]) is None:
         warnings.append(f"expires_at 파싱 실패 (ISO8601 필요): {fm['expires_at']!r}")
+    if fm.get("occurred_at") is not None and parse_occurred_at(fm["occurred_at"]) is None:
+        warnings.append(f"occurred_at 파싱 실패 (ISO8601 필요, 색인에서 제외): {fm['occurred_at']!r}")
     return tuple(warnings)
 
 

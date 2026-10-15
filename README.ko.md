@@ -31,7 +31,7 @@ Claude Code·Codex·Gemini에서는 MCP 도구로 검색·작성·인제스트�
 | --- | --- |
 | 로컬 우선 | 개인 문서와 검색 인덱스를 로컬에 보관하며 별도의 LLM API 키가 필요하지 않습니다. |
 | 하이브리드 검색 | nori BM25와 dense vector kNN(BGE-M3)을 RRF로 결합합니다. CrossEncoder 재순위는 옵션. |
-| MCP-first 인터페이스 | 검색, 파일 작성, 변환, 동기화, 문서 관리, 그래프 순회를 26개 MCP 도구로 수행합니다. |
+| MCP-first 인터페이스 | 검색, 파일 작성, 변환, 동기화, 문서 관리, 그래프 순회를 30개 MCP 도구로 수행합니다. |
 | 다양한 문서 인제스트 | Markdown, 텍스트, PDF, DOCX, PPTX, XLSX, HTML을 청킹하고 변경분만 다시 임베딩합니다. |
 | Obsidian 연동 | 코퍼스를 볼트 안에 두고 원본 Markdown과 백링크를 직접 관리합니다. |
 | Graph RAG | 개념과 근거를 SQLite에 저장하고 explain/path/subgraph 순회와 오프라인 Evidence Map 렌더를 지원합니다. |
@@ -253,7 +253,7 @@ personal-docs/
 
 ## 문서
 
-- [MCP 연동 가이드](docs/ko/mcp.md) — 서버 실행, 클라이언트 등록, 26개 도구와 사용 예시
+- [MCP 연동 가이드](docs/ko/mcp.md) — 서버 실행, 클라이언트 등록, 30개 도구와 사용 예시
 - [아키텍처](docs/ko/architecture.md) — 구성 요소, 데이터 흐름, 동기화 책임
 - [CLI 사용법](docs/ko/usage.md) — 인제스트, 검색, 문서 관리, 평가와 운영
 - [Graph RAG](docs/ko/graph-rag.md) — 개념 추출, 그래프 저장, 네이티브 질의

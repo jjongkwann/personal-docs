@@ -56,7 +56,7 @@ def test_cli_explain_path_and_affected(graph_db):
 
 
 def test_cli_semantic_query(graph_db, monkeypatch):
-    monkeypatch.setattr("pkb.embeddings.embed", lambda texts: [[1.0, 0.0]])
+    monkeypatch.setattr("pkb.embeddings.embed_queries", lambda texts: [[1.0, 0.0]])
 
     result = runner.invoke(
         app,

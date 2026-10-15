@@ -13,6 +13,7 @@ import tiktoken
 import yaml
 
 from pkb.config import settings
+from pkb.items import ITEM_LIST_FIELDS, ITEM_METADATA_FIELDS, normalize_item_metadata
 from pkb.legal import LEGAL_METADATA_FIELDS, normalize_legal_metadata, preserve_legal_revision, validate_legal_metadata
 
 _log = logging.getLogger(__name__)
@@ -107,6 +108,14 @@ def embedding_fingerprint(chunk: dict) -> str:
     parts = [settings.embedding_model]
     if settings.embedding_revision:
         parts.append(settings.embedding_revision)
+    # 문서 쪽 encode 인자도 벡터를 바꾼다. 기본값(빈 값)이면 키에 넣지 않아 기존 fingerprint가 유지된다.
+    encoding = [
+        f"task={settings.embedding_task}" if settings.embedding_task else "",
+        f"prompt={settings.embedding_document_prompt}" if settings.embedding_document_prompt else "",
+        "normalize" if settings.embedding_normalize else "",
+    ]
+    if any(encoding):
+        parts.append(" ".join(item for item in encoding if item))
     key = "\n".join([*parts, EMBED_PREPROC_VERSION, embed_input(chunk)])
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
@@ -134,6 +143,7 @@ _META_DIFF_FIELDS = (
     "source_ids",
     "supports",
     "concept_ids",
+    *ITEM_METADATA_FIELDS,
     *LEGAL_METADATA_FIELDS,
 )
 
@@ -170,10 +180,10 @@ def _diff_metadata(old: dict, new: dict) -> dict:
         # erase values already present in ES during a metadata-only update.
         # An explicit YAML null is different: process_file includes the key
         # and the resulting ``None`` is propagated as a field removal.
-        if f in (*DOCUMENT_METADATA_FIELDS, *LEGAL_METADATA_FIELDS) and f not in new:
+        if f in (*DOCUMENT_METADATA_FIELDS, *ITEM_METADATA_FIELDS, *LEGAL_METADATA_FIELDS) and f not in new:
             continue
         ov, nv = old.get(f), new.get(f)
-        if f == "tags" or f in _DOCUMENT_METADATA_LIST_FIELDS:
+        if f == "tags" or f in _DOCUMENT_METADATA_LIST_FIELDS or f in ITEM_LIST_FIELDS:
             # ES returns keyword arrays as lists, but hand-built legacy test
             # fixtures (and a few old importers) may use a scalar.  Compare
             # normalized string sets so ordering and representation do not
@@ -755,6 +765,7 @@ def process_file(
     if not isinstance(fm_archive_reason, str):
         fm_archive_reason = None
     document_metadata = _normalize_document_metadata(frontmatter)
+    document_metadata.update(normalize_item_metadata(frontmatter))
     document_metadata.update(normalize_legal_metadata(frontmatter))
 
     results = []
@@ -829,19 +840,23 @@ def ingest_files(
       - 그 외 신규/변경 → 재임베딩 + index
       - 새 청크에서 사라진 슬롯 → delete
     """
-    from pkb.embeddings import embed
+    from pkb.embeddings import embed_documents
     from pkb.search_log import log_change
     from pkb.store import (
         apply_chunk_delta,
         delete_document,
+        ensure_item_mapping,
         get_chunk_embeddings,
         get_client,
         get_existing_chunks,
+        refresh_document_rows,
     )
 
     es = get_client()
+    ensure_item_mapping(es)
     stats = _empty_stats()
     relayouts: list[tuple[str, dict[int, str], dict[int, str]]] = []
+    changed_doc_ids: list[str] = []
     prepared: list[_PreparedDelta] = []
     embedding_targets: list[tuple[_PreparedDelta, int]] = []
     embedding_texts: list[str] = []
@@ -877,7 +892,9 @@ def ingest_files(
         existing = get_existing_chunks(es, doc_id)
         # Replacement and moved slots are indexed as whole documents. Carry
         # document-level fields that an older source file does not declare.
-        for field in (*DOCUMENT_METADATA_FIELDS, *LEGAL_METADATA_FIELDS, "archived_at", "archive_reason"):
+        for field in (
+            *DOCUMENT_METADATA_FIELDS, *ITEM_METADATA_FIELDS, *LEGAL_METADATA_FIELDS, "archived_at", "archive_reason",
+        ):
             if field in new_chunks[0]:
                 continue
             values = [old[field] for old in existing.values() if old.get(field) is not None]
@@ -957,7 +974,7 @@ def ingest_files(
 
     # 파일별 encode 호출 대신 이번 ingest_files 호출의 신규/변경 청크를 한 번에 배치한다.
     if embedding_texts:
-        vectors = embed(embedding_texts)
+        vectors = embed_documents(embedding_texts)
         for (delta, idx), vector in zip(embedding_targets, vectors, strict=True):
             delta.new_by_idx[idx]["embedding"] = vector
 
@@ -996,6 +1013,7 @@ def ingest_files(
             "deleted": len(delete_indices),
         }
         if any(delta.values()):
+            changed_doc_ids.append(doc_id)
             log_change("ingest", doc_id, chunks=delta)
 
         _log.info(
@@ -1017,6 +1035,8 @@ def ingest_files(
         stats["metadata_updated"] += len(metadata_updates)
         stats["deleted"] += len(delete_indices)
 
+    # 바뀐 문서만 문서 색인 행을 다시 쓴다 — 그대로인 문서의 행은 이미 맞다.
+    refresh_document_rows(es, changed_doc_ids)
     if relayouts:
         _realign_graph(relayouts)
     return stats
@@ -1065,12 +1085,25 @@ def _has_dot_segment(path: Path) -> bool:
     return any(part.startswith(".") for part in path.parts)
 
 
+# Syncthing이 양쪽 수정이 겹칠 때 남기는 사본: "note.sync-conflict-20261015-101500-ABCDEFG.md"
+SYNC_CONFLICT_MARKER = ".sync-conflict-"
+
+
+def is_sync_conflict(path: str | Path) -> bool:
+    """Syncthing 충돌 사본인지. doc_id 문자열에도 쓴다."""
+    return SYNC_CONFLICT_MARKER in Path(path).name
+
+
 def is_excluded_path(path: Path) -> bool:
-    """색인 제외 경로인지 — 예약 디렉터리/숨김 성분.
+    """색인 제외 경로인지 — 예약 디렉터리/숨김 성분/Syncthing 충돌 사본.
 
     탐색(find_ingestable_files)과 직접 인제스트(process_file) 양쪽이 같은 판정을 쓴다.
     """
-    return _has_dot_segment(path) or not EXCLUDED_DIR_NAMES.isdisjoint(path.parts)
+    return (
+        _has_dot_segment(path)
+        or not EXCLUDED_DIR_NAMES.isdisjoint(path.parts)
+        or is_sync_conflict(path)
+    )
 
 
 def find_ingestable_files(path: Path, exclude: Path | None = None) -> list[Path]:

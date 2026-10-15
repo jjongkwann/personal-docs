@@ -52,7 +52,7 @@ def test_nonlegal_reference_date_stays_in_plan_without_excluding_technical_docum
     assert plan["needed_sources"] == []
     assert plan["warnings"] == ["법률 자료 외에는 기준일 유효성 메타데이터가 없어 날짜 필터를 적용하지 않았습니다"]
     calls = []
-    monkeypatch.setattr("pkb.retrieve.embed", lambda texts: [[1.0] for _ in texts])
+    monkeypatch.setattr("pkb.retrieve.embed_queries", lambda texts: [[1.0] for _ in texts])
 
     def search(es, text, vector, category, candidate_k, **kwargs):
         calls.append(kwargs["legal_filters"])

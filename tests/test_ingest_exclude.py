@@ -97,3 +97,16 @@ def test_origin_dir_excluded(tmp_path, monkeypatch):
     (tmp_path / "topic" / "digested.md").write_text("y", encoding="utf-8")
     names = {f.name for f in find_ingestable_files(tmp_path)}
     assert names == {"digested.md"}
+
+
+def test_syncthing_conflict_copies_are_never_ingested(tmp_path):
+    """Syncthing 충돌 사본은 원본과 내용이 거의 같아 검색 결과를 중복시킨다."""
+    note = tmp_path / "topic" / "plan.md"
+    conflict = tmp_path / "topic" / "plan.sync-conflict-20261015-101500-ABCDEFG.md"
+    note.parent.mkdir(parents=True)
+    for path in (note, conflict):
+        path.write_text("# Plan\n본문", encoding="utf-8")
+
+    assert find_ingestable_files(tmp_path) == [note]
+    assert find_ingestable_files(conflict) == []
+    assert process_file(conflict, tmp_path) == []

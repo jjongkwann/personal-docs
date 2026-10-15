@@ -16,6 +16,7 @@ dependencies = [
     "mcp>=2.0,<3",
     "markitdown[pdf,docx,pptx,xlsx]>=0.1",
     "pdfminer-six>=20231228",
+    "peft>=0.21.2",
 ]
 
 [project.scripts]
