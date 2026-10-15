@@ -203,7 +203,8 @@ replaces only `embedding` and `embedding_fingerprint` using the current settings
 the one ingest computes under the same settings, so the next `sync` on the server reuses these
 vectors. Rerunning skips chunks that are already done. If the source changed in the meantime, it
 re-embeds changed chunks, copies metadata-only changes with the existing vector and deletes chunks
-that left the source. When every chunk is in place it rebuilds `<target>_docs`, so `index-switch`
+that left the source. Image and audio chunks (`media_model` set) keep the media model's vector and
+are copied unchanged. When every chunk is in place it rebuilds `<target>_docs`, so `index-switch`
 can move both aliases. `--dry-run` only counts the work and does not load the model. Exit code 3
 means it stopped at `--max-batches` and has work left. `graph reembed` recomputes every concept
 vector from `name: description` (the text `graph_store_concepts` embeds), commits per batch and
@@ -266,6 +267,8 @@ about 8 per second, so 16k chunks take 35–40 minutes; 33k concepts take about 
 6. On the server, update the code, `uv sync`, and put the `jina.env` lines (without `ES_HOST`) in
    `.env`. Load the model once so the first search does not download it:
    `uv run python -c "from pkb.embeddings import embed_queries; embed_queries(['warmup'])"`.
+   Image and audio search needs these settings too; add `MEDIA_EMBEDDING_MODEL` now if you want it
+   (see [Image and Audio Vectors](#image-and-audio-vectors-media-sync)).
 7. On the server, `uv run pkb reembed --target pkb_documents_20261015_jina --dry-run` must report
    `임베딩 0 · 복사 0 · 삭제 0`. This proves the server's settings produce the fingerprints stored in
    the new index, so `sync` will not re-embed anything.
