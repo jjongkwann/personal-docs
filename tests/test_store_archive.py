@@ -11,8 +11,15 @@ from unittest.mock import MagicMock
 from pkb.store import archive_document, purge_archived, restore_document
 
 
-def test_archive_sets_archived_at_and_reason():
+def _es() -> MagicMock:
+    """문서 색인이 없는 ES — 청크 색인 호출 shape만 본다 (문서 행은 test_doc_index.py)."""
     es = MagicMock()
+    es.indices.exists.return_value = False
+    return es
+
+
+def test_archive_sets_archived_at_and_reason():
+    es = _es()
     es.update_by_query.return_value = {"updated": 3}
     n = archive_document(es, "data/career/old_resume.md", reason="outdated")
     assert n == 3
@@ -28,7 +35,7 @@ def test_archive_sets_archived_at_and_reason():
 
 
 def test_archive_without_reason_omits_reason_field():
-    es = MagicMock()
+    es = _es()
     es.update_by_query.return_value = {"updated": 0}
     archive_document(es, "doc1")
     script = es.update_by_query.call_args.kwargs["script"]
@@ -37,7 +44,7 @@ def test_archive_without_reason_omits_reason_field():
 
 
 def test_restore_removes_lifecycle_fields_only_when_archived():
-    es = MagicMock()
+    es = _es()
     es.update_by_query.return_value = {"updated": 2}
     n = restore_document(es, "doc1")
     assert n == 2
@@ -52,7 +59,7 @@ def test_restore_removes_lifecycle_fields_only_when_archived():
 
 
 def test_purge_without_before_deletes_all_archived():
-    es = MagicMock()
+    es = _es()
     es.delete_by_query.return_value = {"deleted": 10}
     n = purge_archived(es)
     assert n == 10
@@ -61,7 +68,7 @@ def test_purge_without_before_deletes_all_archived():
 
 
 def test_purge_with_before_adds_range_clause():
-    es = MagicMock()
+    es = _es()
     es.delete_by_query.return_value = {"deleted": 5}
     before = datetime(2025, 1, 1, tzinfo=UTC)
     purge_archived(es, before=before)

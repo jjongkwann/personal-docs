@@ -1,11 +1,14 @@
 import json
+import re
+from datetime import date, datetime
 from math import isfinite
 from time import perf_counter
 
 from elasticsearch import Elasticsearch
 
 from pkb.config import settings
-from pkb.embeddings import embed
+from pkb.embeddings import embed_queries
+from pkb.items import normalize_person
 from pkb.query import analyze_query, normalize_legal_filters
 
 RRF_K = 60  # Reciprocal Rank Fusion 상수 (Elastic 기본값)
@@ -237,9 +240,60 @@ def legal_filter(**values: str | None) -> list[dict]:
     return filters
 
 
+def _string_list(name: str, values: list[str]) -> list[str]:
+    if isinstance(values, str) or not all(isinstance(value, str) and value.strip() for value in values):
+        raise ValueError(f"{name}는 비어 있지 않은 문자열 목록이어야 합니다")
+    return [value.strip() for value in values]
+
+
+def _date_bound(name: str, value: str, *, end_of_day: bool) -> str:
+    """ISO 8601 날짜/시각 검증. 끝 날짜가 날짜만이면 그날 전체가 들어가도록 '||/d'로 올린다."""
+    value = value.strip() if isinstance(value, str) else value
+    try:
+        if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            date.fromisoformat(value)
+            return f"{value}||/d" if end_of_day else value
+        datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name}는 ISO 8601 날짜 또는 시각이어야 합니다: {value!r}") from None
+    return value
+
+
+def scope_filter(
+    doc_ids: list[str] | None = None,
+    source_types: list[str] | None = None,
+    people: list[str] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    path_prefix: str | None = None,
+) -> list[dict]:
+    """검색 범위 필터. 청크 색인과 문서 색인이 같은 필드 이름을 써서 둘 다에 쓴다.
+
+    빈 목록과 None은 제한 없음이다. 기간은 occurred_at 기준 양 끝 포함이며, 날짜만 주면
+    UTC 하루 단위로 본다. occurred_at이 없는 문서는 기간을 주면 빠진다.
+    """
+    filters: list[dict] = []
+    if doc_ids:
+        filters.append({"terms": {"doc_id": _string_list("doc_ids", doc_ids)}})
+    if source_types:
+        filters.append({"terms": {"source_type": [v.lower() for v in _string_list("source_types", source_types)]}})
+    if people:
+        filters.append({"terms": {"people": [normalize_person(v) for v in _string_list("people", people)]}})
+    bounds = {}
+    if date_from:
+        bounds["gte"] = _date_bound("date_from", date_from, end_of_day=False)
+    if date_to:
+        bounds["lte"] = _date_bound("date_to", date_to, end_of_day=True)
+    if bounds:
+        filters.append({"range": {"occurred_at": bounds}})
+    if path_prefix:
+        filters.append({"prefix": {"doc_id": _string_list("path_prefix", [path_prefix])[0]}})
+    return filters
+
+
 def _search_filters(
     category: str | None, include_archived: bool, exclude_doc_prefix: str | None,
-    profile: str | None, legal_filters: dict | None = None,
+    profile: str | None, legal_filters: dict | None = None, scope_filters: list[dict] | None = None,
 ) -> list[dict]:
     legal_filters = legal_filters or {}
     filters = [{"term": {"category": category}}] if category else []
@@ -247,6 +301,7 @@ def _search_filters(
     filters.extend(_lifecycle_filter(include_archived, legal_filters.get("as_of")))
     filters.extend(_exclude_doc_prefix_filter(exclude_doc_prefix))
     filters.extend(legal_filter(**legal_filters))
+    filters.extend(scope_filters or [])
     return filters
 
 
@@ -258,6 +313,7 @@ def _bm25_query(
     profile: str | None = None,
     retrieval_profile: str | None = None,
     legal_filters: dict | None = None,
+    scope_filters: list[dict] | None = None,
 ) -> dict:
     bm25: dict = {
         "bool": {
@@ -275,6 +331,7 @@ def _bm25_query(
     }
     filters = _search_filters(
         category, include_archived, exclude_doc_prefix, _resolve_profile(profile, retrieval_profile), legal_filters,
+        scope_filters,
     )
     if filters:
         bm25["bool"]["filter"] = filters
@@ -290,6 +347,7 @@ def _knn_query(
     profile: str | None = None,
     retrieval_profile: str | None = None,
     legal_filters: dict | None = None,
+    scope_filters: list[dict] | None = None,
 ) -> dict:
     knn: dict = {
         "field": "embedding",
@@ -299,6 +357,7 @@ def _knn_query(
     }
     filters = _search_filters(
         category, include_archived, exclude_doc_prefix, _resolve_profile(profile, retrieval_profile), legal_filters,
+        scope_filters,
     )
     if filters:
         knn["filter"] = filters
@@ -341,6 +400,12 @@ def hybrid_search(
     legal_version: str | None = None,
     legal_kind: str | None = None,
     query_plan_out: list[dict] | None = None,
+    doc_ids: list[str] | None = None,
+    source_types: list[str] | None = None,
+    people: list[str] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    path_prefix: str | None = None,
 ) -> list[dict]:
     """하이브리드 검색.
 
@@ -366,8 +431,14 @@ def hybrid_search(
         as_of: YYYY-MM-DD 기준 법령 시행구간/판결일 필터. 날짜 미상 자료는 제외한다.
             이때 현재의 아카이브/만료 대신 법률상 유효기간으로 판단한다.
         query_plan_out: 분석한 질문 계획을 append할 선택적 출력 목록.
+        doc_ids, source_types, people, date_from, date_to, path_prefix: 검색 범위 필터
+            (scope_filter). BM25·kNN·이웃 확장에 똑같이 적용한다.
     """
     profile = _resolve_profile(profile, retrieval_profile)
+    scope_filters = scope_filter(
+        doc_ids=doc_ids, source_types=source_types, people=people,
+        date_from=date_from, date_to=date_to, path_prefix=path_prefix,
+    )
     if fusion not in {"rrf", "linear"}:
         raise ValueError(f"알 수 없는 fusion: {fusion!r}")
     if not isfinite(lexical_weight) or not 0 <= lexical_weight <= 1:
@@ -400,7 +471,7 @@ def hybrid_search(
             queries.append(v)
 
     t = perf_counter()
-    query_vectors = embed(queries)  # 변형 포함 1회 배치 인코딩
+    query_vectors = embed_queries(queries)  # 변형 포함 1회 배치 인코딩
     if query_vector_out is not None:
         query_vector_out.append(query_vectors[0])
     timings["embed_ms"] = round((perf_counter() - t) * 1000, 2)
@@ -419,6 +490,7 @@ def hybrid_search(
             fusion=fusion,
             lexical_weight=lexical_weight,
             legal_filters=legal_filters,
+            scope_filters=scope_filters,
         )
         for hit in hits:
             if hit["_id"] in merged:
@@ -448,7 +520,9 @@ def hybrid_search(
         t = perf_counter()
         candidates = _attach_neighbors(
             es, candidates, window=expand_context,
-            filters=_search_filters(category, include_archived, exclude_doc_prefix, profile, legal_filters),
+            filters=_search_filters(
+                category, include_archived, exclude_doc_prefix, profile, legal_filters, scope_filters,
+            ),
         )
         timings["expand_ms"] = round((perf_counter() - t) * 1000, 2)
 
@@ -554,6 +628,7 @@ def _rrf_search(
     fusion: str = "rrf",
     lexical_weight: float = 0.5,
     legal_filters: dict | None = None,
+    scope_filters: list[dict] | None = None,
 ) -> list[dict]:
     """BM25와 kNN을 각각 실행해 RRF 또는 정규화 가중합으로 결합.
 
@@ -578,6 +653,7 @@ def _rrf_search(
                     profile=profile,
                     retrieval_profile=retrieval_profile,
                     legal_filters=legal_filters,
+                    scope_filters=scope_filters,
                 ),
                 "size": candidate_k,
                 "_source": {"excludes": ["embedding"]},
@@ -590,6 +666,7 @@ def _rrf_search(
                     profile=profile,
                     retrieval_profile=retrieval_profile,
                     legal_filters=legal_filters,
+                    scope_filters=scope_filters,
                 ),
                 "size": candidate_k,
                 "_source": {"excludes": ["embedding"]},
@@ -641,3 +718,59 @@ def _rrf_search(
         else:
             timings[f"{fusion}_top_gap"] = 0.0
     return results
+
+
+def related_documents(
+    es: Elasticsearch,
+    doc_id: str,
+    top_k: int = 5,
+    include_archived: bool = False,
+    doc_ids: list[str] | None = None,
+    source_types: list[str] | None = None,
+    people: list[str] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    path_prefix: str | None = None,
+) -> list[dict]:
+    """문서 벡터가 가까운 다른 문서. 문서 색인 kNN 한 번이며 자기 자신은 뺀다.
+
+    범위 필터는 hybrid_search와 같고, 아카이브·만료 문서는 기본으로 뺀다.
+    반환 행에는 doc_vector가 없고 score(코사인 기반, 클수록 가깝다)가 붙는다.
+    """
+    from elasticsearch import NotFoundError
+
+    from pkb.store import doc_index_name
+
+    if not 1 <= top_k <= 100:
+        raise ValueError("top_k는 1~100이어야 합니다")
+    filters = [
+        {"bool": {"must_not": {"term": {"doc_id": doc_id}}}},
+        *_lifecycle_filter(include_archived),
+        *scope_filter(
+            doc_ids=doc_ids, source_types=source_types, people=people,
+            date_from=date_from, date_to=date_to, path_prefix=path_prefix,
+        ),
+    ]
+    index = doc_index_name()
+    if not es.indices.exists(index=index):
+        raise ValueError("문서 색인이 없습니다. 서버에서 `uv run pkb doc-index`로 채우세요.")
+    try:
+        row = es.get(index=index, id=doc_id, source_includes=["doc_vector"])
+    except NotFoundError:
+        raise ValueError(f"문서 색인에 없는 문서입니다: {doc_id}") from None
+    vector = row["_source"].get("doc_vector")
+    if not vector:
+        raise ValueError(f"문서 벡터가 없습니다 (임베딩 없는 구 청크): {doc_id}")
+    result = es.search(
+        index=index,
+        knn={
+            "field": "doc_vector",
+            "query_vector": vector,
+            "k": top_k,
+            "num_candidates": max(top_k * 10, 100),
+            "filter": filters,
+        },
+        size=top_k,
+        source_excludes=["doc_vector"],
+    )
+    return [{**hit["_source"], "score": hit["_score"]} for hit in result["hits"]["hits"]]

@@ -56,7 +56,7 @@ def _setup(monkeypatch, es, new_chunks, embed_calls):
         embed_calls.append(list(texts))
         return [[float(len(t))] for t in texts]
 
-    monkeypatch.setattr("pkb.embeddings.embed", fake_embed)
+    monkeypatch.setattr("pkb.embeddings.embed_documents", fake_embed)
 
 
 def test_fingerprint_changes_with_model(monkeypatch):

@@ -103,3 +103,23 @@ def test_sync_corpus_prunes_only_with_confirm(fake_sync):
     out = sync_corpus(confirm_prune=True)
     assert "2개 삭제" in out
     assert fake_sync == ["data/gone/a.md", "data/gone/b.md"]
+
+
+def test_sync_corpus_drops_indexed_sync_conflict_copies_without_confirm(monkeypatch, tmp_path):
+    stats = {k: 0 for k in ("files", "reused", "moved", "embedded", "added", "metadata_updated", "deleted")}
+    conflict = "data/notes/plan.sync-conflict-20261015-101500-ABCDEFG.md"
+    monkeypatch.setattr("pkb.store.get_client", lambda: MagicMock())
+    monkeypatch.setattr("pkb.config.data_dir", lambda: Path(tmp_path))
+    monkeypatch.setattr(
+        "pkb.operations.sync_tree",
+        lambda es, root, prefix: SyncResult(Path(tmp_path), stats, (conflict, "data/gone/a.md")),
+    )
+    pruned: list = []
+    monkeypatch.setattr("pkb.operations.prune_documents", lambda es, ids: pruned.extend(ids))
+    monkeypatch.setattr("pkb.mcp_server._graph_prune_summary", lambda es: "")
+
+    out = sync_corpus()
+
+    assert pruned == [conflict]
+    assert "충돌 사본 1개" in out
+    assert "원본에 없는 문서 1개" in out and "data/gone/a.md" in out

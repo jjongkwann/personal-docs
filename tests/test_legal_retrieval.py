@@ -66,7 +66,7 @@ class CapturingES:
 
 
 def test_analysis_filters_reach_all_variants_and_neighbors_with_original_provenance(monkeypatch):
-    monkeypatch.setattr("pkb.retrieve.embed", lambda queries: [[0.0] for _ in queries])
+    monkeypatch.setattr("pkb.retrieve.embed_queries", lambda queries: [[0.0] for _ in queries])
     es = CapturingES()
     plans = []
     hits = hybrid_search(
@@ -92,6 +92,6 @@ def test_invalid_temporal_or_identifier_inputs_fail_before_embedding(monkeypatch
     def forbidden(_):
         pytest.fail("invalid filters must fail before embedding")
 
-    monkeypatch.setattr("pkb.retrieve.embed", forbidden)
+    monkeypatch.setattr("pkb.retrieve.embed_queries", forbidden)
     with pytest.raises(ValueError):
         hybrid_search(None, "q", log=False, **inputs)

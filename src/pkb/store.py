@@ -1,10 +1,13 @@
 import contextlib
+import math
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from functools import lru_cache
 
 from elasticsearch import Elasticsearch, NotFoundError
 
 from pkb.config import settings
+from pkb.items import ITEM_MAPPING_PROPERTIES, ITEM_METADATA_FIELDS
 from pkb.legal import LEGAL_MAPPING_PROPERTIES
 from pkb.search_log import log_change
 
@@ -63,6 +66,8 @@ INDEX_SETTINGS = {
             "source_ids": {"type": "keyword"},
             "supports": {"type": "keyword"},
             "concept_ids": {"type": "keyword"},
+            # 수집 항목 메타데이터 (pkb.items). 기존 색인에는 ensure_item_mapping이 더한다.
+            **ITEM_MAPPING_PROPERTIES,
             **LEGAL_MAPPING_PROPERTIES,
         }
     },
@@ -70,6 +75,47 @@ INDEX_SETTINGS = {
 
 _SEARCH_PAGE_SIZE = 1000
 _AGG_PAGE_SIZE = 1000
+
+# list_documents가 돌려주는 문서 메타데이터. 문서 색인 행도 이 필드를 대표 청크에서 옮겨 담는다.
+_LIST_FIELDS = (
+    "doc_id",
+    "source_path",
+    "category",
+    "title",
+    "tags",
+    "date_modified",
+    "expires_at",
+    "schema_version",
+    "doc_type",
+    "canonical_id",
+    "status",
+    "authority",
+    "aliases",
+    "source_ids",
+    "supports",
+    "concept_ids",
+)
+DOC_ROW_FIELDS = (*_LIST_FIELDS, "archived_at", "archive_reason", *ITEM_METADATA_FIELDS)
+DOC_INDEX_SUFFIX = "_docs"
+# 문서당 한 행. 필터·생명주기 필드는 청크 색인과 같은 이름·매핑을 써서 검색 필터를 그대로 공유한다.
+DOC_INDEX_SETTINGS = {
+    "settings": INDEX_SETTINGS["settings"],
+    "mappings": {
+        "properties": {
+            **{field: INDEX_SETTINGS["mappings"]["properties"][field] for field in DOC_ROW_FIELDS},
+            "chunk_count": {"type": "integer"},
+            # 청크 임베딩 평균을 L2 정규화한 벡터 — 관련 문서·문서 지도용
+            "doc_vector": {
+                "type": "dense_vector",
+                "dims": settings.embedding_dims,
+                "index": True,
+                "similarity": "cosine",
+            },
+        }
+    },
+}
+# 이 프로세스에서 항목 필드 매핑을 확인한 청크 색인 이름
+_item_mapping_checked: set[str] = set()
 
 
 @lru_cache(maxsize=4)
@@ -82,9 +128,62 @@ def get_client() -> Elasticsearch:
     return _client_for_host(settings.es_host)
 
 
+def doc_index_name() -> str:
+    """문서 단위 색인 이름. ES_INDEX가 읽기 alias면 이것도 alias다.
+
+    create_doc_index가 이 alias를 물리 색인 '<물리 청크 색인>_docs'에 걸고,
+    switch_read_alias가 청크 alias와 함께 옮긴다. 모델이 다른 두 벡터 공간이 섞이지 않는다.
+    """
+    return f"{settings.es_index}{DOC_INDEX_SUFFIX}"
+
+
 def create_index(es: Elasticsearch) -> None:
-    if not es.indices.exists(index=settings.es_index):
-        es.indices.create(index=settings.es_index, body=INDEX_SETTINGS)
+    """청크 색인을 만든다. 이미 있으면 새 항목 메타데이터 필드만 더한다.
+
+    문서 색인은 청크 색인을 새로 만들 때만 같이 만든다. 이미 채워진 청크 색인 옆에 빈 문서
+    색인이 생기면 list_documents가 빈 목록을 보기 때문이다. 그때는 `pkb doc-index`가 만들고 채운다.
+    """
+    if es.indices.exists(index=settings.es_index):
+        ensure_item_mapping(es)
+        return
+    es.indices.create(index=settings.es_index, body=INDEX_SETTINGS)
+    create_doc_index(es)
+
+
+def ensure_item_mapping(es: Elasticsearch) -> None:
+    """기존 청크 색인에 항목 메타데이터 필드를 더한다. 재색인 없이 put_mapping 한 번.
+
+    매핑이 없으면 동적 매핑이 people·links를 text로 잡아 term 필터가 맞지 않으므로 첫
+    인제스트 전에 명시한다. 같은 매핑을 다시 넣는 것은 ES에서 아무 일도 하지 않는다.
+    프로세스마다 색인 이름당 한 번만 부른다.
+    """
+    index = settings.es_index
+    if index in _item_mapping_checked or not es.indices.exists(index=index):
+        return
+    es.indices.put_mapping(index=index, properties=ITEM_MAPPING_PROPERTIES)
+    _item_mapping_checked.add(index)
+
+
+def create_doc_index(es: Elasticsearch) -> bool:
+    """문서 색인이 없으면 만든다. 만들었으면 True.
+
+    ES_INDEX가 alias면 그 물리 청크 색인 이름으로 물리 문서 색인을 만들고 doc_index_name()
+    alias를 건다 — 물리 색인이 alias 이름을 차지하면 나중에 switch_read_alias가 막힌다.
+    """
+    name = doc_index_name()
+    if es.indices.exists(index=name):
+        return False
+    if es.indices.exists_alias(name=settings.es_index):
+        targets = sorted(es.indices.get_alias(name=settings.es_index))
+        if len(targets) != 1:
+            raise ValueError(f"'{settings.es_index}' alias가 물리 인덱스 하나를 가리켜야 합니다: {targets}")
+        physical = f"{targets[0]}{DOC_INDEX_SUFFIX}"
+        if not es.indices.exists(index=physical):
+            es.indices.create(index=physical, body=DOC_INDEX_SETTINGS)
+        es.indices.put_alias(index=physical, name=name)
+        return True
+    es.indices.create(index=name, body=DOC_INDEX_SETTINGS)
+    return True
 
 
 def migrate_legal_mapping(es: Elasticsearch, *, index: str) -> list[str]:
@@ -111,8 +210,9 @@ def migrate_legal_mapping(es: Elasticsearch, *, index: str) -> list[str]:
 
 
 def delete_index(es: Elasticsearch) -> None:
-    with contextlib.suppress(NotFoundError):
-        es.indices.delete(index=settings.es_index)
+    for index in (settings.es_index, doc_index_name()):
+        with contextlib.suppress(NotFoundError):
+            es.indices.delete(index=index)
 
 
 def switch_read_alias(es: Elasticsearch, new_index: str) -> list[str]:
@@ -121,17 +221,24 @@ def switch_read_alias(es: Elasticsearch, new_index: str) -> list[str]:
     모델·차원이 다른 물리 인덱스(예: pkb_documents_v2)를 미리 채운 뒤 호출하면
     검색 경로가 무중단으로 새 인덱스를 보게 된다. 이전 alias 대상 목록을 반환한다.
     물리 인덱스가 alias 이름을 점유 중이면 에러 — 물리 삭제는 사용자가 명시적으로 한다.
+    문서 색인 alias('<alias>_docs')도 '<new_index>_docs'로 같은 요청에서 옮긴다.
     """
     alias = settings.es_index
+    doc_alias, new_docs = doc_index_name(), f"{new_index}{DOC_INDEX_SUFFIX}"
     if not es.indices.exists(index=new_index):
         raise ValueError(f"대상 인덱스가 없습니다: {new_index}")
     if new_index == alias:
         raise ValueError(f"대상이 alias 이름과 같습니다: {new_index}")
-    if es.indices.exists(index=alias) and not es.indices.exists_alias(name=alias):
+    if not es.indices.exists(index=new_docs):
         raise ValueError(
-            f"'{alias}'는 alias가 아니라 물리 인덱스입니다. 먼저 데이터를 새 물리 인덱스로 "
-            f"옮기고 '{alias}'를 삭제한 뒤 다시 실행하세요."
+            f"대상의 문서 색인이 없습니다: {new_docs}. ES_INDEX={new_index}로 `pkb doc-index`를 먼저 실행하세요."
         )
+    for name in (alias, doc_alias):
+        if es.indices.exists(index=name) and not es.indices.exists_alias(name=name):
+            raise ValueError(
+                f"'{name}'는 alias가 아니라 물리 인덱스입니다. 먼저 데이터를 새 물리 인덱스로 "
+                f"옮기고 '{name}'를 삭제한 뒤 다시 실행하세요."
+            )
     actions: list[dict] = []
     old_targets: list[str] = []
     if es.indices.exists_alias(name=alias):
@@ -139,7 +246,13 @@ def switch_read_alias(es: Elasticsearch, new_index: str) -> list[str]:
         actions.extend(
             {"remove": {"index": old, "alias": alias}} for old in old_targets
         )
+    if es.indices.exists_alias(name=doc_alias):
+        actions.extend(
+            {"remove": {"index": old, "alias": doc_alias}}
+            for old in sorted(es.indices.get_alias(name=doc_alias))
+        )
     actions.append({"add": {"index": new_index, "alias": alias}})
+    actions.append({"add": {"index": new_docs, "alias": doc_alias}})
     es.indices.update_aliases(actions=actions)
     return old_targets
 
@@ -160,34 +273,38 @@ def add_chunks(
     return len(chunks)
 
 
+def _doc_chunk_sources(es: Elasticsearch, doc_id: str, source_excludes: list[str]) -> list[dict]:
+    """doc_id의 청크 source를 chunk_index 순으로 끝까지 읽는다. 색인이 없으면 NotFoundError."""
+    sources: list[dict] = []
+    search_after: list | None = None
+    while True:
+        kwargs = {
+            "index": settings.es_index,
+            "query": {"term": {"doc_id": doc_id}},
+            "size": _SEARCH_PAGE_SIZE,
+            "source_excludes": source_excludes,
+            "sort": [{"chunk_index": "asc"}],
+        }
+        if search_after is not None:
+            kwargs["search_after"] = search_after
+        res = es.search(**kwargs)
+        hits = res["hits"]["hits"]
+        sources.extend(hit["_source"] for hit in hits)
+        if len(hits) < _SEARCH_PAGE_SIZE or not hits or "sort" not in hits[-1]:
+            break
+        search_after = hits[-1]["sort"]
+    return sources
+
+
 def get_existing_chunks(es: Elasticsearch, doc_id: str) -> dict[int, dict]:
     """{chunk_index: source dict (excluding embedding+content)} 반환.
     빈 dict면 신규 문서 또는 인덱스 미존재.
     """
-    chunks: dict[int, dict] = {}
-    search_after: list | None = None
     try:
-        while True:
-            kwargs = {
-                "index": settings.es_index,
-                "query": {"term": {"doc_id": doc_id}},
-                "size": _SEARCH_PAGE_SIZE,
-                "source_excludes": ["embedding", "content"],
-                "sort": [{"chunk_index": "asc"}],
-            }
-            if search_after is not None:
-                kwargs["search_after"] = search_after
-            res = es.search(**kwargs)
-            hits = res["hits"]["hits"]
-            for hit in hits:
-                source = hit["_source"]
-                chunks[source["chunk_index"]] = source
-            if len(hits) < _SEARCH_PAGE_SIZE or not hits or "sort" not in hits[-1]:
-                break
-            search_after = hits[-1]["sort"]
+        sources = _doc_chunk_sources(es, doc_id, ["embedding", "content"])
     except NotFoundError:
         return {}
-    return chunks
+    return {source["chunk_index"]: source for source in sources}
 
 
 def get_chunk_embeddings(
@@ -237,24 +354,115 @@ def apply_chunk_delta(
         ops.append({"delete": {"_index": settings.es_index, "_id": f"{doc_id}_{idx}"}})
 
     if ops:
-        resp = es.bulk(operations=ops, refresh=True)
-        if resp.get("errors"):
-            first_err = next(
-                (
-                    item[op]["error"]
-                    for item in resp.get("items", [])
-                    for op in item
-                    if "error" in item[op]
-                ),
-                None,
-            )
-            raise RuntimeError(f"bulk delta failed: {first_err}")
+        _bulk(es, ops, "bulk delta")
 
     return {
         "indexed": len(new_chunks),
         "updated": len(metadata_updates),
         "deleted": len(delete_indices),
     }
+
+
+def _bulk(es: Elasticsearch, ops: list[dict], what: str) -> None:
+    """bulk 1회. 항목 하나라도 실패하면 첫 오류로 RuntimeError."""
+    resp = es.bulk(operations=ops, refresh=True)
+    if resp.get("errors"):
+        first_err = next(
+            (
+                item[op]["error"]
+                for item in resp.get("items", [])
+                for op in item
+                if "error" in item[op]
+            ),
+            None,
+        )
+        raise RuntimeError(f"{what} failed: {first_err}")
+
+
+def build_document_row(chunks: list[dict]) -> dict:
+    """한 문서의 청크(임베딩 포함)로 문서 색인 행을 만든다.
+
+    메타데이터는 문서 단위라 모든 청크에 같으므로 가장 앞 슬롯에서 옮긴다. doc_vector는
+    청크 벡터 평균의 L2 정규화 — 합과 평균은 방향이 같아 합을 정규화한다. 벡터가 없는
+    구 청크만 있으면 doc_vector를 넣지 않는다.
+    """
+    first = min(chunks, key=lambda chunk: chunk["chunk_index"])
+    row = {field: first[field] for field in DOC_ROW_FIELDS if first.get(field) is not None}
+    row["chunk_count"] = len(chunks)
+    vectors = [chunk["embedding"] for chunk in chunks if chunk.get("embedding")]
+    if vectors:
+        total = [sum(column) for column in zip(*vectors, strict=True)]
+        norm = math.sqrt(sum(value * value for value in total))
+        if norm > 0:
+            row["doc_vector"] = [value / norm for value in total]
+    return row
+
+
+# 행에는 문서 벡터가 들어 있어 묶음이 크면 메모리를 많이 쓴다 (1024차원 × 200행 ≈ 수 MB).
+_DOC_ROW_BATCH = 200
+
+
+def refresh_document_rows(es: Elasticsearch, doc_ids: Iterable[str]) -> int:
+    """청크 색인의 현재 상태로 문서 색인 행을 다시 쓴다. 청크가 없는 문서는 행을 지운다.
+
+    청크에 저장된 벡터를 읽으므로 재임베딩하지 않는다. 문서 색인이 없으면(`pkb doc-index`
+    전) 아무것도 하지 않는다. 쓴 행 수를 반환한다.
+    """
+    index = doc_index_name()
+    if not es.indices.exists(index=index):
+        return 0
+    written = 0
+    ops: list[dict] = []
+    for doc_id in dict.fromkeys(doc_ids):
+        try:
+            chunks = _doc_chunk_sources(es, doc_id, ["content"])
+        except NotFoundError:
+            chunks = []
+        if chunks:
+            ops.extend([{"index": {"_index": index, "_id": doc_id}}, build_document_row(chunks)])
+            written += 1
+        else:
+            ops.append({"delete": {"_index": index, "_id": doc_id}})
+        if len(ops) >= _DOC_ROW_BATCH * 2:
+            _bulk(es, ops, "document rows")
+            ops = []
+    if ops:
+        _bulk(es, ops, "document rows")
+    return written
+
+
+def backfill_document_index(es: Elasticsearch) -> dict:
+    """청크 색인에서 문서 색인을 만들고 채운다. 청크가 없는 행은 지운다."""
+    created = create_doc_index(es)
+    doc_ids = [bucket["key"]["doc_id"] for bucket in _composite_buckets(es, "ids", query={"match_all": {}})]
+    written = refresh_document_rows(es, doc_ids)
+    rows = {
+        bucket["key"]["doc_id"]
+        for bucket in _composite_buckets(es, "ids", query={"match_all": {}}, index=doc_index_name())
+    }
+    orphans = sorted(rows - set(doc_ids))
+    refresh_document_rows(es, orphans)
+    return {"created": created, "documents": written, "removed": len(orphans)}
+
+
+def list_categories(es: Elasticsearch, include_archived: bool = False) -> dict[str, int]:
+    """카테고리별 문서 수. 문서 색인 집계 한 번이라 문서 수와 무관하게 빠르다."""
+    index = doc_index_name()
+    if not es.indices.exists(index=index):
+        raise ValueError("문서 색인이 없습니다. 서버에서 `uv run pkb doc-index`로 채우세요.")
+    query = (
+        {"match_all": {}}
+        if include_archived
+        else {"bool": {"must_not": {"exists": {"field": "archived_at"}}}}
+    )
+    result = es.search(
+        index=index,
+        query=query,
+        size=0,
+        aggs={"categories": {"terms": {"field": "category", "size": _AGG_PAGE_SIZE}}},
+    )
+    buckets = result["aggregations"]["categories"]["buckets"]
+    return {bucket["key"]: bucket["doc_count"] for bucket in sorted(buckets, key=lambda b: b["key"])}
 
 
 def count_chunks_without_hash(es: Elasticsearch) -> int:
@@ -276,6 +484,7 @@ def delete_document(es: Elasticsearch, doc_id: str) -> int:
         query={"term": {"doc_id": doc_id}},
         refresh=True,
     )
+    refresh_document_rows(es, [doc_id])
     log_change("delete", doc_id, chunks=result["deleted"])
     return result["deleted"]
 
@@ -308,8 +517,9 @@ def _composite_buckets(
     *,
     query: dict,
     sub_aggs: dict | None = None,
+    index: str | None = None,
 ):
-    """doc_id composite aggregation을 after_key로 끝까지 순회."""
+    """doc_id composite aggregation을 after_key로 끝까지 순회. index 기본값은 청크 색인."""
     after: dict | None = None
     while True:
         composite: dict = {
@@ -322,7 +532,7 @@ def _composite_buckets(
         if sub_aggs:
             aggregation["aggs"] = sub_aggs
         result = es.search(
-            index=settings.es_index,
+            index=index or settings.es_index,
             query=query,
             aggs={name: aggregation},
             size=0,
@@ -351,6 +561,7 @@ def archive_document(
         script={"source": " ".join(source_parts), "lang": "painless", "params": params},
         refresh=True,
     )
+    refresh_document_rows(es, [doc_id])
     log_change("archive", doc_id, chunks=result["updated"], reason=reason)
     return result["updated"]
 
@@ -373,6 +584,7 @@ def restore_document(es: Elasticsearch, doc_id: str) -> int:
         script={"source": script_source, "lang": "painless"},
         refresh=True,
     )
+    refresh_document_rows(es, [doc_id])
     log_change("restore", doc_id, chunks=result["updated"])
     return result["updated"]
 
@@ -384,11 +596,18 @@ def purge_archived(es: Elasticsearch, before: datetime | None = None) -> int:
     must: list[dict] = [{"exists": {"field": "archived_at"}}]
     if before is not None:
         must.append({"range": {"archived_at": {"lt": before.isoformat()}}})
+    query = {"bool": {"must": must}}
+    doc_ids = (
+        [bucket["key"]["doc_id"] for bucket in _composite_buckets(es, "ids", query=query)]
+        if es.indices.exists(index=doc_index_name())
+        else []
+    )
     result = es.delete_by_query(
         index=settings.es_index,
-        query={"bool": {"must": must}},
+        query=query,
         refresh=True,
     )
+    refresh_document_rows(es, doc_ids)
     log_change("purge", "*", chunks=result["deleted"])
     return result["deleted"]
 
@@ -398,7 +617,11 @@ def list_documents(
     category: str | None = None,
     include_archived: bool = False,
 ) -> list[dict]:
-    """저장된 고유 문서 목록 반환. 기본적으로 archived 문서는 제외."""
+    """저장된 고유 문서 목록 반환. 기본적으로 archived 문서는 제외.
+
+    문서 색인이 있으면 그 행을 읽는다. 없으면(`pkb doc-index` 전) 청크를 doc_id로 묶어
+    세는데, 문서가 많으면 카테고리 없이 부를 때 시간 초과가 난다. 반환 형태는 같다.
+    """
     clauses: list[dict] = []
     if category:
         clauses.append({"term": {"category": category}})
@@ -409,37 +632,43 @@ def list_documents(
     else:
         query = {"match_all": {}}
 
+    if es.indices.exists(index=doc_index_name()):
+        return _list_document_rows(es, query)
+
     docs = []
     sub_aggs = {
-        "meta": {
-            "top_hits": {
-                "size": 1,
-                "_source": [
-                    "doc_id",
-                    "source_path",
-                    "category",
-                    "title",
-                    "tags",
-                    "date_modified",
-                    "expires_at",
-                    "schema_version",
-                    "doc_type",
-                    "canonical_id",
-                    "status",
-                    "authority",
-                    "aliases",
-                    "source_ids",
-                    "supports",
-                    "concept_ids",
-                ],
-            }
-        },
+        "meta": {"top_hits": {"size": 1, "_source": list(_LIST_FIELDS)}},
         "chunk_count": {"value_count": {"field": "chunk_index"}},
     }
     for bucket in _composite_buckets(es, "docs", query=query, sub_aggs=sub_aggs):
         hit = bucket["meta"]["hits"]["hits"][0]["_source"]
         hit["chunks"] = bucket["chunk_count"]["value"]
         docs.append(hit)
+    return docs
+
+
+def _list_document_rows(es: Elasticsearch, query: dict) -> list[dict]:
+    """문서 색인 행을 doc_id 순으로 끝까지 읽어 list_documents 형태로 돌려준다."""
+    docs: list[dict] = []
+    search_after: list | None = None
+    while True:
+        kwargs = {
+            "index": doc_index_name(),
+            "query": query,
+            "size": _SEARCH_PAGE_SIZE,
+            "source_includes": [*_LIST_FIELDS, "chunk_count"],
+            "sort": [{"doc_id": "asc"}],
+        }
+        if search_after is not None:
+            kwargs["search_after"] = search_after
+        hits = es.search(**kwargs)["hits"]["hits"]
+        for hit in hits:
+            source = hit["_source"]
+            source["chunks"] = source.pop("chunk_count", 0)
+            docs.append(source)
+        if len(hits) < _SEARCH_PAGE_SIZE:
+            break
+        search_after = hits[-1]["sort"]
     return docs
 
 

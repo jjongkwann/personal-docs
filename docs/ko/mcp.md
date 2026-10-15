@@ -182,12 +182,16 @@ uv run pkb doctor
 | `write_file` | `data/` 하위 `.md` 작성. 기본값으로 작성 직후 자동 인제스트 |
 | `read_file` | `data/**.md` 파일의 디스크 원문과 `content_hash` 반환 (`get_document`는 ES 청크를 돌려주므로 원문으로 되돌릴 수 없음) |
 | `patch_file` | 기존 문서에서 `old`와 정확히 일치하는 한 곳을 `new`로 교체 — 전체 파일을 다시 보내지 않는 부분 편집. `write_file`과 같은 정책 검사와 낙관적 잠금(`expected_hash`) 적용 |
-| `list_documents` | ES에 저장된 문서 목록. `date_modified` 내림차순으로 상위 `limit`(기본 50)개만 표시. `limit<=0`이면 전체 |
+| `list_documents` | ES에 저장된 문서 목록. `date_modified` 내림차순으로 상위 `limit`(기본 50)개만 표시. `limit<=0`이면 전체. 문서 단위 색인이 있으면 그 행을 읽어 `category` 없이 불러도 시간 초과가 나지 않음 |
+| `list_categories` | 문서 단위 색인 집계 한 번으로 `{"documents": N, "categories": {이름: 문서 수}}` 반환. 카테고리 목록만 필요하면 `list_documents`·`doctor` 대신 사용 |
+| `related_documents` | 문서 벡터(청크 임베딩 평균)가 주어진 `doc_id`와 가까운 다른 문서 반환(자기 자신 제외). `search_knowledge`와 같은 범위 필터 사용 |
 | `list_files` | `data/` 폴더의 파일·하위 폴더 목록. 색인되지 않은 `_origin` 첨부파일도 포함하며 `next_offset`으로 페이지 조회 |
 | `get_file` | `data/` 원본 파일을 MCP embedded resource의 base64 blob으로 전송. 파일명·MIME·크기·SHA-256 포함, 파일당 최대 10 MiB |
+| `put_attachment` | 볼트 밖 첨부 폴더(`ATTACHMENTS_ROOT`, 예: 회의 오디오)에 최대 4 MiB 조각으로 업로드. 마지막 조각의 SHA-256이 맞아야 파일이 생기고, 이미 있는 파일은 덮어쓰지 않음. 색인하지 않음 |
+| `get_attachment` | `ATTACHMENTS_ROOT` 아래 파일을 최대 4 MiB 조각으로 내려받음. `data_base64`를 담은 JSON 텍스트, 마지막 조각에 파일 SHA-256 |
 | `add_document` | `data/` 하위 파일 인제스트 (md/txt/pdf/docx/pptx/xlsx/html) |
 | `convert_and_ingest` | 외부 PDF/DOCX/PPTX/XLSX/HTML을 `.md`로 변환해 `data/<category>/`에 저장하고 인제스트. 변환본 상단에 provenance frontmatter(`source`·`converted_from`·`converted_at`) 기록, PDF는 페이지 마커(`## p.N`) 보존 |
-| `sync_corpus` | `data/` 코퍼스를 ES와 재조정: 업서트 + 코퍼스에 없는 문서 정리 (`confirm_prune=True`로 대량 삭제 승인) |
+| `sync_corpus` | `data/` 코퍼스를 ES와 재조정: 업서트 + 코퍼스에 없는 문서 정리 (`confirm_prune=True`로 대량 삭제 승인). Syncthing 충돌 사본(`*.sync-conflict-*`)은 색인하지 않고, 색인에 남아 있으면 확인 없이 지움 |
 | `sync_obsidian` | Obsidian 볼트를 ES와 재조정: 업서트 + 볼트에 없는 문서 정리. 카테고리는 볼트 첫 폴더명에서 동적으로 파생(`data/`와 동일 규칙). OBSIDIAN_PATH 미설정 시 잔존 `obsidian/*` 전체 정리 제안 (`confirm_prune=True` 필요) |
 | `get_document` | 문서 조회. 기본(`include_content=False`)은 메타(제목·카테고리·수정일) + 청크 목차만 반환. `chunk_range`(예: `"3-7"`)로 해당 구간만 전문, `include_content=True`면 전체 전문 |
 | `reindex_document` | 특정 원본 문서를 다시 읽어 ES에 재인제스트 |
@@ -198,6 +202,44 @@ uv run pkb doctor
 `search_knowledge(expand_context=N)`은 전후 N개 청크를 붙입니다(0~4, 생략 시
 `EXPAND_CONTEXT`). `max_context_tokens`(256~32000, 기본 4000)는 출처 표기·개념 어휘·본문·
 주변 문맥을 합친 출력 예산입니다. `top_k`나 확장 범위를 늘려도 이 예산을 넘기지 않습니다.
+
+### 항목 메타데이터, 범위 필터, 문서 단위 색인
+
+인제스트는 다음 frontmatter 키를 모든 청크에 색인합니다. 키가 없는 노트는 그대로입니다.
+
+| 키 | 뜻 |
+|---|---|
+| `source_type` | `meeting`, `event`, `email`, `drive`, `note` (소문자로 저장) |
+| `occurred_at` | 항목이 일어난 날짜·시각 (ISO 8601). 해석할 수 없으면 버리고 쓰기 경고를 냄 |
+| `people` | 참석자, 보낸·받은 사람, 소유자. 이메일은 소문자로, 이름은 그대로 |
+| `source_id`, `source_link` | 원본 서비스의 ID와 URL. `source_link`는 저장만 하고 검색하지 않음 |
+| `links` | 이어진 항목의 doc_id |
+| `attachments` | `ATTACHMENTS_ROOT` 기준 상대 경로 |
+
+`search_knowledge`와 `related_documents`는 같은 범위 필터를 받고, BM25와 kNN 양쪽에
+적용합니다: `doc_ids`(이 문서들 안에서만, 예: 회의에 연결된 항목), `source_types`, `people`,
+`date_from`/`date_to`(`occurred_at` 기준 양 끝 포함. 시각 없이 날짜만 주면 UTC 하루 전체이며,
+`occurred_at`이 없는 문서는 빠짐), `path_prefix`(doc_id 접두사). 빈 목록은 제한 없음입니다.
+
+문서 단위 색인(`<ES_INDEX>_docs`)은 문서마다 한 행으로 메타데이터, 청크 수, `doc_vector`(청크
+임베딩 평균의 L2 정규화)를 둡니다. 한 번 생기면 인제스트·삭제·아카이브·복구·purge가 함께
+고칩니다. 저장된 청크 벡터로 만들고 채우려면(재임베딩 없음) `uv run pkb doc-index`를 실행합니다.
+그 전에는 `list_documents`가 청크 집계로 돌아가고, `list_categories`·`related_documents`는
+실행을 안내하는 오류를 냅니다.
+
+### 볼트 밖 첨부
+
+`ATTACHMENTS_ROOT`(예: `/Volumes/PKBData/attachments`)를 설정하면 `put_attachment`와
+`get_attachment`가 켜집니다. 경로는 그 폴더 기준 상대 경로이며, 절대경로·`..`·숨김 성분·
+폴더 밖으로 풀리는 경로는 거부합니다.
+
+올리기: 조각을 차례로 보내고 `offset`은 서버가 지금까지 받은 바이트 수(앞 응답의 `received`)와
+같아야 합니다. `offset=0`은 처음부터 다시 받습니다. 마지막 조각에는 전체 파일의 `sha256`이
+필요하며, 맞으면 파일을 제자리로 원자적으로 옮기고 다르면 받은 내용을 버립니다. 이미 파일이
+있는 경로는 덮어쓰지 않습니다 — 같은 `sha256`으로 다시 보내면 완료로 응답합니다.
+
+내려받기: `eof`가 true가 될 때까지 `get_attachment(path, offset, length)`를 부르고 각
+`data_base64`를 디코딩해 이어 붙인 뒤 마지막 응답의 `sha256`으로 검증합니다.
 
 ### 다른 환경에서 원본 파일 받기
 
@@ -256,12 +298,19 @@ Graph RAG의 MCP-first 흐름은 `graph_list_chunks`로 청크를 읽고, Claude
 search_knowledge(query, category="", top_k=5, include_archived=False,
                  include_obsidian=True, query_variants=[], profile="all",
                  canonical_group=True, canonical_boost=0.15,
-                 expand_context=None, max_context_tokens=4000)
+                 expand_context=None, max_context_tokens=4000,
+                 doc_ids=None, source_types=None, people=None,
+                 date_from=None, date_to=None, path_prefix=None)
 write_file(file_path, content, ingest=False, dry_run=False,
            expected_hash="", strict_policy=True)
 list_documents(category="", include_archived=False, limit=50)
+list_categories(include_archived=False)
+related_documents(doc_id, top_k=5, include_archived=False, doc_ids=None, source_types=None,
+                  people=None, date_from=None, date_to=None, path_prefix=None)
 list_files(directory="data", offset=0, limit=100)
 get_file(file_path)
+put_attachment(path, data_base64, offset, total_size, sha256="")
+get_attachment(path, offset=0, length=4194304)
 add_document(file_path, tags="")
 convert_and_ingest(input_path, category, output_name="", ingest=True)
 get_document(doc_id, include_content=False, chunk_range="")

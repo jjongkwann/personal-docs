@@ -47,7 +47,7 @@ def _local_search(monkeypatch, hits=None):
         batches.append(list(texts))
         return [[1.0] for _ in texts]
 
-    monkeypatch.setattr("pkb.retrieve.embed", embed)
+    monkeypatch.setattr("pkb.retrieve.embed_queries", embed)
     monkeypatch.setattr("pkb.retrieve._rrf_search", lambda *args, **kwargs: deepcopy(hits or [HIT]))
     monkeypatch.setattr("pkb.eval._git_revision", lambda: {"commit": "test", "dirty": False})
     return batches

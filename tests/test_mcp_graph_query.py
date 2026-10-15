@@ -61,7 +61,7 @@ def test_graph_explain_and_path_return_json(graph_db):
 
 
 def test_graph_query_uses_local_query_embedding(graph_db, monkeypatch):
-    monkeypatch.setattr("pkb.embeddings.embed", lambda texts: [[1.0, 0.0]])
+    monkeypatch.setattr("pkb.embeddings.embed_queries", lambda texts: [[1.0, 0.0]])
 
     result = json.loads(graph_query("lexical rank", depth=1, seed_limit=1))
 
@@ -82,5 +82,5 @@ def test_graph_query_rejects_empty_text_before_embedding(graph_db, monkeypatch):
     def fail_if_called(_texts):
         raise AssertionError("embedding should not run")
 
-    monkeypatch.setattr("pkb.embeddings.embed", fail_if_called)
+    monkeypatch.setattr("pkb.embeddings.embed_queries", fail_if_called)
     assert "오류: ValueError" in graph_query("   ")

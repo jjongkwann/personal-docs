@@ -170,6 +170,22 @@ target index doesn't exist, if it equals the alias name, or if `ES_INDEX` is cur
 index rather than an alias (`store.switch_read_alias`). The old physical index is never deleted —
 verify the new one, then remove it yourself.
 
+The document-level index follows the chunk index: `<ES_INDEX>_docs` is created next to a fresh
+chunk index (so step 1 above fills `pkb_documents_v2_docs` too), and `index-switch` moves the
+`<alias>_docs` alias in the same request. It fails if the target's document index is missing.
+
+### Document-Level Index (`doc-index`)
+
+```bash
+uv run pkb doc-index
+```
+
+Creates `<ES_INDEX>_docs` if it does not exist and rewrites one row per document from the chunk
+index: metadata, chunk count, and `doc_vector` (L2-normalized mean of the stored chunk embeddings,
+so nothing is re-embedded). Rows for documents no longer in the chunk index are removed. After the
+first run, ingest, delete, archive, restore and purge keep the rows in sync. `list_categories`
+and `related_documents` need it; `list_documents` uses it when present.
+
 ---
 
 ## Sync (Reconciliation)
@@ -345,6 +361,11 @@ Other tuning options in `pkb.config.Settings` (overridable via environment varia
 | `MCP_HOST` | `127.0.0.1` | Bind address. Set to `0.0.0.0` only to reach the server from another machine over a trusted LAN/VPN — there is no authentication and `write_file` can write anywhere in the vault. |
 | `WARMUP_ON_START` | `false` | Preload the models when the MCP server starts. Left off, the server idles at ~50MB until the first search |
 | `MODEL_IDLE_SECONDS` | `300` | Seconds after the last use before the embedding/reranker models are unloaded to return memory. The next call loads them again. `0` keeps them loaded |
+| `EMBEDDING_TRUST_REMOTE_CODE` | `false` | Run code from the model repository (needed by `jinaai/jina-embeddings-v5-text-small`). Only for models you trust |
+| `EMBEDDING_TASK` | (empty) | `encode(task=...)` adapter name, e.g. `retrieval` for jina v5 |
+| `EMBEDDING_QUERY_PROMPT` / `EMBEDDING_DOCUMENT_PROMPT` | (empty) | `prompt_name` used for search queries / indexed text, e.g. `query` / `document` for jina v5 |
+| `EMBEDDING_NORMALIZE` | `false` | Pass `normalize_embeddings=True` to `encode` (`true` for jina v5). Task, document prompt and normalization are part of the embedding fingerprint, so changing them re-embeds on the next sync |
+| `ATTACHMENTS_ROOT` | (empty) | Folder outside the vault for `put_attachment`/`get_attachment` (e.g. meeting audio). Empty disables both tools |
 
 ## Chunking Strategy
 

@@ -119,7 +119,7 @@ def test_cli_concept_and_query_modes(graph_db, tmp_path, monkeypatch):
     assert "nodes=2" in result.stdout
     assert out.read_text(encoding="utf-8").startswith("<!doctype html>")
 
-    monkeypatch.setattr("pkb.embeddings.embed", lambda texts: [[1.0, 0.0]])
+    monkeypatch.setattr("pkb.embeddings.embed_queries", lambda texts: [[1.0, 0.0]])
     result = runner.invoke(app, ["graph", "map", "--query", "lexical ranking", "--out", str(out)])
     assert result.exit_code == 0, result.output
     assert "Evidence Map 생성" in result.stdout

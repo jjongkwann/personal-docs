@@ -132,7 +132,7 @@ def test_store_concepts_reports_scoped_alias_conflict(monkeypatch, tmp_path):
 
     db_path = str(tmp_path / "graph.sqlite")
     monkeypatch.setattr("pkb.config.settings.graph_db_path", db_path)
-    monkeypatch.setattr("pkb.embeddings.embed", lambda texts: [[0.0] for _ in texts])
+    monkeypatch.setattr("pkb.embeddings.embed_documents", lambda texts: [[0.0] for _ in texts])
     monkeypatch.setattr("pkb.graph.services._chunk_versions", lambda keys: {key: ("h", "ih") for key in keys})
 
     class _NoES:

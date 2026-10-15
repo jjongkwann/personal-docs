@@ -156,7 +156,7 @@ def test_linear_fusion_endpoint_excludes_zero_weight_candidates_even_with_rerank
             assert pairs == [("q", expected)]
             return [1.0]
 
-    monkeypatch.setattr("pkb.retrieve.embed", lambda queries: [[0.0] for _ in queries])
+    monkeypatch.setattr("pkb.retrieve.embed_queries", lambda queries: [[0.0] for _ in queries])
     monkeypatch.setattr("pkb.rerank._reranker", IdleModel(FakeReranker))
     result = hybrid_search(
         FakeES(), "q", top_k=2, rerank=True, fusion="linear", lexical_weight=weight, log=False,
@@ -186,7 +186,7 @@ def _patch_fusion(monkeypatch, hits_by_query: dict[str, list[dict]]) -> dict:
         calls["vectors"].append(query_vector)
         return [dict(h) for h in hits_by_query.get(query_text, [])]
 
-    monkeypatch.setattr("pkb.retrieve.embed", fake_embed)
+    monkeypatch.setattr("pkb.retrieve.embed_queries", fake_embed)
     monkeypatch.setattr("pkb.retrieve._rrf_search", fake_rrf)
     return calls
 

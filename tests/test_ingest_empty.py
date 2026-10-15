@@ -38,6 +38,7 @@ def test_frontmatter_only_document_removes_old_chunks_and_graph(monkeypatch, tmp
         )
 
     es = MagicMock()
+    es.indices.exists.return_value = False  # 문서 색인 없음 — 청크 bulk만 본다
     es.delete_by_query.return_value = {"deleted": 2}
     monkeypatch.setattr("pkb.store.get_client", lambda: es)
     stats = ingest_files([note], tmp_path, doc_id_prefix="data/")
@@ -56,6 +57,7 @@ def test_empty_text_document_deletes_without_graph(monkeypatch, tmp_path, name, 
     note.write_text(text, encoding="utf-8")
     monkeypatch.setattr(settings, "graph_db_path", str(tmp_path / "absent.sqlite"))
     es = MagicMock()
+    es.indices.exists.return_value = False  # 문서 색인 없음 — 청크 bulk만 본다
     es.delete_by_query.return_value = {"deleted": 1}
     monkeypatch.setattr("pkb.store.get_client", lambda: es)
     assert ingest_files([note], tmp_path)["deleted"] == 1

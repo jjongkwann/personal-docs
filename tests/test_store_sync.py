@@ -102,6 +102,7 @@ def test_list_documents_follows_composite_after_key():
         }
 
     es = MagicMock()
+    es.indices.exists.return_value = False  # 문서 색인 전 — 청크 집계로 센다
     es.search.side_effect = [
         {
             "aggregations": {

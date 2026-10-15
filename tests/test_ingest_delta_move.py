@@ -48,6 +48,7 @@ def _existing_hit(chunk: dict) -> dict:
 
 
 def _setup(monkeypatch, es, new_chunks, embed_calls):
+    es.indices.exists.return_value = False  # 문서 색인 없음 — 청크 bulk만 본다
     monkeypatch.setattr("pkb.store.get_client", lambda: es)
     monkeypatch.setattr(
         "pkb.ingest.process_file",
@@ -58,7 +59,7 @@ def _setup(monkeypatch, es, new_chunks, embed_calls):
         embed_calls.append(list(texts))
         return [[float(len(t))] for t in texts]
 
-    monkeypatch.setattr("pkb.embeddings.embed", fake_embed)
+    monkeypatch.setattr("pkb.embeddings.embed_documents", fake_embed)
 
 
 def test_front_insert_moves_shifted_chunks_without_reembedding(monkeypatch):
@@ -256,6 +257,7 @@ def test_multiple_files_share_one_embedding_batch(monkeypatch):
         chunks_by_name[name] = [chunk]
 
     es = MagicMock()
+    es.indices.exists.return_value = False  # 문서 색인 없음 — 청크 bulk만 본다
     es.search.side_effect = [
         {"hits": {"hits": []}},
         {"hits": {"hits": []}},
@@ -272,7 +274,7 @@ def test_multiple_files_share_one_embedding_batch(monkeypatch):
         embed_calls.append(list(texts))
         return [[float(len(text))] for text in texts]
 
-    monkeypatch.setattr("pkb.embeddings.embed", fake_embed)
+    monkeypatch.setattr("pkb.embeddings.embed_documents", fake_embed)
 
     stats = ingest_files([Path("a.md"), Path("b.md")], Path("."))
 

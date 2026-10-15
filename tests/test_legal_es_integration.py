@@ -51,7 +51,7 @@ def test_real_es_historical_hybrid_search_variants_neighbors_and_preservation(is
     es = isolated_es
     index_name = f"pkb-legal-integration-{uuid4().hex}"
     monkeypatch.setattr(settings, "es_index", index_name)
-    monkeypatch.setattr("pkb.retrieve.embed", lambda queries: [VECTOR for _ in queries])
+    monkeypatch.setattr("pkb.retrieve.embed_queries", lambda queries: [VECTOR for _ in queries])
     index_settings = copy.deepcopy(INDEX_SETTINGS)
     index_settings["mappings"]["properties"]["embedding"]["dims"] = len(VECTOR)
     index_settings["settings"]["number_of_replicas"] = 0

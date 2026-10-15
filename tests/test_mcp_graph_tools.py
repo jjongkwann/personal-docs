@@ -144,7 +144,7 @@ def test_graph_merge_reports_summary_and_skipped(graph_db):
 def test_graph_store_concepts_reports_unresolved_relations(graph_db, monkeypatch):
     monkeypatch.setattr("pkb.graph.services._chunk_versions", lambda keys: {key: ("h", "ih") for key in keys})
     monkeypatch.setattr(
-        "pkb.embeddings.embed", lambda texts: [[0.0, 0.0, 0.0] for _ in texts]
+        "pkb.embeddings.embed_documents", lambda texts: [[0.0, 0.0, 0.0] for _ in texts]
     )
 
     # 추출 마커 기록용 ES 조회는 no-op 스텁 (마커는 test_graph_incremental.py가 커버)
@@ -181,7 +181,7 @@ def test_relations_between_existing_concepts_survive_empty_concepts(graph_db, mo
     담긴 청크는 관계가 통째로 버려졌다 — 미해소 경고조차 없이 조용히.
     """
     monkeypatch.setattr(
-        "pkb.embeddings.embed", lambda texts: [[0.0, 0.0, 0.0] for _ in texts]
+        "pkb.embeddings.embed_documents", lambda texts: [[0.0, 0.0, 0.0] for _ in texts]
     )
     monkeypatch.setattr("pkb.graph.services._chunk_versions", lambda keys: {key: ("h", "ih") for key in keys})
 

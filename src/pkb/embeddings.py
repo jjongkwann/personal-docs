@@ -9,6 +9,8 @@ def _load() -> SentenceTransformer:
     kwargs: dict = {"device": device}
     if settings.embedding_revision:
         kwargs["revision"] = settings.embedding_revision
+    if settings.embedding_trust_remote_code:
+        kwargs["trust_remote_code"] = True
     if device != "cpu" and settings.embedding_dtype != "float32":
         import torch
 
@@ -26,15 +28,26 @@ def _load() -> SentenceTransformer:
 _model = IdleModel(_load)
 
 
-# ingest_files는 한 번의 embed() 호출에 문서 전체의 변경 청크를 모아 넘긴다(수천 개도 가능).
+# ingest_files는 한 번의 embed_documents() 호출에 문서 전체의 변경 청크를 모아 넘긴다(수천 개도 가능).
 # MPS 캐싱 할당자는 한 encode() 콜 안에서도 내부 배치를 넘길 때마다 블록을 쌓아 두므로,
 # 콜이 끝난 뒤 empty_cache()를 해도 콜 도중의 무한 증가는 못 막는다. 그래서 큰 입력은
 # 여기서 윈도로 쪼개 encode 사이에 캐시를 비운다(8GB mini에서 재색인이 스왑에 잠기던 문제).
 _MPS_ENCODE_WINDOW = 256
 
 
-def embed(texts: list[str]) -> list[list[float]]:
-    """텍스트 리스트를 벡터로 변환."""
+def _encode_options(prompt_name: str) -> dict:
+    """설정이 켠 encode 인자만. 기본 설정이면 빈 dict라 bge-m3 벡터가 예전과 같다."""
+    options: dict = {}
+    if settings.embedding_task:
+        options["task"] = settings.embedding_task
+    if prompt_name:
+        options["prompt_name"] = prompt_name
+    if settings.embedding_normalize:
+        options["normalize_embeddings"] = True
+    return options
+
+
+def _embed(texts: list[str], options: dict) -> list[list[float]]:
     with _model.use() as model:
         is_mps = model.device.type == "mps"
         if is_mps and len(texts) > _MPS_ENCODE_WINDOW:
@@ -47,6 +60,7 @@ def embed(texts: list[str]) -> list[list[float]]:
                     window,
                     batch_size=settings.embedding_batch_size,
                     show_progress_bar=False,
+                    **options,
                 )
                 out.extend(vectors.tolist())
                 torch.mps.empty_cache()
@@ -56,9 +70,20 @@ def embed(texts: list[str]) -> list[list[float]]:
             texts,
             batch_size=settings.embedding_batch_size,
             show_progress_bar=False,
+            **options,
         )
         if is_mps:
             import torch
 
             torch.mps.empty_cache()
     return vectors.tolist()
+
+
+def embed_documents(texts: list[str]) -> list[list[float]]:
+    """색인할 텍스트(청크·개념 설명)를 벡터로 변환."""
+    return _embed(texts, _encode_options(settings.embedding_document_prompt))
+
+
+def embed_queries(texts: list[str]) -> list[list[float]]:
+    """검색 질의 목록을 벡터로 변환. 질의 변형을 한 번에 배치 인코딩한다."""
+    return _embed(texts, _encode_options(settings.embedding_query_prompt))
