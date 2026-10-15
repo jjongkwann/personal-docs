@@ -186,6 +186,103 @@ so nothing is re-embedded). Rows for documents no longer in the chunk index are 
 first run, ingest, delete, archive, restore and purge keep the rows in sync. `list_categories`
 and `related_documents` need it; `list_documents` uses it when present.
 
+### Switching the Embedding Model on a Small Server (`reembed`)
+
+A server with 8 GB of RAM cannot re-embed the whole corpus. Fill the new physical index from a
+machine with a GPU over an SSH tunnel, recompute the concept graph vectors on a copy, then switch
+while the server is stopped.
+
+```bash
+uv run pkb reembed --target <new physical index> [--source <index or alias, default ES_INDEX>]
+                   [--batch-size 256] [--max-batches 0] [--dry-run]
+uv run pkb graph reembed [--db <graph sqlite, default GRAPH_DB_PATH>] [--batch-size 256] [--max-batches 0]
+```
+
+`reembed` copies every chunk of the source into the target with the same `_id` and fields, and
+replaces only `embedding` and `embedding_fingerprint` using the current settings. The fingerprint is
+the one ingest computes under the same settings, so the next `sync` on the server reuses these
+vectors. Rerunning skips chunks that are already done. If the source changed in the meantime, it
+re-embeds changed chunks, copies metadata-only changes with the existing vector and deletes chunks
+that left the source. When every chunk is in place it rebuilds `<target>_docs`, so `index-switch`
+can move both aliases. `--dry-run` only counts the work and does not load the model. Exit code 3
+means it stopped at `--max-batches` and has work left. `graph reembed` recomputes every concept
+vector from `name: description` (the text `graph_store_concepts` embeds), commits per batch and
+records the embedding identity in `graph_meta`. While the recorded identity differs from the
+settings or a run is unfinished, vocabulary lookup, `graph_query`/`graph_map` semantic seeds,
+embedding dedup and storing new concepts fail instead of comparing vectors from two models.
+
+Runbook for bge-m3 → `jinaai/jina-embeddings-v5-text-small`. On an M1 Max (32 GB) the chunks embed at
+about 8 per second, so 16k chunks take 35–40 minutes; 33k concepts take about 10 minutes.
+
+1. On the GPU machine, check out the server's commit, run `uv sync`, and write `jina.env`. Every
+   value below except `ES_HOST` must match the server's `.env`, because the fingerprint covers the
+   model, revision, task, document prompt, normalization and title prefix:
+
+   ```bash
+   ES_HOST=http://127.0.0.1:19200
+   ES_INDEX=pkb_current
+   EMBEDDING_MODEL=jinaai/jina-embeddings-v5-text-small
+   EMBEDDING_DIMS=1024
+   EMBEDDING_TRUST_REMOTE_CODE=true
+   EMBEDDING_TASK=retrieval
+   EMBEDDING_QUERY_PROMPT=query
+   EMBEDDING_DOCUMENT_PROMPT=document
+   EMBEDDING_NORMALIZE=true
+   EMBED_CONTEXT_PREFIX=true
+   GRAPH_DEDUP_THRESHOLD=0.89
+   EMBEDDING_BATCH_SIZE=8
+   ```
+
+   `EMBEDDING_BATCH_SIZE` is not part of the fingerprint. On an M1 Max with jina v5, 8 ran 8.5 chunks/s
+   with a 6.3 GB peak; 32 ran 7.7 chunks/s with a 15.5 GB peak.
+
+2. Open a tunnel to the server's Elasticsearch (it listens on `127.0.0.1:9200`) and fill the new
+   index while the server keeps serving the old one:
+
+   ```bash
+   ssh -N -L 19200:127.0.0.1:9200 <server> &
+   set -a; source jina.env; set +a
+   uv run pkb reembed --target pkb_documents_20261015_jina
+   ```
+
+3. Copy the graph with SQLite's backup command on the server and record the copy's content hash
+   (`.sha3sum` hashes rows, not file bytes). Then move the copy to the GPU machine and recompute the
+   vectors there:
+
+   ```bash
+   # server
+   sqlite3 <GRAPH_DB_PATH> ".backup /tmp/pkb_graph.copy.sqlite"
+   sqlite3 /tmp/pkb_graph.copy.sqlite .sha3sum > /tmp/pkb_graph.sha3
+   # GPU machine, after scp
+   uv run pkb graph reembed --db pkb_graph.copy.sqlite
+   ```
+
+4. Stop the server (`launchctl unload ~/Library/LaunchAgents/dev.jongkwan.pkb-mcp.plist`, and any
+   `pkb watch`). Rerun step 2's `reembed` to pick up writes made since; it should embed only a few
+   chunks.
+5. Swap the graph. `sqlite3 <GRAPH_DB_PATH> .sha3sum` must equal `/tmp/pkb_graph.sha3`; if it does
+   not, the graph changed after the copy, so repeat step 3. Keep the old file:
+   `mv <GRAPH_DB_PATH> <GRAPH_DB_PATH>.bge`, then copy the recomputed file into place.
+6. On the server, update the code, `uv sync`, and put the `jina.env` lines (without `ES_HOST`) in
+   `.env`. Load the model once so the first search does not download it:
+   `uv run python -c "from pkb.embeddings import embed_queries; embed_queries(['warmup'])"`.
+7. On the server, `uv run pkb reembed --target pkb_documents_20261015_jina --dry-run` must report
+   `임베딩 0 · 복사 0 · 삭제 0`. This proves the server's settings produce the fingerprints stored in
+   the new index, so `sync` will not re-embed anything.
+8. `uv run pkb index-switch pkb_documents_20261015_jina` and note the previous index it prints.
+   Switch before starting the server: a server with jina settings reading the bge index gets no
+   error (both have 1024 dimensions), only wrong results.
+9. Start the server (`launchctl load ...`) and refresh the gateway's tool inventory; with MCP
+   ContextForge that is `POST /gateways/<gateway id>/tools/refresh` (see [MCP Integration](mcp.md)).
+10. Verify: `uv run pkb doctor`, a few `uv run pkb query` searches, `uv run pkb graph query "..."`,
+    and `uv run pkb sync`, which should report `embedded=0 added=0` apart from real edits.
+
+Rollback: stop the server, `uv run pkb index-switch <previous index>` (its `_docs` index is still
+there), restore the bge lines in `.env` and the `<GRAPH_DB_PATH>.bge` file, start the server and
+refresh the gateway. Writes made after the switch exist only in the new index; run `uv run pkb sync`
+to ingest them into the old one. Delete the old physical index and its `_docs` yourself once the
+new one has run for a while.
+
 ---
 
 ## Sync (Reconciliation)
@@ -288,6 +385,9 @@ uv run pkb graph affected "BM25" --relation prerequisite_of  # stored-direction 
 # Offline Evidence Map HTML (see docs/graph-rag.md for the full option table)
 uv run pkb graph map --concept "BM25" --open
 
+# Recompute every concept vector after changing the embedding model (resumable; see "Switching the Embedding Model")
+uv run pkb graph reembed --db path/to/pkb_graph.copy.sqlite
+
 # Only run this to fully rebuild the old append-only relations onto an evidence basis
 # Keeps the existing graph, resets only staging evidence and extraction markers
 uv run pkb graph reset-evidence --yes
@@ -386,7 +486,7 @@ Other tuning options in `pkb.config.Settings` (overridable via environment varia
 | `EXPAND_CONTEXT` | `0` | If N>0, attaches N chunks before/after each search result as neighbors (parent context) |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | 500 / 100 | Fixed-size chunking |
 | `GRAPH_DB_PATH` | `data/.graph/pkb_graph.sqlite` | SQLite concept graph file |
-| `GRAPH_DEDUP_THRESHOLD` | `0.88` | Embedding similarity threshold for concept merging |
+| `GRAPH_DEDUP_THRESHOLD` | `0.88` | Embedding similarity threshold for concept merging (bge-m3; `0.89` for jina v5 small gives the same merge rate) |
 | `DEFAULT_TOP_K` | `5` | Default result count for `pkb query` and `search_knowledge` |
 | `MCP_PORT` | `8787` | Shared HTTP MCP server port |
 | `MCP_HOST` | `127.0.0.1` | Bind address. Set to `0.0.0.0` only to reach the server from another machine over a trusted LAN/VPN — there is no authentication and `write_file` can write anywhere in the vault. |

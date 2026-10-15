@@ -182,6 +182,98 @@ uv run pkb doc-index
 없는 문서의 행은 지웁니다. 처음 한 번 실행한 뒤에는 인제스트·삭제·아카이브·복구·purge가 행을
 함께 고칩니다. `list_categories`와 `related_documents`에 필요하고, `list_documents`는 있으면 씁니다.
 
+### 작은 서버의 임베딩 모델 전환 (`reembed`)
+
+메모리 8GB 서버는 코퍼스 전체를 다시 임베딩하지 못합니다. GPU가 있는 머신에서 SSH 터널로 새
+물리 인덱스를 채우고, 개념 그래프 벡터는 사본에서 다시 계산한 뒤, 서버를 멈춘 상태에서 전환합니다.
+
+```bash
+uv run pkb reembed --target <새 물리 인덱스> [--source <인덱스 또는 alias, 기본 ES_INDEX>]
+                   [--batch-size 256] [--max-batches 0] [--dry-run]
+uv run pkb graph reembed [--db <그래프 sqlite, 기본 GRAPH_DB_PATH>] [--batch-size 256] [--max-batches 0]
+```
+
+`reembed`는 원본의 모든 청크를 같은 `_id`·필드로 대상에 복사하면서 `embedding`과
+`embedding_fingerprint`만 현재 설정으로 바꿉니다. fingerprint는 같은 설정에서 ingest가 계산하는
+값이라 서버의 다음 `sync`가 이 벡터를 그대로 씁니다. 다시 실행하면 끝난 청크는 건너뜁니다.
+그사이 원본이 바뀌었으면 바뀐 청크만 다시 임베딩하고, 메타데이터만 바뀐 청크는 기존 벡터로
+복사하고, 원본에서 사라진 청크는 지웁니다. 모든 청크가 들어가면 `<target>_docs`를 다시 채우므로
+`index-switch`가 두 alias를 함께 옮길 수 있습니다. `--dry-run`은 할 일만 세고 모델을 올리지
+않습니다. 종료 코드 3은 `--max-batches`에서 멈췄고 남은 일이 있다는 뜻입니다. `graph reembed`는
+모든 개념 벡터를 `이름: 설명`(`graph_store_concepts`가 임베딩하는 문자열)으로 다시 계산하고, 묶음마다
+커밋하며, 끝나면 `graph_meta`에 임베딩 식별자를 기록합니다. 기록과 설정이 다르거나 재계산이 끝나지
+않았으면 어휘 조회, `graph_query`/`graph_map`의 의미 시드, 임베딩 병합, 새 개념 저장이 두 모델의
+벡터를 비교하지 않고 실패합니다.
+
+bge-m3 → `jinaai/jina-embeddings-v5-text-small` 절차. M1 Max(32GB)에서 청크를 초당 약 8개 임베딩하므로
+1.6만 개에 35~40분, 개념 3.3만 개에 약 10분이 걸립니다.
+
+1. GPU 머신에서 서버와 같은 커밋을 받아 `uv sync`하고 `jina.env`를 씁니다. fingerprint가 모델·
+   리비전·task·문서 프롬프트·정규화·제목 prefix를 포함하므로 `ES_HOST` 말고는 서버 `.env`와 같아야
+   합니다:
+
+   ```bash
+   ES_HOST=http://127.0.0.1:19200
+   ES_INDEX=pkb_current
+   EMBEDDING_MODEL=jinaai/jina-embeddings-v5-text-small
+   EMBEDDING_DIMS=1024
+   EMBEDDING_TRUST_REMOTE_CODE=true
+   EMBEDDING_TASK=retrieval
+   EMBEDDING_QUERY_PROMPT=query
+   EMBEDDING_DOCUMENT_PROMPT=document
+   EMBEDDING_NORMALIZE=true
+   EMBED_CONTEXT_PREFIX=true
+   GRAPH_DEDUP_THRESHOLD=0.89
+   EMBEDDING_BATCH_SIZE=8
+   ```
+
+   `EMBEDDING_BATCH_SIZE`는 fingerprint에 들어가지 않습니다. M1 Max에서 jina v5는 8일 때 초당 8.5청크·
+   최대 6.3GB, 32일 때 초당 7.7청크·최대 15.5GB였습니다.
+
+2. 서버 Elasticsearch(`127.0.0.1:9200`에서 대기)로 터널을 열고, 서버가 기존 인덱스로 계속 서비스하는
+   동안 새 인덱스를 채웁니다:
+
+   ```bash
+   ssh -N -L 19200:127.0.0.1:9200 <서버> &
+   set -a; source jina.env; set +a
+   uv run pkb reembed --target pkb_documents_20261015_jina
+   ```
+
+3. 서버에서 SQLite backup 명령으로 그래프를 복사하고 사본의 내용 해시를 남깁니다(`.sha3sum`은 파일
+   바이트가 아니라 행을 해시합니다). 사본을 GPU 머신으로 옮겨 벡터를 다시 계산합니다:
+
+   ```bash
+   # 서버
+   sqlite3 <GRAPH_DB_PATH> ".backup /tmp/pkb_graph.copy.sqlite"
+   sqlite3 /tmp/pkb_graph.copy.sqlite .sha3sum > /tmp/pkb_graph.sha3
+   # GPU 머신 (scp 뒤)
+   uv run pkb graph reembed --db pkb_graph.copy.sqlite
+   ```
+
+4. 서버를 멈춥니다(`launchctl unload ~/Library/LaunchAgents/dev.jongkwan.pkb-mcp.plist`, `pkb watch`도).
+   2단계의 `reembed`를 다시 실행해 그사이 쓰인 내용을 반영합니다. 몇 청크만 임베딩해야 정상입니다.
+5. 그래프를 바꿉니다. `sqlite3 <GRAPH_DB_PATH> .sha3sum`이 `/tmp/pkb_graph.sha3`와 같아야 합니다.
+   다르면 복사 뒤 그래프가 바뀐 것이니 3단계를 다시 합니다. 기존 파일은 남겨 둡니다:
+   `mv <GRAPH_DB_PATH> <GRAPH_DB_PATH>.bge` 뒤 다시 계산한 파일을 그 자리에 둡니다.
+6. 서버 코드를 갱신하고 `uv sync`, `jina.env`의 줄(`ES_HOST` 제외)을 `.env`에 넣습니다. 첫 검색이
+   모델을 내려받지 않게 한 번 올려 둡니다:
+   `uv run python -c "from pkb.embeddings import embed_queries; embed_queries(['warmup'])"`.
+7. 서버에서 `uv run pkb reembed --target pkb_documents_20261015_jina --dry-run`이
+   `임베딩 0 · 복사 0 · 삭제 0`을 보여야 합니다. 서버 설정이 새 인덱스에 저장된 fingerprint를 그대로
+   만든다는 확인이라, `sync`가 아무것도 다시 임베딩하지 않습니다.
+8. `uv run pkb index-switch pkb_documents_20261015_jina`를 실행하고 출력되는 이전 인덱스를 적어
+   둡니다. 서버를 띄우기 전에 전환해야 합니다. jina 설정의 서버가 bge 인덱스를 읽으면 둘 다
+   1024차원이라 오류 없이 엉뚱한 결과만 나옵니다.
+9. 서버를 띄우고(`launchctl load ...`) 게이트웨이의 도구 목록을 갱신합니다. MCP ContextForge는
+   `POST /gateways/<게이트웨이 id>/tools/refresh`입니다([MCP 연동](mcp.md) 참고).
+10. 확인: `uv run pkb doctor`, `uv run pkb query` 몇 개, `uv run pkb graph query "..."`, 그리고 실제
+    편집 말고는 `embedded=0 added=0`이 나와야 하는 `uv run pkb sync`.
+
+되돌리기: 서버를 멈추고 `uv run pkb index-switch <이전 인덱스>`(그 `_docs` 인덱스는 남아 있음),
+`.env`의 bge 줄과 `<GRAPH_DB_PATH>.bge` 파일을 되돌린 뒤 서버를 띄우고 게이트웨이를 갱신합니다.
+전환 뒤 쓴 내용은 새 인덱스에만 있으므로 `uv run pkb sync`로 이전 인덱스에 넣습니다. 이전 물리
+인덱스와 그 `_docs`는 새 인덱스가 한동안 문제없이 돈 뒤 직접 지웁니다.
+
 ---
 
 ## 동기화 (재조정)
@@ -281,6 +373,9 @@ uv run pkb graph affected "BM25" --relation prerequisite_of  # 저장 방향 하
 # 오프라인 Evidence Map HTML (전체 옵션 표는 docs/ko/graph-rag.md 참고)
 uv run pkb graph map --concept "BM25" --open
 
+# 임베딩 모델을 바꾼 뒤 모든 개념 벡터 재계산 (재실행하면 이어서, "임베딩 모델 전환" 참고)
+uv run pkb graph reembed --db path/to/pkb_graph.copy.sqlite
+
 # 구 append-only 관계를 evidence 기반으로 전량 재구축할 때만 실행
 # 기존 그래프는 유지하고 staging evidence·추출 마커만 초기화
 uv run pkb graph reset-evidence --yes
@@ -377,7 +472,7 @@ GRAPH_DEDUP_THRESHOLD=0.88
 | `EXPAND_CONTEXT` | `0` | N>0이면 검색 결과 전후 N 청크를 neighbors로 부착 (parent context) |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | 500 / 100 | 고정 크기 청킹 |
 | `GRAPH_DB_PATH` | `data/.graph/pkb_graph.sqlite` | SQLite 개념 그래프 파일 |
-| `GRAPH_DEDUP_THRESHOLD` | `0.88` | 개념 병합 임베딩 유사도 임계값 |
+| `GRAPH_DEDUP_THRESHOLD` | `0.88` | 개념 병합 임베딩 유사도 임계값 (bge-m3 기준. jina v5 small은 `0.89`가 같은 병합 비율) |
 | `DEFAULT_TOP_K` | `5` | `pkb query`·`search_knowledge` 기본 결과 수 |
 | `MCP_PORT` | `8787` | 공유 HTTP MCP 서버 포트 |
 | `MCP_HOST` | `127.0.0.1` | 바인딩 주소. 서버를 다른 머신에 두고 신뢰하는 LAN/VPN에서 붙을 때만 `0.0.0.0`으로. 인증이 없고 `write_file`이 볼트 어디든 쓸 수 있음. |
