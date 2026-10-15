@@ -21,15 +21,12 @@ dependencies = [
     "peft>=0.21.2",
     # 5.13 미만은 원격 코드 모델(jina v5)을 한 프로세스에서 다시 올리면 AttributeError가 난다 (유휴 해제 뒤 재적재)
     "transformers>=5.13",
+    # EmbeddingGemma 2의 프로세서가 텍스트만 올려도 이미지 프로세서(torchvision)를 불러온다
+    "torchvision>=0.26,<0.27",
 ]
 
 [project.scripts]
 pkb = "pkb.cli:app"
-
-[project.optional-dependencies]
-media = [
-    "torchvision>=0.26,<0.27",
-]
 
 [dependency-groups]
 dev = [
