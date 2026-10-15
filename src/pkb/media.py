@@ -29,12 +29,12 @@ IMAGE_EXTENSIONS = frozenset(
     {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".avif", ".svg"}
 )
 AUDIO_EXTENSIONS = frozenset({".m4a", ".mp3", ".wav", ".aiff", ".aif", ".flac", ".ogg", ".opus", ".aac"})
-# 미디어 모델 → 질의를 만드는 텍스트 모델·어댑터. omni-small의 텍스트 탑은 text-small에 고정돼 있다
-# (2026-10 실측: 같은 문장 10개, 질의·문서 양쪽 코사인 ≥ 0.9997).
+# 미디어 모델 → 질의를 만드는 텍스트 모델·어댑터. EmbeddingGemma 2는 글·이미지·오디오가 한 모델이다
+# (서버는 EMBEDDING_TEXT_ONLY로 텍스트 탑만 올린다).
 MEDIA_SPACES = {
-    "jinaai/jina-embeddings-v5-omni-small": ("jinaai/jina-embeddings-v5-text-small", "retrieval"),
+    "google/embeddinggemma-2": ("google/embeddinggemma-2", ""),
 }
-# 오디오는 Whisper 30초 창으로 모델에 들어간다 — 창 하나가 벡터 하나
+# 오디오는 30초 창 하나가 벡터 하나다 — 검색 결과를 누르면 그 창의 처음부터 튼다
 MAX_SEGMENT_SECONDS = 30.0
 MAX_SEGMENTS = 1000  # 30초 창으로 8시간 남짓
 _CONTEXT_CHARS = 2000

@@ -133,7 +133,7 @@ def doc_index():
 
 @app.command()
 def reembed(
-    target: str = typer.Option(..., help="채울 새 물리 인덱스 (예: pkb_documents_20261015_jina)"),
+    target: str = typer.Option(..., help="채울 새 물리 인덱스 (예: pkb_documents_20261015_eg2)"),
     source: str = typer.Option(None, help="원본 인덱스 또는 alias (기본: ES_INDEX)"),
     batch_size: int = typer.Option(256, min=1, help="한 번에 읽고 임베딩해 bulk로 쓸 청크 수"),
     max_batches: int = typer.Option(0, min=0, help="0=완료까지, 양수=임베딩한 묶음이 이만큼 차면 멈춤"),
@@ -160,7 +160,7 @@ def reembed(
         rate = f", {r.embedded / r.embed_seconds:.1f}청크/초" if r.embed_seconds else ""
         typer.echo(
             f"  읽음 {r.scanned} · 임베딩 {r.embedded} · 복사 {r.copied} · 그대로 {r.unchanged}"
-            f" ({time.perf_counter() - started:.0f}초{rate})"
+            f" · 미디어 제외 {r.media_dropped} ({time.perf_counter() - started:.0f}초{rate})"
         )
 
     try:
@@ -180,7 +180,7 @@ def reembed(
     if dry_run:
         typer.echo(
             f"할 일: 임베딩 {r.embedded} · 복사 {r.copied} · 삭제 {r.deleted} "
-            f"(그대로 {r.unchanged} / 원본 {r.scanned})"
+            f"· 미디어 제외 {r.media_dropped} (그대로 {r.unchanged} / 원본 {r.scanned})"
         )
         return
     report(r)
@@ -291,10 +291,10 @@ def media_sync(
 ):
     """이 Mac에서 이미지·오디오 벡터를 만들어 PKB 서버에 올립니다 (미색인 파일만).
 
-    jina-embeddings-v5-omni-small을 쓰므로 `uv sync --extra media`가 필요하다. 서버에는
+    EmbeddingGemma 2를 쓰므로 `uv sync --extra media`가 필요하다. 서버에는
     MEDIA_EMBEDDING_MODEL이 같은 모델로 설정돼 있어야 한다.
     """
-    from pkb.media_sync import McpClient, OmniEmbedder, ToolError, run
+    from pkb.media_sync import McpClient, MediaEmbedder, ToolError, run
 
     wanted = [kind.strip() for kind in kinds.split(",") if kind.strip()]
     if not wanted or any(kind not in {"image", "audio"} for kind in wanted):
@@ -309,7 +309,7 @@ def media_sync(
     )
     client = McpClient(url, token=token)
     try:
-        stats = run(client, None if dry_run else OmniEmbedder(device), wanted, limit, dry_run, typer.echo)
+        stats = run(client, None if dry_run else MediaEmbedder(device), wanted, limit, dry_run, typer.echo)
     except ToolError as exc:
         typer.echo(f"중단: {exc}")
         raise typer.Exit(1) from exc

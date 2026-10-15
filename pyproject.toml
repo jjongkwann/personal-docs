@@ -7,7 +7,8 @@ license = "MIT"
 license-files = ["LICENSE"]
 dependencies = [
     "elasticsearch>=8.17,<9",
-    "sentence-transformers>=3.0",
+    # 6.1부터 이미지·오디오 입력과 config_kwargs로 모달리티 인코더를 빼고 올리기 (EmbeddingGemma 2)
+    "sentence-transformers>=6.1",
     "tiktoken>=0.8",
     "pyyaml>=6.0",
     "typer>=0.15",

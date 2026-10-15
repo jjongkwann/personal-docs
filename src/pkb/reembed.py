@@ -3,7 +3,9 @@
 임베딩 모델을 바꿀 때 메모리가 작은 서버 대신 GPU가 있는 Mac에서 SSH 터널로 같은 ES에 붙어
 돌린다. _id·본문·메타데이터는 그대로 두고 embedding과 embedding_fingerprint만 바꾼다.
 fingerprint는 ingest가 같은 설정에서 계산하는 값이라, 전환 뒤 sync는 이 청크를 다시 임베딩하지 않는다.
-media_model이 있는 청크(이미지·오디오)는 벡터를 미디어 모델이 만들었고 content는 설명뿐이라 그대로 옮긴다.
+media_model이 있는 청크(이미지·오디오)는 벡터를 미디어 모델이 만들었고 content는 설명뿐이라, 지금 설정의
+MEDIA_EMBEDDING_MODEL이 만든 것이면 그대로 옮긴다. 다른 미디어 모델의 청크는 옮기지 않는다 — 공간·차원이 달라
+쓸 수 없으므로 전환 뒤 `pkb media-sync`가 다시 만든다.
 
 진행 상태를 따로 저장하지 않는다. 다시 실행하면 원본을 처음부터 읽고, 대상에 같은 내용이 이미
 있는 청크는 건너뛴다. 원본이 그사이 바뀌었으면 바뀐 청크만 다시 임베딩하고 사라진 청크는 지운다.
@@ -35,6 +37,7 @@ class ReembedResult:
     unchanged: int = 0
     embedded: int = 0  # 새로 임베딩한(dry_run이면 임베딩할) 청크
     copied: int = 0  # 벡터를 그대로 옮긴 청크 — 메타데이터만 바뀐 청크(대상 벡터)와 미디어 청크(원본 벡터)
+    media_dropped: int = 0  # 다른 미디어 모델이 만들어 옮기지 않은 미디어 청크 (media-sync가 다시 만든다)
     deleted: int = 0  # 원본에 없어 대상에서 지운 청크
     embed_seconds: float = 0.0
     complete: bool = False
@@ -137,7 +140,11 @@ def reembed_index(
         to_embed: list[str] = []
         to_copy: list[str] = []
         from_source: list[str] = []  # 원본 벡터를 그대로 옮길 미디어 청크
+        dropped: list[str] = []  # 다른 미디어 모델의 청크
         for _id, doc in docs.items():
+            if "media_model" in doc and doc["media_model"] != settings.media_embedding_model:
+                dropped.append(_id)
+                continue
             old = current.get(_id)
             if old == doc:
                 continue
@@ -150,8 +157,9 @@ def reembed_index(
         if to_embed and max_batches and batches >= max_batches and not dry_run:
             return result
         result.scanned += len(hits)
-        source_ids.update(docs)
-        result.unchanged += len(docs) - len(to_embed) - len(to_copy) - len(from_source)
+        source_ids.update(_id for _id in docs if _id not in dropped)
+        result.media_dropped += len(dropped)
+        result.unchanged += len(docs) - len(to_embed) - len(to_copy) - len(from_source) - len(dropped)
         result.embedded += len(to_embed)
         result.copied += len(to_copy) + len(from_source)
         if dry_run or not (to_embed or to_copy or from_source):

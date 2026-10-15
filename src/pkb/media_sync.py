@@ -1,7 +1,7 @@
 """`pkb media-sync`: 이 Mac에서 이미지·오디오 벡터를 만들어 PKB 서버에 올린다.
 
 PKB 서버(메모리 8GB mini)는 미디어 모델을 올리지 않는다. 흐름은 list_media(missing_only) →
-get_media → jina-embeddings-v5-omni-small(문서 쪽, retrieval) → put_media_embeddings.
+get_media → EmbeddingGemma 2 → put_media_embeddings.
 서버 URL은 PKB 서버(`http://<host>:8787/mcp`)나 MCP 게이트웨이 어느 쪽이든 된다. 게이트웨이는 도구를
 `pkb-` + 하이픈 이름으로 내놓으므로 tools/list에서 이름을 찾는다.
 
@@ -25,9 +25,9 @@ from pathlib import Path
 
 import httpx
 
-MODEL = "jinaai/jina-embeddings-v5-omni-small"
+MODEL = "google/embeddinggemma-2"
 SAMPLE_RATE = 16000
-WINDOW_SECONDS = 30  # 모델의 Whisper 창 — 이보다 긴 소리는 잘린다
+WINDOW_SECONDS = 30  # 창 하나가 검색 결과 하나다 (모델은 5분 남짓까지 받지만 짧아야 찾은 곳부터 튼다)
 MIN_TAIL_SECONDS = 0.5  # 이보다 짧은 마지막 창은 버린다
 SILENCE_DBFS = -45.0  # 창의 50ms 프레임 RMS 95백분위가 이보다 작으면 무음으로 본다
 CHUNK_BYTES = 4 * 1024 * 1024
@@ -108,62 +108,54 @@ class McpClient:
         return json.loads(self.call(tool, **arguments))
 
 
-class OmniEmbedder:
-    """omni-small을 모달리티 하나씩만 올려 문서 쪽 벡터를 만든다 (MPS면 bf16)."""
+class MediaEmbedder:
+    """EmbeddingGemma 2로 이미지·오디오 벡터를 만든다 (MPS면 bf16). 미디어에는 프롬프트를 붙이지 않는다."""
 
     def __init__(self, device: str = "auto", model_id: str = MODEL) -> None:
         import importlib.util
 
         from pkb.config import resolve_device
 
-        # 없으면 모델 코드가 프로세서 적재 실패를 삼켜 첫 임베딩에서야 알 수 없는 TypeError가 난다
+        # 이미지 프로세서가 torchvision을 쓴다
         if importlib.util.find_spec("torchvision") is None:
             raise ToolError(
                 "torchvision이 없습니다. `uv sync --extra media` 뒤 `uv run --extra media pkb media-sync`로 실행하세요."
             )
         self.device = resolve_device(device)
         self.model_id = model_id
-        self._modality = ""
         self._model = None
-        self.load_seconds = 0.0  # 모델 적재 시간 합 — 처리량에서 따로 뺀다
+        self.load_seconds = 0.0  # 모델 적재 시간 — 처리량에서 따로 뺀다
 
-    def _load(self, modality: str):
-        if self._modality == modality:
+    def _load(self):
+        if self._model is not None:
             return self._model
-        import gc
-
         import torch
-        from huggingface_hub import snapshot_download
         from sentence_transformers import SentenceTransformer
 
-        self._model = None
-        gc.collect()
-        if self.device == "mps":
-            torch.mps.empty_cache()
         started = time.perf_counter()
-        try:  # 캐시에 있으면 허브에 묻지 않는다 (원격 코드가 파일마다 허브를 다시 확인해 느리다)
-            path = snapshot_download(self.model_id, local_files_only=True)
-        except Exception:
-            path = snapshot_download(self.model_id)
-        dtype = torch.float32 if self.device == "cpu" else torch.bfloat16
-        self._model = SentenceTransformer(
-            path, device=self.device, trust_remote_code=True,
-            model_kwargs={"default_task": "retrieval", "modality": modality, "dtype": dtype},
-        )
-        self._modality = modality
+        dtype = torch.float32 if self.device == "cpu" else torch.bfloat16  # float16은 이 모델에서 NaN이 난다
+        kwargs = {"device": self.device, "model_kwargs": {"dtype": dtype}}
+        try:  # 캐시에 있으면 허브에 묻지 않는다
+            self._model = SentenceTransformer(self.model_id, local_files_only=True, **kwargs)
+        except OSError:
+            self._model = SentenceTransformer(self.model_id, **kwargs)
         self.load_seconds += time.perf_counter() - started
         return self._model
 
-    def _encode(self, modality: str, inputs: list) -> list[list[float]]:
-        vectors = self._load(modality).encode_document(inputs, normalize_embeddings=True, show_progress_bar=False)
+    def _encode(self, inputs: list) -> list[list[float]]:
+        vectors = self._load().encode(inputs, normalize_embeddings=True, show_progress_bar=False)
+        if self.device == "mps":
+            import torch
+
+            torch.mps.empty_cache()
         # bf16 벡터라 소수 6자리면 충분하다 — 요청 크기가 절반으로 준다
         return [[round(float(value), 6) for value in vector] for vector in vectors]
 
     def image(self, image) -> list[float]:
-        return self._encode("vision", [image])[0]
+        return self._encode([image])[0]
 
     def audio(self, windows: list) -> list[list[float]]:
-        return self._encode("audio", windows)
+        return self._encode([{"array": window, "sampling_rate": SAMPLE_RATE} for window in windows])
 
 
 def load_image(path: Path):
@@ -257,7 +249,7 @@ def download(client: McpClient, doc_id: str, sha256: str, target: Path) -> None:
 
 
 def pending_media(client: McpClient, kinds: list[str]) -> tuple[str | None, list[dict]]:
-    """(서버가 받는 모델, 미색인 파일). 이미지를 먼저 — 모델을 모달리티마다 한 번만 올린다."""
+    """(서버가 받는 모델, 미색인 파일). 이미지 먼저, 그다음 오디오."""
     entries: list[dict] = []
     model = None
     while True:
@@ -272,7 +264,7 @@ def pending_media(client: McpClient, kinds: list[str]) -> tuple[str | None, list
 
 def run(
     client: McpClient,
-    embedder: OmniEmbedder | None,
+    embedder: MediaEmbedder | None,
     kinds: list[str],
     limit: int = 0,
     dry_run: bool = False,
