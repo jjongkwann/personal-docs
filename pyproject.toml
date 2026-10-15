@@ -14,9 +14,12 @@ dependencies = [
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "mcp>=2.0,<3",
+    "httpx>=0.28",
     "markitdown[pdf,docx,pptx,xlsx]>=0.1",
     "pdfminer-six>=20231228",
     "peft>=0.21.2",
+    # 5.13 미만은 원격 코드 모델(jina v5)을 한 프로세스에서 다시 올리면 AttributeError가 난다 (유휴 해제 뒤 재적재)
+    "transformers>=5.13",
 ]
 
 [project.scripts]
