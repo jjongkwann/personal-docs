@@ -3,6 +3,7 @@
 임베딩 모델을 바꿀 때 메모리가 작은 서버 대신 GPU가 있는 Mac에서 SSH 터널로 같은 ES에 붙어
 돌린다. _id·본문·메타데이터는 그대로 두고 embedding과 embedding_fingerprint만 바꾼다.
 fingerprint는 ingest가 같은 설정에서 계산하는 값이라, 전환 뒤 sync는 이 청크를 다시 임베딩하지 않는다.
+media_model이 있는 청크(이미지·오디오)는 벡터를 미디어 모델이 만들었고 content는 설명뿐이라 그대로 옮긴다.
 
 진행 상태를 따로 저장하지 않는다. 다시 실행하면 원본을 처음부터 읽고, 대상에 같은 내용이 이미
 있는 청크는 건너뛴다. 원본이 그사이 바뀌었으면 바뀐 청크만 다시 임베딩하고 사라진 청크는 지운다.
@@ -33,7 +34,7 @@ class ReembedResult:
     scanned: int = 0
     unchanged: int = 0
     embedded: int = 0  # 새로 임베딩한(dry_run이면 임베딩할) 청크
-    copied: int = 0  # fingerprint는 맞고 메타데이터만 바뀐 청크 — 대상의 벡터를 그대로 쓴다
+    copied: int = 0  # 벡터를 그대로 옮긴 청크 — 메타데이터만 바뀐 청크(대상 벡터)와 미디어 청크(원본 벡터)
     deleted: int = 0  # 원본에 없어 대상에서 지운 청크
     embed_seconds: float = 0.0
     complete: bool = False
@@ -82,8 +83,8 @@ def _pages(es: Elasticsearch, index: str, size: int, **source) -> Iterator[list[
         search_after = hits[-1]["sort"]
 
 
-def _target_sources(es: Elasticsearch, target: str, ids: list[str], **source) -> dict[str, dict]:
-    docs = es.mget(index=target, ids=ids, **source)["docs"]
+def _mget_sources(es: Elasticsearch, index: str, ids: list[str], **source) -> dict[str, dict]:
+    docs = es.mget(index=index, ids=ids, **source)["docs"]
     return {doc["_id"]: doc["_source"] for doc in docs if doc.get("found")}
 
 
@@ -128,15 +129,21 @@ def reembed_index(
     for hits in _pages(es, source, batch_size, source_excludes=["embedding"]):
         docs: dict[str, dict] = {}
         for hit in hits:
-            docs[hit["_id"]] = {**hit["_source"], "embedding_fingerprint": embedding_fingerprint(hit["_source"])}
-        current = _target_sources(es, target, list(docs), source_excludes=["embedding"]) if target_exists else {}
+            src = hit["_source"]
+            if "media_model" not in src:
+                src = {**src, "embedding_fingerprint": embedding_fingerprint(src)}
+            docs[hit["_id"]] = src
+        current = _mget_sources(es, target, list(docs), source_excludes=["embedding"]) if target_exists else {}
         to_embed: list[str] = []
         to_copy: list[str] = []
+        from_source: list[str] = []  # 원본 벡터를 그대로 옮길 미디어 청크
         for _id, doc in docs.items():
             old = current.get(_id)
             if old == doc:
                 continue
-            if old is not None and old.get("embedding_fingerprint") == doc["embedding_fingerprint"]:
+            if "media_model" in doc:
+                from_source.append(_id)
+            elif old is not None and old.get("embedding_fingerprint") == doc["embedding_fingerprint"]:
                 to_copy.append(_id)
             else:
                 to_embed.append(_id)
@@ -144,16 +151,16 @@ def reembed_index(
             return result
         result.scanned += len(hits)
         source_ids.update(docs)
-        result.unchanged += len(docs) - len(to_embed) - len(to_copy)
+        result.unchanged += len(docs) - len(to_embed) - len(to_copy) - len(from_source)
         result.embedded += len(to_embed)
-        result.copied += len(to_copy)
-        if dry_run or not (to_embed or to_copy):
+        result.copied += len(to_copy) + len(from_source)
+        if dry_run or not (to_embed or to_copy or from_source):
             continue
 
         ops: list[dict] = []
-        if to_copy:
-            vectors = _target_sources(es, target, to_copy, source_includes=["embedding"])
-            for _id in to_copy:
+        for index, ids in ((target, to_copy), (source, from_source)):
+            vectors = _mget_sources(es, index, ids, source_includes=["embedding"]) if ids else {}
+            for _id in ids:
                 ops.extend([{"index": {"_index": target, "_id": _id}}, {**docs[_id], **vectors[_id]}])
         if to_embed:
             from pkb.embeddings import embed_documents

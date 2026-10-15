@@ -63,7 +63,7 @@ class FakeES:
         return {"hits": {"hits": hits[:size]}}
 
     def mget(self, index, ids, **source):
-        docs = self.data[index]
+        docs = self.data[self.aliases.get(index, index)]
         return {"docs": [
             {"_id": _id, "found": True, "_source": self._filter(docs[_id], **source)} if _id in docs
             else {"_id": _id, "found": False}
@@ -161,6 +161,21 @@ def test_rerun_skips_done_chunks_and_catches_up_with_source_changes(embedded, ba
     assert es.data[TARGET]["data/b.md_0"]["archived_at"] == "2026-10-15"
     assert es.data[TARGET]["data/b.md_0"]["embedding"] == vector_b0
     assert set(es.data[TARGET]) == {"data/a.md_0", "data/b.md_0"}
+
+
+def test_media_chunks_keep_their_vector_and_have_no_fingerprint(embedded, backfilled):
+    """이미지·오디오 청크의 벡터는 미디어 모델이 만들었다. content(설명)로 다시 임베딩하지 않는다."""
+    text = _chunk("data/a.md", 0, "본문")
+    image = _chunk("data/a.png", 0, "사진 설명", source_type="image", media_model="omni", embedding=[0.3, 0.4])
+    del image["embedding_fingerprint"]
+    es = FakeES({SOURCE: _source(text, image)}, aliases={"pkb_current": SOURCE})
+
+    first = reembed.reembed_index(es, source="pkb_current", target=TARGET)
+
+    assert (first.embedded, first.copied) == (1, 1)
+    assert embedded == [[embed_input(text)]]
+    assert es.data[TARGET]["data/a.png_0"] == image
+    assert reembed.reembed_index(es, source="pkb_current", target=TARGET).unchanged == 2
 
 
 def test_max_batches_stops_before_finishing(embedded, backfilled):
