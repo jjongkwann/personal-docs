@@ -9,6 +9,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from pkb.config import settings
+from pkb.graph import ontology
 
 
 def _now() -> str:
@@ -361,36 +362,10 @@ def top_concepts_by_embedding(
     return scored[:k]
 
 
-def upsert_concept(
-    conn: sqlite3.Connection,
-    name: str,
-    description: str = "",
-    category: str | None = None,
-    embedding: list[float] | None = None,
-    *,
-    namespace: str | None = None,
-    match_by_alias: bool = True,
-    match_by_embedding: bool = True,
-) -> int:
-    """개념 insert or update. 반환: concept_id.
-
-    정규화 순서: slug 일치 → alias 일치 → 임베딩 유사도.
-    mention_count는 여기서 올리지 않는다 — concept_mentions에서 유도(recompute_mention_counts).
-    호출마다 +1 하면 같은 청크 재추출이 카운트를 부풀린다.
-    """
-    name = name.strip()
-    base_slug = make_slug(name)
-    if not base_slug:
-        raise ValueError("정규화 후 빈 slug가 되는 개념명은 저장할 수 없습니다.")
-    identity_namespace = _effective_namespace(namespace, category)
-    now = _now()
-    if embedding:
-        # 다른 모델의 벡터를 섞지 않는다. 벡터가 없던 그래프에는 첫 벡터의 모델을 기록한다.
-        conn.execute(
-            "INSERT OR IGNORE INTO graph_meta (key, value) VALUES (?, ?)",
-            (EMBEDDING_MODEL_KEY, check_embedding_model(conn)),
-        )
-
+def _match_existing(
+    conn: sqlite3.Connection, base_slug: str, identity_namespace: str, match_by_alias: bool
+) -> sqlite3.Row | None:
+    """upsert_concept의 이름 기반 정규화(slug → alias)로 기존 개념을 찾는다."""
     # 1. slug 일치.  A category/namespace mismatch is a real identity
     # conflict, not a spelling variant; in that case we continue below and
     # allocate a deterministic scoped physical slug.
@@ -408,6 +383,69 @@ def upsert_concept(
         row = find_concept_by_alias(
             conn, base_slug, namespace=identity_namespace or None
         )
+    return row
+
+
+def find_existing_concept(
+    conn: sqlite3.Connection,
+    name: str,
+    *,
+    category: str | None = None,
+    namespace: str | None = None,
+    match_by_alias: bool = True,
+) -> sqlite3.Row | None:
+    """upsert_concept(match_by_embedding=False)가 같은 인자로 갱신할 기존 개념. 없으면 None(새 개념)."""
+    base_slug = make_slug(name.strip())
+    if not base_slug:
+        return None
+    return _match_existing(conn, base_slug, _effective_namespace(namespace, category), match_by_alias)
+
+
+def set_concept_kind(conn: sqlite3.Connection, concept_id: int, kind: str) -> None:
+    """개념 kind를 지정(재분류 포함). TBox에 없는 kind는 ValueError."""
+    if ontology.get_kind(kind) is None:
+        raise ValueError(f"TBox에 없는 kind: {kind!r} (허용: {', '.join(ontology.KIND_IDS)})")
+    conn.execute(
+        "UPDATE concepts SET concept_type = ?, updated_at = ? WHERE id = ?", (kind, _now(), concept_id)
+    )
+
+
+def upsert_concept(
+    conn: sqlite3.Connection,
+    name: str,
+    description: str = "",
+    category: str | None = None,
+    embedding: list[float] | None = None,
+    *,
+    namespace: str | None = None,
+    match_by_alias: bool = True,
+    match_by_embedding: bool = True,
+    kind: str | None = None,
+) -> int:
+    """개념 insert or update. 반환: concept_id.
+
+    정규화 순서: slug 일치 → alias 일치 → 임베딩 유사도.
+    mention_count는 여기서 올리지 않는다 — concept_mentions에서 유도(recompute_mention_counts).
+    호출마다 +1 하면 같은 청크 재추출이 카운트를 부풀린다.
+    kind는 새 개념에 기록하고, kind가 비어 있는(미분류) 기존 개념에만 채운다. 이미 다른 kind가 있으면
+    그대로 둔다 — 재분류는 set_concept_kind로 한다.
+    """
+    name = name.strip()
+    base_slug = make_slug(name)
+    if not base_slug:
+        raise ValueError("정규화 후 빈 slug가 되는 개념명은 저장할 수 없습니다.")
+    if kind is not None and ontology.get_kind(kind) is None:
+        raise ValueError(f"TBox에 없는 kind: {kind!r} (허용: {', '.join(ontology.KIND_IDS)})")
+    identity_namespace = _effective_namespace(namespace, category)
+    now = _now()
+    if embedding:
+        # 다른 모델의 벡터를 섞지 않는다. 벡터가 없던 그래프에는 첫 벡터의 모델을 기록한다.
+        conn.execute(
+            "INSERT OR IGNORE INTO graph_meta (key, value) VALUES (?, ?)",
+            (EMBEDDING_MODEL_KEY, check_embedding_model(conn)),
+        )
+
+    row = _match_existing(conn, base_slug, identity_namespace, match_by_alias)
     if row:
         # 빈 description 채움: 설명 없는 기존 개념에 비어있지 않은 새 설명이 오면
         # description·embedding을 함께 채운다 (비어있지 않은 기존 설명은 보존 — 파괴적 덮어쓰기 없음).
@@ -418,7 +456,8 @@ def upsert_concept(
                 (description, blob, row["id"]),
             )
         conn.execute(
-            "UPDATE concepts SET updated_at = ? WHERE id = ?", (now, row["id"])
+            "UPDATE concepts SET updated_at = ?, concept_type = COALESCE(concept_type, ?) WHERE id = ?",
+            (now, kind, row["id"]),
         )
         return row["id"]
 
@@ -433,7 +472,8 @@ def upsert_concept(
             # 새 이름을 alias로 추가
             add_alias(conn, existing["id"], name, _allow_conflict=False)
             conn.execute(
-                "UPDATE concepts SET updated_at = ? WHERE id = ?", (now, existing["id"])
+                "UPDATE concepts SET updated_at = ?, concept_type = COALESCE(concept_type, ?) WHERE id = ?",
+                (now, kind, existing["id"]),
             )
             return existing["id"]
 
@@ -464,10 +504,9 @@ def upsert_concept(
                 suffix += 1
     blob = _pack_embedding(embedding) if embedding else None
     cur = conn.execute(
-        "INSERT INTO concepts "
-        "(name, slug, namespace, base_slug, category, description, embedding, mention_count, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
-        (name, slug, identity_namespace, base_slug, category, description, blob, now, now),
+        "INSERT INTO concepts (name, slug, namespace, base_slug, category, concept_type, description, embedding, "
+        "mention_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+        (name, slug, identity_namespace, base_slug, category, kind, description, blob, now, now),
     )
     return cur.lastrowid
 
@@ -765,6 +804,141 @@ def prune_missing_documents(conn: sqlite3.Connection, existing_doc_ids: set[str]
 
 # ---------- Edges ----------
 
+# 같은 청크·같은 관계의 근거가 겹치면 confidence는 NULL을 발명하지 않는 최댓값으로 합친다.
+_EVIDENCE_UPSERT = (
+    "ON CONFLICT(doc_id, chunk_index, src_id, dst_id, relation) DO UPDATE SET "
+    "confidence = CASE "
+    "WHEN excluded.confidence IS NULL THEN concept_edge_evidence.confidence "
+    "WHEN concept_edge_evidence.confidence IS NULL THEN excluded.confidence "
+    "ELSE MAX(concept_edge_evidence.confidence, excluded.confidence) END"
+)
+
+
+class RelationRejectedError(ValueError):
+    """TBox 규칙을 어긴 관계 쓰기. to_dict()는 에이전트가 고쳐 다시 보낼 수 있게 이유와 허용 관계를 담는다.
+
+    code: unknown_relation | self_loop | signature | cycle
+    """
+
+    def __init__(
+        self,
+        code: str,
+        reason: str,
+        *,
+        relation: str,
+        src_kind: str | None = None,
+        dst_kind: str | None = None,
+        cycle: list[str] | None = None,
+    ) -> None:
+        super().__init__(reason)
+        self.code = code
+        self.reason = reason
+        self.relation = relation
+        self.src_kind = src_kind
+        self.dst_kind = dst_kind
+        self.cycle = cycle
+
+    def to_dict(self) -> dict:
+        result = {
+            "code": self.code,
+            "reason": self.reason,
+            "src_kind": self.src_kind,
+            "dst_kind": self.dst_kind,
+            "allowed_relations": ontology.allowed_relations(self.src_kind, self.dst_kind),
+        }
+        if self.cycle:
+            result["cycle"] = self.cycle
+        return result
+
+
+def _relation_table(conn: sqlite3.Connection) -> str:
+    """지금 그래프를 이루는 관계 테이블. evidence 재구축 중에는 staging 근거가 새 그래프다."""
+    return "concept_edge_evidence" if edge_evidence_rebuild_active(conn) else "concept_edges"
+
+
+def reaches(conn: sqlite3.Connection, start_id: int, target_id: int, relation: str, *, table: str) -> bool:
+    """start에서 relation 방향을 따라 target에 닿는가.
+
+    재귀 CTE는 UNION으로 방문 노드를 중복 제거하고, CTE를 CROSS JOIN 왼쪽에 둬 바깥 루프로 고정한다
+    (src_id 인덱스로 이웃만 찾는다 — 일반 JOIN은 플래너가 관계 테이블 전체를 바깥에 둘 수 있다).
+    """
+    row = conn.execute(
+        "WITH RECURSIVE reach(id) AS (SELECT ? UNION "
+        f"SELECT e.dst_id FROM reach CROSS JOIN {table} e WHERE e.src_id = reach.id AND e.relation = ?) "
+        "SELECT 1 FROM reach WHERE id = ? LIMIT 1",
+        (start_id, relation, target_id),
+    ).fetchone()
+    return row is not None
+
+
+def _path_ids(conn: sqlite3.Connection, start_id: int, target_id: int, relation: str, *, table: str) -> list[int]:
+    """start → target 최단 경로의 개념 id (거부 메시지에 순환을 보여 주는 용도, 드물게만 호출)."""
+    parent: dict[int, int | None] = {start_id: None}
+    frontier = [start_id]
+    while frontier and target_id not in parent:
+        next_frontier = []
+        for node in frontier:
+            for (neighbor,) in conn.execute(
+                f"SELECT DISTINCT dst_id FROM {table} WHERE src_id = ? AND relation = ?", (node, relation)
+            ):
+                if neighbor not in parent:
+                    parent[neighbor] = node
+                    next_frontier.append(neighbor)
+        frontier = next_frontier
+    if target_id not in parent:
+        return []
+    path = [target_id]
+    while parent[path[-1]] is not None:
+        path.append(parent[path[-1]])
+    return path[::-1]
+
+
+def _slugs(conn: sqlite3.Connection, ids: list[int]) -> list[str]:
+    slug_by_id = {
+        row[0]: row[1]
+        for row in conn.execute(
+            f"SELECT id, slug FROM concepts WHERE id IN ({','.join('?' for _ in ids)})", ids
+        )
+    }
+    return [slug_by_id.get(concept_id, str(concept_id)) for concept_id in ids]
+
+
+def check_edge(conn: sqlite3.Connection, src_id: int, dst_id: int, relation: str) -> tuple[int, int, bool]:
+    """관계 쓰기를 TBox로 검사한다. 반환: (저장할 src_id, dst_id, 시그니처 검사 여부).
+
+    거부하면 RelationRejectedError. 한쪽 끝이라도 미분류면 시그니처는 검사하지 않는다(False).
+    대칭 관계는 src_id < dst_id로 바꿔 돌려준다.
+    """
+    kinds = dict(conn.execute("SELECT id, concept_type FROM concepts WHERE id IN (?, ?)", (src_id, dst_id)))
+    src_kind, dst_kind = kinds.get(src_id), kinds.get(dst_id)
+    spec = ontology.get_relation(relation)
+    if spec is None:
+        hint = ontology.LEGACY_RELATIONS.get(relation)
+        reason = f"TBox에 없는 관계 '{relation}'. 허용: {', '.join(ontology.RELATION_IDS)}"
+        if hint:
+            reason += f" ({relation}는 {hint}로 바뀌었습니다)"
+        raise RelationRejectedError("unknown_relation", reason, relation=relation, src_kind=src_kind, dst_kind=dst_kind)
+    if src_id == dst_id:
+        raise RelationRejectedError(
+            "self_loop", f"{relation}는 자기 자신을 가리킬 수 없습니다", relation=relation,
+            src_kind=src_kind, dst_kind=dst_kind,
+        )
+    reason = ontology.check_signature(relation, src_kind, dst_kind)
+    if reason:
+        raise RelationRejectedError("signature", reason, relation=relation, src_kind=src_kind, dst_kind=dst_kind)
+    if spec.acyclic:
+        table = _relation_table(conn)
+        if reaches(conn, dst_id, src_id, relation, table=table):
+            cycle = _slugs(conn, [src_id, *_path_ids(conn, dst_id, src_id, relation, table=table)])
+            raise RelationRejectedError(
+                "cycle",
+                f"{relation}는 순환할 수 없습니다: 이미 {' → '.join(cycle[1:])} 경로가 있습니다",
+                relation=relation, src_kind=src_kind, dst_kind=dst_kind, cycle=cycle,
+            )
+    src_id, dst_id = ontology.canonical_pair(relation, src_id, dst_id)
+    return src_id, dst_id, src_kind is not None and dst_kind is not None
+
+
 def add_edge(
     conn: sqlite3.Connection,
     src_id: int,
@@ -775,32 +949,28 @@ def add_edge(
     doc_id: str | None = None,
     chunk_index: int | None = None,
     materialize: bool | None = None,
-) -> None:
-    """관계를 저장한다.
+) -> bool:
+    """관계를 TBox 검사(check_edge) 뒤 저장한다. 반환: 시그니처를 검사했는가(두 끝 모두 분류됨).
 
+    규칙을 어기면 RelationRejectedError를 올리고 아무것도 쓰지 않는다. 대칭 관계는 정방향으로 저장한다.
     doc_id/chunk_index가 있으면 청크별 evidence를 멱등 upsert하고 materialized edge 집계를
     evidence에서 다시 계산한다. 둘 다 없으면 구데이터·테스트용 append-only 호환 경로다.
     """
-    if src_id == dst_id:
-        return
     if (doc_id is None) != (chunk_index is None):
         raise ValueError("doc_id와 chunk_index는 함께 지정해야 합니다.")
+    src_id, dst_id, checked = check_edge(conn, src_id, dst_id, relation)
     if doc_id is not None and chunk_index is not None:
         conn.execute(
             "INSERT INTO concept_edge_evidence "
             "(doc_id, chunk_index, src_id, dst_id, relation, confidence) VALUES (?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(doc_id, chunk_index, src_id, dst_id, relation) DO UPDATE SET "
-            "confidence = CASE "
-            "WHEN excluded.confidence IS NULL THEN concept_edge_evidence.confidence "
-            "WHEN concept_edge_evidence.confidence IS NULL THEN excluded.confidence "
-            "ELSE MAX(concept_edge_evidence.confidence, excluded.confidence) END",
+            + _EVIDENCE_UPSERT,
             (doc_id, chunk_index, src_id, dst_id, relation, confidence),
         )
         if materialize is None:
             materialize = not edge_evidence_rebuild_active(conn)
         if materialize:
             _recompute_edge(conn, src_id, dst_id, relation)
-        return
+        return checked
 
     # provenance가 없던 기존 호출의 하위호환 경로.
     row = conn.execute(
@@ -822,6 +992,7 @@ def add_edge(
             "VALUES (?, ?, ?, 1.0, 1, ?)",
             (src_id, dst_id, relation, confidence),
         )
+    return checked
 
 
 def _recompute_edge(
@@ -848,6 +1019,52 @@ def _recompute_edge(
         "confidence = excluded.confidence",
         (src_id, dst_id, relation, float(count), count, aggregate["confidence"]),
     )
+
+
+def rekey_edges(
+    conn: sqlite3.Connection,
+    moves: list[tuple[tuple[int, int, str], tuple[int, int, str]]],
+) -> int:
+    """관계 키 (src, dst, relation)를 다른 키로 옮긴다 (TBox 이관용). 반환: 옮긴 키 수.
+
+    근거 행은 새 키로 합치고(같은 청크가 겹치면 confidence 최댓값), 집계 관계는 근거가 있으면 근거에서
+    다시 계산한다. 근거가 없는 레거시 관계나 재구축 중 서비스 중인 관계는 집계 값을 그대로 합친다.
+    """
+    rebuild = edge_evidence_rebuild_active(conn)
+    for old, new in moves:
+        if old == new:
+            continue
+        conn.execute(
+            "INSERT INTO concept_edge_evidence (doc_id, chunk_index, src_id, dst_id, relation, confidence) "
+            "SELECT doc_id, chunk_index, ?, ?, ?, confidence FROM concept_edge_evidence "
+            "WHERE src_id = ? AND dst_id = ? AND relation = ? " + _EVIDENCE_UPSERT,
+            (*new, *old),
+        )
+        conn.execute(
+            "DELETE FROM concept_edge_evidence WHERE src_id = ? AND dst_id = ? AND relation = ?", old
+        )
+        edge = conn.execute(
+            "SELECT weight, evidence_count, confidence FROM concept_edges "
+            "WHERE src_id = ? AND dst_id = ? AND relation = ?",
+            old,
+        ).fetchone()
+        conn.execute("DELETE FROM concept_edges WHERE src_id = ? AND dst_id = ? AND relation = ?", old)
+        has_evidence = conn.execute(
+            "SELECT 1 FROM concept_edge_evidence WHERE src_id = ? AND dst_id = ? AND relation = ? LIMIT 1", new
+        ).fetchone()
+        if has_evidence and not rebuild:
+            _recompute_edge(conn, *new)
+        elif edge is not None:
+            conn.execute(
+                "INSERT INTO concept_edges (src_id, dst_id, relation, weight, evidence_count, confidence) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(src_id, dst_id, relation) DO UPDATE SET "
+                "weight = weight + excluded.weight, evidence_count = evidence_count + excluded.evidence_count, "
+                "confidence = CASE WHEN excluded.confidence IS NULL THEN confidence "
+                "WHEN confidence IS NULL THEN excluded.confidence "
+                "ELSE MAX(confidence, excluded.confidence) END",
+                (*new, edge["weight"], edge["evidence_count"], edge["confidence"]),
+            )
+    return sum(old != new for old, new in moves)
 
 
 def clear_edge_evidence_for_chunk(
@@ -1389,8 +1606,11 @@ def merge_concepts(
             (loser_id, loser_id),
         ).fetchall()
         for e in edge_rows:
-            new_src = winner_id if e["src_id"] == loser_id else e["src_id"]
-            new_dst = winner_id if e["dst_id"] == loser_id else e["dst_id"]
+            new_src, new_dst = ontology.canonical_pair(
+                e["relation"],
+                winner_id if e["src_id"] == loser_id else e["src_id"],
+                winner_id if e["dst_id"] == loser_id else e["dst_id"],
+            )
             if new_src == new_dst:
                 # re-point 결과 self-edge — 무의미하므로 버린다.
                 conn.execute(
@@ -1444,8 +1664,11 @@ def merge_concepts(
                     evidence["relation"],
                 ),
             )
-            new_src = winner_id if evidence["src_id"] == loser_id else evidence["src_id"]
-            new_dst = winner_id if evidence["dst_id"] == loser_id else evidence["dst_id"]
+            new_src, new_dst = ontology.canonical_pair(
+                evidence["relation"],
+                winner_id if evidence["src_id"] == loser_id else evidence["src_id"],
+                winner_id if evidence["dst_id"] == loser_id else evidence["dst_id"],
+            )
             if new_src == new_dst:
                 result["evidence_repointed"] += 1
                 continue

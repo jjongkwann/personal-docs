@@ -6,6 +6,10 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from pkb.graph import ontology, store
+
+TBOX_VERSION_KEY = "tbox_version"
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS concepts (
     id              INTEGER PRIMARY KEY,
@@ -17,6 +21,8 @@ CREATE TABLE IF NOT EXISTS concepts (
     namespace       TEXT NOT NULL DEFAULT '',
     base_slug       TEXT NOT NULL DEFAULT '',
     category        TEXT,
+    -- ontology.KINDS의 leaf kind 하나. NULL = 미분류 레거시 개념
+    concept_type    TEXT,
     description     TEXT,
     embedding       BLOB,
     mention_count   INTEGER DEFAULT 1,
@@ -105,6 +111,7 @@ CREATE INDEX IF NOT EXISTS idx_concepts_slug ON concepts(slug);
 CREATE INDEX IF NOT EXISTS idx_concepts_base_slug ON concepts(base_slug);
 CREATE INDEX IF NOT EXISTS idx_concepts_namespace_slug ON concepts(namespace, base_slug);
 CREATE INDEX IF NOT EXISTS idx_concepts_category ON concepts(category);
+CREATE INDEX IF NOT EXISTS idx_concepts_concept_type ON concepts(concept_type);
 CREATE INDEX IF NOT EXISTS idx_concept_edges_src ON concept_edges(src_id);
 CREATE INDEX IF NOT EXISTS idx_concept_edges_dst ON concept_edges(dst_id);
 CREATE INDEX IF NOT EXISTS idx_edge_evidence_doc ON concept_edge_evidence(doc_id, chunk_index);
@@ -180,6 +187,52 @@ def _migrate_concept_identity(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_concept_type(conn: sqlite3.Connection) -> None:
+    """개념 kind 열을 더한다. 기존 개념은 NULL(미분류)로 남고 분류 도구로 채운다."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(concepts)")}
+    if cols and "concept_type" not in cols:
+        conn.execute("ALTER TABLE concepts ADD COLUMN concept_type TEXT")
+
+
+def _migrate_tbox(conn: sqlite3.Connection) -> None:
+    """TBox(pkb-tbox/1)에 맞게 관계 키를 정규화하고 graph_meta에 TBox 버전을 기록한다.
+
+    - 대칭 관계(related_to, alternative_to)를 src_id < dst_id 한 방향으로 옮긴다. 근거 행은 정방향으로
+      합치고(겹치면 confidence 최댓값), 집계 관계는 근거에서 다시 계산한다. 같은 쌍이 양방향으로 있던
+      중복만 하나로 합쳐진다.
+    - 어휘에서 빠진 example_of를 is_a로 옮긴다.
+    한 번만 도는 이관이 아니다. 이 코드 이전 버전의 프로세스(오래 도는 추출기 등)가 같은 DB에 계속 쓰면
+    역방향 행이 다시 생기므로, 연결마다 남은 행이 있는지 보고 있으면 옮긴다(관계 수천 건이라 수 ms).
+    카탈로그에 없는 자유 라벨은 지우지 않는다 — validate가 보고한다.
+    """
+    moves: list[tuple[tuple[int, int, str], tuple[int, int, str]]] = []
+    for old, new in ontology.LEGACY_RELATIONS.items():
+        rows = conn.execute(
+            "SELECT src_id, dst_id FROM concept_edges WHERE relation = ? "
+            "UNION SELECT src_id, dst_id FROM concept_edge_evidence WHERE relation = ?",
+            (old, old),
+        ).fetchall()
+        for src_id, dst_id in rows:
+            moves.append(((src_id, dst_id, old), (*ontology.canonical_pair(new, src_id, dst_id), new)))
+    symmetric = sorted(ontology.SYMMETRIC_RELATIONS)
+    marks = ",".join("?" for _ in symmetric)
+    rows = conn.execute(
+        f"SELECT src_id, dst_id, relation FROM concept_edges WHERE relation IN ({marks}) AND src_id > dst_id "
+        f"UNION SELECT src_id, dst_id, relation FROM concept_edge_evidence "
+        f"WHERE relation IN ({marks}) AND src_id > dst_id",
+        (*symmetric, *symmetric),
+    ).fetchall()
+    moves.extend(((src_id, dst_id, relation), (dst_id, src_id, relation)) for src_id, dst_id, relation in rows)
+    if moves:
+        store.rekey_edges(conn, moves)
+    row = conn.execute("SELECT value FROM graph_meta WHERE key = ?", (TBOX_VERSION_KEY,)).fetchone()
+    if row is None or row[0] != ontology.TBOX_VERSION:
+        conn.execute(
+            "INSERT INTO graph_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (TBOX_VERSION_KEY, ontology.TBOX_VERSION),
+        )
+
+
 def _cleanup_invalid_slugs(conn: sqlite3.Connection) -> None:
     """정규화 결과가 빈 레거시 개념을 외래키 cascade로 한 번만 제거."""
     key = "invalid_slug_cleanup_v1"
@@ -197,6 +250,7 @@ def init_schema(db_path: str) -> None:
     # Errno 24로 터진다 — graph_connection이 매번 여기를 거치므로 호출당 2개씩 샜다.
     with contextlib.closing(get_connection(db_path)) as conn, conn:
         _migrate_concept_identity(conn)
+        _migrate_concept_type(conn)
         _migrate_extracted_chunks(conn)
         conn.executescript(SCHEMA_SQL)
         # 기존 DB 마이그레이션: 컬럼이 이미 있으면 no-op
@@ -205,6 +259,7 @@ def init_schema(db_path: str) -> None:
         # 셀프추출 마커로 대체된 미사용 run 인프라 제거. 기존 DB에도 1회 적용된다.
         conn.execute("DROP TABLE IF EXISTS graph_runs")
         _cleanup_invalid_slugs(conn)
+        _migrate_tbox(conn)
         conn.commit()
 
 

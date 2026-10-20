@@ -14,6 +14,7 @@ import os
 import threading
 from pathlib import Path
 
+from pkb import access
 from pkb.config import settings
 
 MAX_CHUNK_BYTES = 4 * 1024 * 1024
@@ -61,6 +62,7 @@ def put_attachment(path: str, data_base64: str, offset: int, total_size: int, sh
     반환: path, received, total_size, complete (완료면 sha256도).
     """
     root, target, rel = _resolve(path)
+    access.require_file("write", "attachments/", root, target, label=f"attachments/{rel}")
     if not 0 <= total_size <= MAX_ATTACHMENT_BYTES:
         raise ValueError(f"total_size는 0~{MAX_ATTACHMENT_BYTES}바이트여야 합니다.")
     try:
@@ -105,7 +107,8 @@ def put_attachment(path: str, data_base64: str, offset: int, total_size: int, sh
 
 def get_attachment(path: str, offset: int = 0, length: int = MAX_CHUNK_BYTES) -> dict:
     """[offset, offset+length) 바이트를 base64로. 끝에 닿은 조각에는 전체 sha256을 붙인다."""
-    _, target, rel = _resolve(path)
+    root, target, rel = _resolve(path)
+    access.require_file("read", "attachments/", root, target, label=f"attachments/{rel}")
     if not target.is_file():
         raise ValueError(f"첨부가 없습니다: {rel}")
     if not 1 <= length <= MAX_CHUNK_BYTES:

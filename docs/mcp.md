@@ -161,8 +161,24 @@ claude mcp add --transport http pkb http://192.168.0.5:8787/mcp -s user
 
 Leave Elasticsearch on `network.host: 127.0.0.1`. Only the MCP server needs to be reachable.
 
-> ⚠️ The MCP server has no authentication and its `write_file` tool can write anywhere in the vault.
-> Open it only inside a home LAN or a VPN you operate. Do not port-forward it to the internet.
+> ⚠️ Without `ACCESS_POLICY` the MCP server has no authentication and its `write_file` tool can write
+> anywhere in the vault. Open it only inside a home LAN or a VPN you operate. Do not port-forward it to the internet.
+
+### Authentication (`ACCESS_POLICY`)
+
+With an access policy ([Access Control](access-control.md)), each client sends its own bearer token.
+Create one with `uv run pkb access token`, put the printed `token_sha256` under the principal in the
+policy, and give the token to the client:
+
+```bash
+claude mcp add --transport http pkb http://127.0.0.1:8787/mcp -s user --header "Authorization: Bearer $PKB_TOKEN"
+codex mcp add pkb --url http://127.0.0.1:8787/mcp --bearer-token-env-var PKB_TOKEN
+gemini mcp add pkb http://127.0.0.1:8787/mcp -t http -s user -H "Authorization: Bearer $PKB_TOKEN"
+```
+
+Requests without a valid token get `401` with a `WWW-Authenticate` header pointing at the protected
+resource metadata. A connected client can call `whoami` to see its principal and the paths it may
+read and write.
 
 ## 3. Verification
 
@@ -397,6 +413,10 @@ With MCP ContextForge, restarting the gateway does not re-discover tools; call
 | `graph_store_concepts` | Stores the concept/relation JSON extracted by Claude Code into the SQLite graph DB |
 | `graph_curate` | Concept curation — lists uncurated concepts, saves real/vocab labels and prose |
 | `graph_merge` | Merges notation-variant concepts into a canonical concept (carrying over edges, mentions, and aliases) |
+| `graph_ontology` | Returns the TBox: concept kinds, relation characteristics and signatures. `graph_store_concepts` accepts only this vocabulary |
+| `graph_inferred` | Transitive inference (`is_a`, `part_of`, `prerequisite_of`) from one concept, with premise paths; nothing is stored |
+| `graph_validate` | Admin. Hard/soft report of the graph against the TBox (cycles, signature violations, unclassified concepts, …) |
+| `graph_classify` | Admin. Lists unclassified concepts, then assigns kinds (`[{slug, kind}]`) and reports edges that now break their signature |
 
 Graph RAG's MCP-first workflow: read chunks with `graph_list_chunks`, have Claude Code extract concepts and relations directly, and store them with `graph_store_concepts`. After storing, label real/vocab with `graph_curate` and merge notation variants with `graph_merge`. Query SQLite directly with `graph_explain`/`graph_path`/`graph_query`/`graph_affected`, or render an offline HTML view with `graph_map`.
 

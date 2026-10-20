@@ -34,8 +34,13 @@ class Settings(BaseSettings):
     rerank_enabled: bool = False
     rerank_device: str = "auto"  # auto | cpu | mps | cuda
     rerank_batch_size: int = 8  # MPS에선 작은 배치가 더 빠름 (bench_rerank_models.py 결과)
-    mcp_host: str = "127.0.0.1"  # 바인딩 주소. LAN/VPN에 노출하려면 0.0.0.0 (인증 없음 — 신뢰망에서만)
+    mcp_host: str = "127.0.0.1"  # 바인딩 주소. 0.0.0.0으로 열 때는 ACCESS_POLICY로 인증을 켤 것
     mcp_port: int = 8787  # 공유 HTTP MCP 서버 포트
+    # 접근 제어 정책 YAML (pkb.access). 비우면 접근 제어가 꺼진 단일 사용자 모드 — 모든 호출이 관리자다.
+    # 설정하면 MCP 요청마다 Bearer 토큰이 필요하고 경로 규칙에 없는 자원은 거부된다.
+    access_policy: str = ""
+    # 클라이언트가 보는 MCP 주소(OAuth 보호 자원 메타데이터의 resource). 비우면 http://MCP_HOST:MCP_PORT/mcp
+    mcp_public_url: str = ""
     warmup_on_start: bool = False  # 기동 시 모델 예열. 끄면 첫 검색까지 서버가 ~50MB로 유휴
     model_idle_seconds: float = 300  # 마지막 사용 뒤 이 시간이 지나면 모델을 내려 메모리를 돌려준다. 0이면 계속 유지
     candidate_k: int = 20  # 기본 경로(rerank=on)에서 ck=50 대비 latency 2.4x↓, 품질 동일. RRF-only도 nDCG 미세 우위.

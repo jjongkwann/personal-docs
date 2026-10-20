@@ -42,6 +42,10 @@ def log_search(
     }
     if variants:
         entry["variants"] = variants  # RAG-Fusion 쿼리 변형 — 없으면 기록 생략
+    from pkb import access
+
+    if access.enabled():
+        entry["principal"] = access.current_principal().id  # 누가 무엇을 찾았는지 감사용
     with LOG_FILE.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 

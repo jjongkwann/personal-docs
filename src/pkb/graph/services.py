@@ -10,9 +10,12 @@ from datetime import UTC, datetime
 from elasticsearch import Elasticsearch
 
 from pkb.config import settings
+from pkb.graph import ontology
 from pkb.graph import store as graph_store
 
 SCAN_PAGE_SIZE = 2000
+# 저장 결과 메시지에 싣는 구조화 거부·경고 행의 상한
+REPORT_LIMIT = 20
 
 
 def graph_input_hash(source: dict) -> str:
@@ -157,6 +160,53 @@ def _chunk_versions(keys: list[tuple[str, int]]) -> dict[tuple[str, int], tuple[
     return versions
 
 
+def _json_lines(header: str, rows: list[dict]) -> str:
+    """메시지에 붙이는 구조화 블록: 머리말 한 줄 + 행마다 JSON 한 줄 (REPORT_LIMIT까지)."""
+    lines = [json.dumps(row, ensure_ascii=False) for row in rows[:REPORT_LIMIT]]
+    if len(rows) > REPORT_LIMIT:
+        lines.append(f"… 외 {len(rows) - REPORT_LIMIT}건")
+    return f"\n{header}:\n" + "\n".join(lines)
+
+
+def _concept_kind(
+    conn: sqlite3.Connection,
+    concept: dict,
+    name: str,
+    category: str | None,
+    rejected: list[dict],
+    warnings: list[dict],
+) -> tuple[bool, str | None]:
+    """payload 개념의 kind를 정한다. 반환: (저장할지, upsert에 넘길 kind — None이면 저장된 kind 그대로).
+
+    새 개념은 TBox kind가 있어야 한다. 기존 개념은 kind가 비어 있으면 채우고, 다르면 저장된 kind를
+    두고 경고한다(재분류는 분류 도구로).
+    """
+    raw = concept.get("kind")
+    kind = raw.strip() if isinstance(raw, str) else None
+    known = kind if ontology.get_kind(kind) else None
+    existing = graph_store.find_existing_concept(conn, name, category=category, match_by_alias=False)
+    if existing is None:
+        if known is None:
+            rejected.append(
+                {
+                    "concept": name,
+                    "code": "unknown_kind" if kind else "missing_kind",
+                    "reason": f"TBox에 없는 kind '{kind}'" if kind else "새 개념에 kind가 없습니다",
+                    "allowed_kinds": list(ontology.KIND_IDS),
+                }
+            )
+            return False, None
+        return True, known
+    stored = existing["concept_type"]
+    if kind and known is None:
+        warnings.append({"concept": name, "slug": existing["slug"], "stored_kind": stored, "given_kind": kind,
+                         "reason": "TBox에 없는 kind라 무시했습니다", "allowed_kinds": list(ontology.KIND_IDS)})
+    elif known and stored and stored != known:
+        warnings.append({"concept": name, "slug": existing["slug"], "stored_kind": stored, "given_kind": known,
+                         "reason": "기존 개념의 kind와 다릅니다"})
+    return True, known
+
+
 def store_concepts(items_json: str) -> str:
     """추출된 개념/관계 JSON을 증분·evidence 규칙에 맞춰 그래프에 저장."""
     from pkb.embeddings import embed_documents
@@ -177,6 +227,10 @@ def store_concepts(items_json: str) -> str:
     alias_conflicts: list[tuple[str, str, str | None]] = []
     dropped: list[tuple[str, str, str]] = []
     invalid_concepts: list[str] = []
+    rejected_concepts: list[dict] = []
+    kind_warnings: list[dict] = []
+    rejected_relations: list[dict] = []
+    unchecked_edges = 0
     rejected: list[str] = []
     processed: list[tuple[str, int, str, str]] = []
     touched: set[int] = set()
@@ -236,14 +290,18 @@ def store_concepts(items_json: str) -> str:
                     if not name or not graph_store.make_slug(name):
                         invalid_concepts.append(repr(concept.get("name")))
                         continue
-                    valid_concepts.append(concept)
+                    accepted_kind, kind = _concept_kind(
+                        conn, concept, name, item.get("category"), rejected_concepts, kind_warnings
+                    )
+                    if accepted_kind:
+                        valid_concepts.append((concept, kind))
                 names_and_descriptions = [
                     graph_store.concept_embedding_text(concept.get("name", ""), concept.get("description", ""))
-                    for concept in valid_concepts
+                    for concept, _ in valid_concepts
                 ]
                 vectors = embed_documents(names_and_descriptions) if names_and_descriptions else []
 
-                for concept, vector in zip(valid_concepts, vectors, strict=False):
+                for (concept, kind), vector in zip(valid_concepts, vectors, strict=False):
                     name = concept.get("name", "").strip()
                     concept_id = graph_store.upsert_concept(
                         conn,
@@ -253,6 +311,7 @@ def store_concepts(items_json: str) -> str:
                         embedding=vector,
                         match_by_alias=False,
                         match_by_embedding=False,
+                        kind=kind,
                     )
                     total_concepts += 1
                     name_to_id[graph_store.make_slug(name)] = concept_id
@@ -284,6 +343,7 @@ def store_concepts(items_json: str) -> str:
                     for value in (src, dst, relation_type)
                 ):
                     continue
+                relation_type = relation_type.strip()
                 src_id = name_to_id.get(graph_store.make_slug(src))
                 dst_id = name_to_id.get(graph_store.make_slug(dst))
                 if not src_id:
@@ -297,11 +357,11 @@ def store_concepts(items_json: str) -> str:
                     )
                     dst_id = row["id"] if row else None
                 if src_id and dst_id:
-                    if src_id != dst_id:
-                        confidence = relation.get("confidence")
-                        if confidence not in (0.9, 0.7, 0.5):
-                            confidence = None
-                        graph_store.add_edge(
+                    confidence = relation.get("confidence")
+                    if confidence not in (0.9, 0.7, 0.5):
+                        confidence = None
+                    try:
+                        checked = graph_store.add_edge(
                             conn,
                             src_id,
                             dst_id,
@@ -311,7 +371,11 @@ def store_concepts(items_json: str) -> str:
                             chunk_index=index,
                             materialize=materialize_edges,
                         )
-                        total_edges += 1
+                    except graph_store.RelationRejectedError as exc:
+                        rejected_relations.append({"src": src, "dst": dst, "type": relation_type, **exc.to_dict()})
+                        continue
+                    total_edges += 1
+                    unchecked_edges += not checked
                 else:
                     dropped.append((src, dst, relation_type))
 
@@ -326,6 +390,27 @@ def store_concepts(items_json: str) -> str:
     )
     if rejected:
         message += f"\n저장 거부 {len(rejected)}건: {', '.join(rejected[:10])}"
+    if unchecked_edges:
+        message += (
+            f"\n관계 {unchecked_edges}건은 끝점 개념의 kind가 없어 시그니처 검사 없이 저장했습니다(unchecked)"
+        )
+    if rejected_relations:
+        message += _json_lines(
+            f"관계 거부 {len(rejected_relations)}건 — TBox 규칙 위반. reason과 allowed_relations를 보고 type을 "
+            "고치거나 관계를 빼서, 고친 관계만 담은 items로 재호출하세요",
+            rejected_relations,
+        )
+    if rejected_concepts:
+        message += _json_lines(
+            f"개념 거부 {len(rejected_concepts)}건 — 새 개념에는 TBox kind가 필요합니다. kind를 넣어 그 개념과 "
+            "관계만 담은 items로 재호출하세요",
+            rejected_concepts,
+        )
+    if kind_warnings:
+        message += _json_lines(
+            f"kind 경고 {len(kind_warnings)}건 — 저장된 kind를 유지했습니다. 바꾸려면 분류 도구로 재분류하세요",
+            kind_warnings,
+        )
     if dropped:
         preview = ", ".join(f"{src}→{dst}({kind})" for src, dst, kind in dropped[:10])
         message += (
@@ -348,3 +433,77 @@ def store_concepts(items_json: str) -> str:
             f"{', '.join(invalid_concepts[:10])}"
         )
     return message
+
+
+def list_unclassified_concepts(conn: sqlite3.Connection, *, offset: int = 0, limit: int = 50) -> dict:
+    """kind가 없는 개념을 언급 많은 순으로 페이지 단위 반환 (분류 도구용)."""
+    if offset < 0 or not 1 <= limit <= 500:
+        raise ValueError("offset은 0 이상, limit은 1~500이어야 합니다.")
+    total = conn.execute("SELECT COUNT(*) FROM concepts WHERE concept_type IS NULL").fetchone()[0]
+    rows = conn.execute(
+        "SELECT id, slug, name, description, category, mention_count FROM concepts WHERE concept_type IS NULL "
+        "ORDER BY mention_count DESC, slug LIMIT ? OFFSET ?",
+        (limit, offset),
+    ).fetchall()
+    next_offset = offset + len(rows)
+    return {
+        "total": total,
+        "offset": offset,
+        "returned": len(rows),
+        "next_offset": next_offset if next_offset < total else None,
+        "kinds": {kind.id: kind.definition_ko for kind in ontology.KINDS.values()},
+        "concepts": [
+            {
+                "slug": row["slug"],
+                "name": row["name"],
+                "description": row["description"] or "",
+                "aliases": graph_store.list_aliases(conn, row["id"]),
+                "category": row["category"],
+                "mention_count": row["mention_count"],
+            }
+            for row in rows
+        ],
+    }
+
+
+def classify_concepts(conn: sqlite3.Connection, assignments: list[dict]) -> dict:
+    """[{slug, kind}]로 개념 kind를 지정한다 (미분류 채우기와 명시적 재분류 모두).
+
+    형식이 틀리거나 TBox에 없는 kind가 하나라도 있으면 아무것도 바꾸지 않고 ValueError. 없는 slug는
+    건너뛰고 보고한다. 바뀐 개념에 닿는 관계 중 이제 시그니처를 어기는 것을 violations로 돌려준다 —
+    분류 전에는 검사되지 않던 관계라 거부하지 않고 고칠 목록으로 보여 준다.
+    """
+    from pkb.graph.validate import signature_violations
+
+    if not isinstance(assignments, list):
+        raise ValueError("assignments는 [{slug, kind}] 배열이어야 합니다.")
+    for index, item in enumerate(assignments):
+        if not isinstance(item, dict) or not isinstance(item.get("slug"), str) or not item["slug"].strip():
+            raise ValueError(f"{index}번째 항목에 slug가 없습니다.")
+        if ontology.get_kind(item.get("kind")) is None:
+            raise ValueError(
+                f"{item['slug']}: TBox에 없는 kind {item.get('kind')!r} (허용: {', '.join(ontology.KIND_IDS)})"
+            )
+    changes: list[dict] = []
+    unchanged: list[str] = []
+    skipped: list[str] = []
+    changed_ids: set[int] = set()
+    for item in assignments:
+        slug = item["slug"].strip()
+        row = graph_store.find_concept_by_slug(conn, slug)
+        if row is None:
+            skipped.append(slug)
+            continue
+        if row["concept_type"] == item["kind"]:
+            unchanged.append(slug)
+            continue
+        graph_store.set_concept_kind(conn, row["id"], item["kind"])
+        changes.append({"slug": row["slug"], "from": row["concept_type"], "to": item["kind"]})
+        changed_ids.add(row["id"])
+    return {
+        "updated": len(changes),
+        "unchanged": len(unchanged),
+        "skipped": skipped,
+        "changes": changes,
+        "violations": signature_violations(conn, concept_ids=changed_ids),
+    }

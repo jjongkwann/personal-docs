@@ -6,7 +6,7 @@ introspection으로 실제 등록된 CLI 명령/MCP 도구 이름을 읽어 CAPA
 
 from __future__ import annotations
 
-from pkb.cli import app, graph_app
+from pkb.cli import access_app, app, graph_app
 
 
 def cli_names() -> set[str]:
@@ -16,6 +16,10 @@ def cli_names() -> set[str]:
     names += [
         "graph " + (c.name or c.callback.__name__.replace("_", "-"))
         for c in graph_app.registered_commands
+    ]
+    names += [
+        "access " + (c.name or c.callback.__name__.replace("_", "-"))
+        for c in access_app.registered_commands
     ]
     return set(names)
 
@@ -45,6 +49,9 @@ CAPABILITY: dict[str, dict[str, str]] = {
     "graph_query": {"cli": "graph query", "mcp": "graph_query"},
     "graph_affected": {"cli": "graph affected", "mcp": "graph_affected"},
     "graph_map": {"cli": "graph map", "mcp": "graph_map"},
+    "graph_ontology": {"cli": "graph ontology", "mcp": "graph_ontology"},
+    "graph_inferred": {"cli": "graph inferred", "mcp": "graph_inferred"},
+    "graph_validate": {"cli": "graph validate", "mcp": "graph_validate"},
 }
 
 # 비가역/무거운 admin·API 벌크 — CLI 전용이 의도된 것.
@@ -72,6 +79,11 @@ ALLOWLIST_CLI_ONLY = {
     "media-sync",  # 서버의 list_media·put_media_embeddings를 부르는 클라이언트 (이미지·오디오 임베딩)
     "reembed",  # 임베딩 모델 교체 — GPU 머신에서 새 물리 색인을 채우는 운영 명령
     "graph reembed",  # 임베딩 모델 교체 — 그래프 사본의 개념 벡터 재계산
+    "graph export",  # 전체 그래프 RDF 파일 — 원격으로 대량 유출되지 않게 셸 전용
+    # 접근 제어 정책 점검·토큰 발급 — 정책 파일과 토큰은 서버 운영자가 셸에서 다룬다
+    "access show",
+    "access check",
+    "access token",
 }
 
 # Claude 루프 셀프추출·큐레이션·병합(graph_*) + obsidian 전용 재조정.
@@ -88,6 +100,7 @@ ALLOWLIST_MCP_ONLY = {
     "graph_store_concepts",
     "graph_curate",
     "graph_merge",
+    "graph_classify",  # 미분류 개념 kind 지정 — graph_curate와 같은 Claude 루프 전용
     "sync_obsidian",
     "list_categories",  # 원격 앱의 카테고리 목록 — 로컬 CLI는 list로 충분
     "related_documents",  # 원격 앱·에이전트의 관련 문서 조회
@@ -97,6 +110,7 @@ ALLOWLIST_MCP_ONLY = {
     "get_media",
     "put_media_embeddings",
     "search_media",  # 원격 앱의 이미지·오디오 검색
+    "whoami",  # 원격 클라이언트가 자기 토큰의 주체·권한 확인 — 로컬 CLI는 항상 관리자
 }
 
 

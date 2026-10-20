@@ -162,7 +162,7 @@ def test_graph_store_concepts_reports_unresolved_relations(graph_db, monkeypatch
                 "input_hash": "ih",
                 "category": "study",
                 "title": "X",
-                "concepts": [{"name": "BM25", "description": "랭킹 함수"}],
+                "concepts": [{"name": "BM25", "kind": "algorithm", "description": "랭킹 함수"}],
                 # dst가 concepts에도 DB에도 없음 → 미해소로 보고돼야 함
                 "relations": [{"src": "BM25", "dst": "TF-IDF", "type": "related_to"}],
             }

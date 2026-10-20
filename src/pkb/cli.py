@@ -13,6 +13,35 @@ from pkb.config import data_dir, settings
 app = typer.Typer(help="PKB - Personal Knowledge Base")
 
 
+@app.callback()
+def _principal(
+    ctx: typer.Context,
+    as_principal: str = typer.Option(
+        "", "--as", help="정책(ACCESS_POLICY)의 이 주체 권한으로 실행. 비우면 셸 사용자=관리자(SYSTEM)"
+    ),
+):
+    """명령 전체를 한 주체로 실행한다. 셸에서 파일과 ES를 직접 다루는 사람은 관리자다."""
+    from pkb import access
+
+    principal = access.SYSTEM
+    if as_principal:
+        policy = access.load_policy()
+        found = policy.principal(as_principal) if policy else None
+        if found is None:
+            typer.echo(f"정책에 없는 주체입니다: {as_principal} (ACCESS_POLICY={settings.access_policy or '미설정'})")
+            raise typer.Exit(1)
+        principal = found
+    # 쓰기·운영 명령의 권한 검사는 MCP 도구 경계에 있다. 다른 주체로는 읽기 명령만 흉내 낸다.
+    if not principal.admin and ctx.invoked_subcommand not in _READ_COMMANDS:
+        typer.echo(f"--as로는 읽기 명령만 실행할 수 있습니다: {', '.join(sorted(_READ_COMMANDS))}")
+        raise typer.Exit(1)
+    ctx.with_resource(access.acting_as(principal))
+
+
+_READ_COMMANDS = frozenset({"query", "show", "list", "graph"})
+_GRAPH_READ_COMMANDS = frozenset({"explain", "path", "query", "affected", "map", "ontology", "inferred"})
+
+
 @app.command()
 def init(
     ingest_obsidian: bool = typer.Option(
@@ -891,6 +920,16 @@ graph_app = typer.Typer(help="개념 그래프 빌드/조회 (SQLite 기반 Grap
 app.add_typer(graph_app, name="graph")
 
 
+@graph_app.callback()
+def _graph_principal(ctx: typer.Context):
+    """--as 주체가 관리자가 아니면 그래프 조회 명령만 허용한다."""
+    from pkb import access
+
+    if not access.current_principal().admin and ctx.invoked_subcommand not in _GRAPH_READ_COMMANDS:
+        typer.echo(f"--as로는 그래프 조회 명령만 실행할 수 있습니다: {', '.join(sorted(_GRAPH_READ_COMMANDS))}")
+        raise typer.Exit(1)
+
+
 @graph_app.command("stats")
 def graph_stats():
     """그래프 통계 출력."""
@@ -963,9 +1002,9 @@ def graph_explain(
 ):
     """개념 하나의 설명·관계·언급 출처를 근거와 함께 조회."""
     from pkb.graph import query as graph_queries
-    from pkb.graph.schema import graph_connection
+    from pkb.graph.visibility import graph_read_connection
 
-    with graph_connection(settings.graph_db_path) as conn:
+    with graph_read_connection(settings.graph_db_path) as conn:
         result = graph_queries.explain(
             conn,
             concept,
@@ -987,9 +1026,9 @@ def graph_path(
 ):
     """두 개념 사이의 최단 관계 경로를 조회."""
     from pkb.graph import query as graph_queries
-    from pkb.graph.schema import graph_connection
+    from pkb.graph.visibility import graph_read_connection
 
-    with graph_connection(settings.graph_db_path) as conn:
+    with graph_read_connection(settings.graph_db_path) as conn:
         result = graph_queries.shortest_path(
             conn,
             source,
@@ -1015,12 +1054,12 @@ def graph_query(
     """자연어 질문으로 개념 시드를 찾고 주변 관계 하위 그래프를 조회."""
     from pkb.embeddings import embed_queries
     from pkb.graph import query as graph_queries
-    from pkb.graph.schema import graph_connection
+    from pkb.graph.visibility import graph_read_connection
 
     if not query.strip():
         raise typer.BadParameter("query는 비어 있을 수 없습니다.")
     query_embedding = embed_queries([query])[0]
-    with graph_connection(settings.graph_db_path) as conn:
+    with graph_read_connection(settings.graph_db_path) as conn:
         result = graph_queries.query_subgraph(
             conn,
             query,
@@ -1045,9 +1084,9 @@ def graph_affected(
 ):
     """저장된 src→dst 방향으로 이어지는 하위 개념을 조회."""
     from pkb.graph import query as graph_queries
-    from pkb.graph.schema import graph_connection
+    from pkb.graph.visibility import graph_read_connection
 
-    with graph_connection(settings.graph_db_path) as conn:
+    with graph_read_connection(settings.graph_db_path) as conn:
         result = graph_queries.affected(
             conn,
             concept,
@@ -1075,7 +1114,7 @@ def graph_map(
 ):
     """개념·질문·경로 중심 Evidence Map HTML 스냅샷 생성 (오프라인 자급식)."""
     from pkb.graph import viewmap
-    from pkb.graph.schema import graph_connection
+    from pkb.graph.visibility import graph_read_connection
 
     concept, query = concept.strip(), query.strip()
     path_pair = tuple(path) if all(path) else None
@@ -1088,7 +1127,7 @@ def graph_map(
 
         query_embedding = embed_queries([query])[0]
 
-    with graph_connection(settings.graph_db_path) as conn:
+    with graph_read_connection(settings.graph_db_path) as conn:
         try:
             model = viewmap.build(
                 conn,
@@ -1217,6 +1256,154 @@ def graph_rebuild_evidence_local(
             f"지정 범위 완료: batches={result['batches']} chunks={result['chunks']} "
             "(재실행하면 pending부터 계속)"
         )
+
+
+@graph_app.command("ontology")
+def graph_ontology():
+    """TBox(개념 kind·관계 특성·시그니처)를 JSON으로 출력."""
+    from pkb.graph import ontology
+
+    _echo_graph_json(ontology.describe())
+
+
+@graph_app.command("inferred")
+def graph_inferred(
+    concept: str = typer.Argument(..., help="개념 이름, slug 또는 alias"),
+    relation: str = typer.Option("is_a", help="is_a | part_of | prerequisite_of"),
+    direction: str = typer.Option("up", help="up(저장 방향) | down(역방향)"),
+    max_depth: int = typer.Option(6, min=2, max=10, help="최대 단계"),
+    limit: int = typer.Option(50, min=1, max=200, help="반환 상한"),
+):
+    """전이 관계로 추론한 관계를 전제 경로(via)와 함께 출력 (저장하지 않음)."""
+    from pkb.graph import query as graph_queries
+    from pkb.graph.visibility import graph_read_connection
+
+    with graph_read_connection(settings.graph_db_path) as conn:
+        try:
+            result = graph_queries.transitive_closure(
+                conn, concept, relation, direction=direction, max_depth=max_depth, limit=limit
+            )
+        except ValueError as exc:
+            typer.echo(f"오류: {exc}")
+            raise typer.Exit(1) from exc
+    _echo_graph_json(result)
+
+
+@graph_app.command("validate")
+def graph_validate(
+    sample_limit: int = typer.Option(20, min=0, max=100, help="항목마다 샘플 수"),
+):
+    """그래프를 TBox에 비춰 검사한 hard/soft 보고서를 JSON으로 출력. hard 위반이 있으면 종료 코드 1."""
+    from pkb.graph.schema import graph_connection
+    from pkb.graph.validate import validate_graph
+
+    with graph_connection(settings.graph_db_path) as conn:
+        report = validate_graph(conn, sample_limit=sample_limit)
+    _echo_graph_json(report)
+    if not report["ok"]:
+        raise typer.Exit(1)
+
+
+@graph_app.command("export")
+def graph_export(
+    out: Path = typer.Option(..., "--out", "-o", help="쓸 파일 경로"),
+    fmt: str = typer.Option("turtle", "--format", help="turtle(TBox+단언) | trig(+추론 폐포 이름 있는 그래프)"),
+    base: str = typer.Option("urn:pkb:", help="개념·어휘 IRI 접두어 (':', '/', '#'로 끝남)"),
+):
+    """TBox(OWL)와 개념·관계(SKOS)를 RDF 파일로 내보낸다. 전체 그래프라 관리자 전용."""
+    from pkb.graph.export import export_rdf
+    from pkb.graph.schema import graph_connection
+
+    with graph_connection(settings.graph_db_path) as conn:
+        try:
+            result = export_rdf(conn, out, fmt=fmt, base=base)
+        except ValueError as exc:
+            typer.echo(f"오류: {exc}")
+            raise typer.Exit(1) from exc
+    _echo_graph_json(result)
+
+
+access_app = typer.Typer(help="접근 제어 정책(ACCESS_POLICY) 점검과 토큰 발급")
+app.add_typer(access_app, name="access")
+
+
+def _load_policy_or_exit():
+    from pkb import access
+
+    try:
+        policy = access.load_policy()
+    except access.PolicyError as exc:
+        typer.echo(f"정책 오류: {exc}")
+        raise typer.Exit(1) from exc
+    if policy is None:
+        typer.echo("ACCESS_POLICY가 설정되지 않았습니다 — 접근 제어가 꺼진 단일 사용자 모드입니다.")
+        raise typer.Exit(1)
+    return policy
+
+
+@access_app.command("show")
+def access_show():
+    """정책의 주체·규칙과 규칙마다 걸리는 색인 문서 수. 0개 규칙은 경로 오타일 수 있다."""
+    from pkb.store import doc_index_name, get_client
+
+    policy = _load_policy_or_exit()
+    typer.echo(f"정책 sha256: {policy.sha256}")
+    typer.echo("주체:")
+    for principal_id, entry in sorted(policy.principals.items()):
+        principal = entry.principal
+        typer.echo(
+            f"  {principal_id}: groups={sorted(principal.groups)} admin={principal.admin} "
+            f"tokens={len(entry.token_hashes)}"
+        )
+    es = get_client()
+    index = doc_index_name()
+    counted = es.indices.exists(index=index)
+    typer.echo("규칙 (가장 긴 경로가 이긴다):")
+    for rule in policy.rules:
+        count = es.count(index=index, query=rule.es_match())["count"] if counted else "?"
+        typer.echo(
+            f"  {rule.path or '(default)'}: read={sorted(rule.read)} write={sorted(rule.write)} 문서={count}"
+        )
+
+
+@access_app.command("check")
+def access_check(
+    resources: builtins.list[str] = typer.Argument(..., help="doc_id 형식 경로 (예: data/career/x.md)"),
+    principal_id: str = typer.Option("", "--principal", "-p", help="이 주체만. 비우면 모든 주체"),
+):
+    """자원마다 어느 규칙이 결정하고 각 주체가 읽기·쓰기 가능한지 보여 준다."""
+    from pkb import access
+
+    policy = _load_policy_or_exit()
+    ids = [principal_id] if principal_id else sorted(policy.principals)
+    for resource in resources:
+        try:
+            normalized = access.normalize_resource(resource)
+        except ValueError as exc:
+            typer.echo(f"{resource}: 거부 — {exc}")
+            continue
+        rule = policy.rule_for(normalized)
+        typer.echo(f"{normalized} — 규칙: {rule.path or '(default)'}")
+        for pid in ids:
+            principal = policy.principal(pid)
+            if principal is None:
+                typer.echo(f"  {pid}: 정책에 없는 주체")
+                continue
+            read = policy.allows(principal, "read", normalized)
+            write = policy.allows(principal, "write", normalized)
+            typer.echo(f"  {pid}: read={'허용' if read else '거부'} write={'허용' if write else '거부'}")
+
+
+@access_app.command("token")
+def access_token():
+    """새 Bearer 토큰과 정책에 넣을 SHA-256을 출력한다. 정책 파일은 바꾸지 않는다."""
+    import hashlib
+    import secrets
+
+    token = secrets.token_urlsafe(32)
+    typer.echo(f"token: {token}")
+    typer.echo(f"token_sha256: {hashlib.sha256(token.encode('utf-8')).hexdigest()}")
+    typer.echo("토큰은 클라이언트의 Authorization: Bearer 헤더에만 두고, 정책에는 해시만 넣으세요.")
 
 
 if __name__ == "__main__":

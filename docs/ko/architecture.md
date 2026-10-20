@@ -253,6 +253,11 @@ Graph RAG는 검색을 대체하지 않고 개념 간 관계 질의를 보완합
 `src/pkb/mcp_server.py`가 PKB의 기본 인터페이스입니다. 전송은 Streamable HTTP이며,
 launchd로 상시 기동한 단일 서버를 Claude Code·Codex·Gemini가 공유합니다.
 
+`ACCESS_POLICY`를 설정하면 요청마다 주체에 대응하는 Bearer 토큰이 필요하고, 모든 도구가
+`read`·`write`·`admin` 등급을 가집니다. 검색은 정책을 Elasticsearch 사전 필터로 붙이고, 파일
+도구는 경로를 검사하며, 그래프 도구는 그 주체가 읽을 수 없는 근거를 가린 뷰로 읽습니다.
+[접근 제어](access-control.md)를 보세요.
+
 ### 무상태 Streamable HTTP (MCP 2026-07-28)
 
 현재 MCP 전송에는 프로토콜 세션이 없습니다. `initialize` 핸드셰이크와 `Mcp-Session-Id`가

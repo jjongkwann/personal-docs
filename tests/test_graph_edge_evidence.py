@@ -110,25 +110,25 @@ def test_prepare_rebuild_preserves_curated_vocabulary(conn):
 def test_finalize_rebuild_atomically_replaces_legacy_edges(conn):
     src, dst = _concepts(conn)
     old_other = gstore.upsert_concept(conn, name="Legacy")
-    gstore.add_edge(conn, src, old_other, "legacy")
+    gstore.add_edge(conn, src, old_other, "prerequisite_of")
     gstore.prepare_edge_evidence_rebuild(conn)
 
     gstore.add_edge(
         conn,
         src,
         dst,
-        "new_relation",
+        "part_of",
         doc_id="data/rag/x.md",
         chunk_index=0,
     )
     assert [row["relation"] for row in conn.execute("SELECT relation FROM concept_edges")] == [
-        "legacy"
+        "prerequisite_of"
     ]
 
     result = gstore.finalize_edge_evidence_rebuild(conn)
     assert result == {"edges_before": 1, "edges_after": 1, "edge_evidence": 1}
     assert [row["relation"] for row in conn.execute("SELECT relation FROM concept_edges")] == [
-        "new_relation"
+        "part_of"
     ]
     assert gstore.edge_evidence_rebuild_active(conn) is False
 

@@ -420,6 +420,12 @@ uv run pkb graph path "BM25" "RRF"              # bounded shortest path
 uv run pkb graph query "how do lexical and vector retrieval connect?"   # semantic-seeded subgraph
 uv run pkb graph affected "BM25" --relation prerequisite_of  # stored-direction downstream
 
+# Ontology (TBox) — see docs/graph-rag.md "Ontology (TBox)"
+uv run pkb graph ontology                       # kinds, relation characteristics and signatures
+uv run pkb graph inferred "BM25" --relation is_a  # inferred ancestors with premise paths
+uv run pkb graph validate                       # hard/soft report; exit code 1 on hard violations
+uv run pkb graph export --out graph.ttl         # OWL TBox + SKOS concepts (--format trig adds the inferred closure)
+
 # Offline Evidence Map HTML (see docs/graph-rag.md for the full option table)
 uv run pkb graph map --concept "BM25" --open
 
@@ -527,7 +533,9 @@ Other tuning options in `pkb.config.Settings` (overridable via environment varia
 | `GRAPH_DEDUP_THRESHOLD` | `0.88` | Embedding similarity threshold for concept merging (bge-m3; `0.89` for jina v5 small gives the same merge rate) |
 | `DEFAULT_TOP_K` | `5` | Default result count for `pkb query` and `search_knowledge` |
 | `MCP_PORT` | `8787` | Shared HTTP MCP server port |
-| `MCP_HOST` | `127.0.0.1` | Bind address. Set to `0.0.0.0` only to reach the server from another machine over a trusted LAN/VPN — there is no authentication and `write_file` can write anywhere in the vault. |
+| `MCP_HOST` | `127.0.0.1` | Bind address. Set to `0.0.0.0` only to reach the server from another machine over a trusted LAN/VPN. Without `ACCESS_POLICY` there is no authentication and `write_file` can write anywhere in the vault. |
+| `ACCESS_POLICY` | (empty) | Path to the access-control policy YAML ([Access Control](access-control.md)). Empty = single-user mode, every call is admin. Set = bearer tokens required, path rules decide reads and writes |
+| `MCP_PUBLIC_URL` | (empty) | URL clients use to reach the MCP server, advertised as the protected resource in OAuth metadata. Empty = `http://MCP_HOST:MCP_PORT/mcp` |
 | `WARMUP_ON_START` | `false` | Preload the models when the MCP server starts. Left off, the server idles at ~50MB until the first search |
 | `MODEL_IDLE_SECONDS` | `300` | Seconds after the last use before the embedding/reranker models are unloaded to return memory. The next call loads them again. `0` keeps them loaded |
 | `EMBEDDING_TRUST_REMOTE_CODE` | `false` | Run code from the model repository (needed by `jinaai/jina-embeddings-v5-text-small`, not by EmbeddingGemma 2). Only for models you trust |

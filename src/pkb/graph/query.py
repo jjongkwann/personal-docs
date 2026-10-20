@@ -2,6 +2,8 @@
 
 SQLite remains the source of truth.  This module only assembles bounded JSON-ready
 views for CLI/MCP consumers; it does not maintain a second NetworkX graph or cache.
+Inferred (transitive) relations are computed at query time from asserted edges and are
+never stored or reported as evidence.
 """
 
 from __future__ import annotations
@@ -9,12 +11,13 @@ from __future__ import annotations
 import sqlite3
 from collections import deque
 
+from pkb.graph import ontology
 from pkb.graph import store as gstore
 
 _EDGE_SELECT = (
     "SELECT e.*, "
-    "src.name AS src_name, src.slug AS src_slug, "
-    "dst.name AS dst_name, dst.slug AS dst_slug "
+    "src.name AS src_name, src.slug AS src_slug, src.concept_type AS src_kind, "
+    "dst.name AS dst_name, dst.slug AS dst_slug, dst.concept_type AS dst_kind "
     "FROM concept_edges e "
     "JOIN concepts src ON src.id = e.src_id "
     "JOIN concepts dst ON dst.id = e.dst_id "
@@ -53,6 +56,7 @@ def _concept_dict(
     result = {
         "name": row["name"],
         "slug": row["slug"],
+        "kind": row["concept_type"],
         "category": row["category"],
         "description": row["description"] or "",
         "mention_count": row["mention_count"],
@@ -120,10 +124,11 @@ def _edge_dict(
     *,
     evidence_limit: int,
     traversed_from: int | None = None,
+    inverse: bool = False,
 ) -> dict:
     result = {
-        "source": {"name": row["src_name"], "slug": row["src_slug"]},
-        "target": {"name": row["dst_name"], "slug": row["dst_slug"]},
+        "source": {"name": row["src_name"], "slug": row["src_slug"], "kind": row["src_kind"]},
+        "target": {"name": row["dst_name"], "slug": row["dst_slug"], "kind": row["dst_kind"]},
         "relation": row["relation"],
         "weight": row["weight"],
         "evidence_count": row["evidence_count"],
@@ -131,6 +136,9 @@ def _edge_dict(
         "confidence_label": _confidence_label(row["confidence"]),
         "evidence": _edge_evidence(conn, row, limit=evidence_limit),
     }
+    if inverse:
+        # inbound 관계를 대상 쪽에서 읽는 이름 (part_of → has_part, 대칭 관계는 그대로)
+        result["inverse_relation"] = ontology.inverse_label(row["relation"])
     if traversed_from is not None:
         result["traversal_direction"] = (
             "forward" if traversed_from == row["src_id"] else "reverse"
@@ -147,8 +155,10 @@ def _incident_edges(
 ) -> list[sqlite3.Row]:
     filters = _relations(relations)
     if outgoing_only:
-        where = "e.src_id = ?"
-        params: list[object] = [concept_id]
+        # 대칭 관계는 src_id < dst_id 한 방향으로만 저장되므로 저장 방향과 무관하게 양쪽으로 따라간다.
+        symmetric = sorted(ontology.SYMMETRIC_RELATIONS)
+        where = f"(e.src_id = ? OR (e.dst_id = ? AND e.relation IN ({','.join('?' for _ in symmetric)})))"
+        params: list[object] = [concept_id, concept_id, *symmetric]
     else:
         where = "(e.src_id = ? OR e.dst_id = ?)"
         params = [concept_id, concept_id]
@@ -208,15 +218,110 @@ def explain(
     incident = _incident_edges(conn, row["id"])
     outbound = [edge for edge in incident if edge["src_id"] == row["id"]][:edge_limit]
     inbound = [edge for edge in incident if edge["dst_id"] == row["id"]][:edge_limit]
+    inferred = [
+        entry
+        for relation in ontology.RELATION_IDS
+        if relation in ontology.TRANSITIVE_RELATIONS
+        for entry in _closure(conn, row["id"], relation, direction="up", max_depth=6, limit=edge_limit)
+    ][:edge_limit]
     return {
         "concept": _concept_dict(conn, row, include_prose=True),
         "outbound": [
             _edge_dict(conn, edge, evidence_limit=evidence_limit) for edge in outbound
         ],
         "inbound": [
-            _edge_dict(conn, edge, evidence_limit=evidence_limit) for edge in inbound
+            _edge_dict(conn, edge, evidence_limit=evidence_limit, inverse=True) for edge in inbound
         ],
+        "inferred": inferred,
         "mentions": _mentions(conn, row["id"], limit=mention_limit),
+    }
+
+
+def _concept_ref(row: sqlite3.Row) -> dict:
+    return {"name": row["name"], "slug": row["slug"], "kind": row["concept_type"]}
+
+
+def _closure(
+    conn: sqlite3.Connection,
+    concept_id: int,
+    relation: str,
+    *,
+    direction: str,
+    max_depth: int,
+    limit: int,
+) -> list[dict]:
+    """전이 관계를 따라 2단계 이상 떨어져 직접 단언되지 않은 관계를 BFS 최단 전제 경로와 함께 반환."""
+    if direction == "up":
+        sql = "SELECT dst_id FROM concept_edges WHERE src_id = ? AND relation = ? ORDER BY dst_id"
+    else:
+        sql = "SELECT src_id FROM concept_edges WHERE dst_id = ? AND relation = ? ORDER BY src_id"
+    parent: dict[int, int | None] = {concept_id: None}
+    depth = {concept_id: 0}
+    queue: deque[int] = deque([concept_id])
+    found: list[int] = []
+    while queue and len(found) < limit:
+        current = queue.popleft()
+        if depth[current] >= max_depth:
+            continue
+        for (neighbor,) in conn.execute(sql, (current, relation)):
+            if neighbor in parent:
+                continue
+            parent[neighbor] = current
+            depth[neighbor] = depth[current] + 1
+            queue.append(neighbor)
+            if depth[neighbor] >= 2:
+                found.append(neighbor)
+    results = []
+    for node in found[:limit]:
+        path = [node]
+        while parent[path[-1]] is not None:
+            path.append(parent[path[-1]])
+        path.reverse()  # concept_id → … → node (탐색 순서)
+        chain = path if direction == "up" else path[::-1]  # 관계 방향: source → … → target
+        rows = [_concept_by_id(conn, concept) for concept in chain]
+        results.append(
+            {
+                "source": _concept_ref(rows[0]),
+                "target": _concept_ref(rows[-1]),
+                "relation": relation,
+                "inferred": True,
+                "hops": len(chain) - 1,
+                "via": [item["slug"] for item in rows],
+            }
+        )
+    return results
+
+
+def transitive_closure(
+    conn: sqlite3.Connection,
+    identifier: str,
+    relation: str,
+    *,
+    direction: str = "up",
+    max_depth: int = 6,
+    limit: int = 50,
+) -> dict:
+    """전이 관계(is_a, part_of, prerequisite_of)의 추론 관계를 한 개념에서 계산한다.
+
+    up은 저장 방향(src → dst: is_a·part_of는 상위, prerequisite_of는 그것을 필요로 하는 쪽), down은
+    역방향이다. 결과는 직접 단언된 관계를 뺀 추론 관계뿐이며 각각 전제 경로(via)와 inferred: true를
+    가진다. 추론 관계는 근거가 아니고 저장하지 않는다.
+    """
+    if relation not in ontology.TRANSITIVE_RELATIONS:
+        raise ValueError(f"relation must be one of {sorted(ontology.TRANSITIVE_RELATIONS)}.")
+    if direction not in ("up", "down"):
+        raise ValueError("direction must be 'up' or 'down'.")
+    max_depth = _bounded(max_depth, minimum=2, maximum=10, name="max_depth")
+    limit = _bounded(limit, minimum=1, maximum=200, name="limit")
+    row = gstore.get_concept(conn, identifier)
+    if row is None:
+        raise ValueError(f"Concept not found: {identifier}")
+    return {
+        "concept": _concept_dict(conn, row),
+        "relation": relation,
+        "direction": direction,
+        "max_depth": max_depth,
+        "inferred": _closure(conn, row["id"], relation, direction=direction, max_depth=max_depth, limit=limit),
     }
 
 
@@ -530,7 +635,10 @@ def affected(
     relations: list[str] | None = None,
     evidence_limit: int = 3,
 ) -> dict:
-    """Traverse stored edge direction to return downstream concepts."""
+    """Traverse stored edge direction to return downstream concepts.
+
+    Symmetric relations (related_to, alternative_to) have no direction and are followed both ways.
+    """
     max_depth = _bounded(max_depth, minimum=1, maximum=6, name="max_depth")
     max_nodes = _bounded(max_nodes, minimum=1, maximum=100, name="max_nodes")
     evidence_limit = _bounded(
@@ -564,8 +672,17 @@ def affected(
                 conn,
                 edge,
                 evidence_limit=evidence_limit,
-                traversed_from=edge["src_id"],
+                traversed_from=_traversed_from(edge, depth_by_id),
             )
             for edge in edges
         ],
     }
+
+
+def _traversed_from(edge: sqlite3.Row, depth_by_id: dict[int, int]) -> int:
+    """방향 탐색에서 관계를 따라온 쪽. 대칭 관계만 역방향일 수 있다 — 먼저 닿은(얕은) 끝이 출발점."""
+    if edge["relation"] not in ontology.SYMMETRIC_RELATIONS:
+        return edge["src_id"]
+    unreached = len(depth_by_id) + 1
+    src_depth = depth_by_id.get(edge["src_id"], unreached)
+    return edge["src_id"] if src_depth <= depth_by_id.get(edge["dst_id"], unreached) else edge["dst_id"]

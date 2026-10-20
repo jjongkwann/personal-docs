@@ -158,8 +158,23 @@ claude mcp add --transport http pkb http://192.168.0.5:8787/mcp -s user
 
 Elasticsearch는 `network.host: 127.0.0.1`로 두세요. MCP 서버만 열면 됩니다.
 
-> ⚠️ MCP 서버에는 인증이 없고 `write_file` 툴이 볼트 어디에나 쓸 수 있습니다. 홈 LAN이나 본인이
-> 운영하는 VPN 안에서만 여세요. 이 포트를 공유기에서 인터넷으로 포트포워딩하면 안 됩니다.
+> ⚠️ `ACCESS_POLICY`가 없으면 MCP 서버에는 인증이 없고 `write_file` 툴이 볼트 어디에나 쓸 수 있습니다.
+> 홈 LAN이나 본인이 운영하는 VPN 안에서만 여세요. 이 포트를 공유기에서 인터넷으로 포트포워딩하면 안 됩니다.
+
+### 인증 (`ACCESS_POLICY`)
+
+접근 정책([접근 제어](access-control.md))을 쓰면 클라이언트마다 자기 Bearer 토큰을 보냅니다.
+`uv run pkb access token`으로 토큰을 만들고, 출력된 `token_sha256`을 정책의 해당 주체 아래에 넣은 뒤
+토큰을 클라이언트에 줍니다.
+
+```bash
+claude mcp add --transport http pkb http://127.0.0.1:8787/mcp -s user --header "Authorization: Bearer $PKB_TOKEN"
+codex mcp add pkb --url http://127.0.0.1:8787/mcp --bearer-token-env-var PKB_TOKEN
+gemini mcp add pkb http://127.0.0.1:8787/mcp -t http -s user -H "Authorization: Bearer $PKB_TOKEN"
+```
+
+토큰이 없거나 틀린 요청은 `401`과 보호 자원 메타데이터를 가리키는 `WWW-Authenticate` 헤더를 받습니다.
+연결된 클라이언트는 `whoami`로 자기 주체와 읽고 쓸 수 있는 경로를 확인할 수 있습니다.
 
 ## 3. 확인
 
@@ -385,6 +400,10 @@ MCP ContextForge는 게이트웨이를 다시 띄워도 도구를 다시 찾지 
 | `graph_store_concepts` | Claude Code가 추출한 개념/관계 JSON을 SQLite 그래프 DB에 저장 |
 | `graph_curate` | 개념 큐레이션 — 미큐레이션 목록 조회, real/vocab 라벨·산문 저장 |
 | `graph_merge` | 표기 변형 개념을 대표 개념으로 병합 (엣지/멘션/별칭 승계) |
+| `graph_ontology` | TBox(개념 kind, 관계 특성·시그니처) 조회. `graph_store_concepts`는 이 어휘만 받음 |
+| `graph_inferred` | 한 개념에서 전이 관계(`is_a`, `part_of`, `prerequisite_of`)로 추론한 관계와 전제 경로. 저장하지 않음 |
+| `graph_validate` | 관리자. TBox 기준 hard/soft 검증 보고서 (순환, 시그니처 위반, 미분류 개념 등) |
+| `graph_classify` | 관리자. 미분류 개념 목록 조회 뒤 kind 지정(`[{slug, kind}]`), 이제 시그니처를 어기는 관계 보고 |
 
 Graph RAG의 MCP-first 흐름은 `graph_list_chunks`로 청크를 읽고, Claude Code가 직접 개념과 관계를 추출한 뒤, `graph_store_concepts`로 저장하는 방식입니다. 저장 후 `graph_curate`로 real/vocab을 라벨링하고 표기 변형은 `graph_merge`로 병합합니다. 관계 조회는 `graph_explain`/`graph_path`/`graph_query`/`graph_affected`로 SQLite를 직접 읽고, 사람이 보는 지도는 `graph_map`으로 오프라인 HTML을 만듭니다.
 

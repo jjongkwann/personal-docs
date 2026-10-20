@@ -36,6 +36,7 @@ Claude Code·Codex·Gemini에서는 MCP 도구로 검색·작성·인제스트�
 | Obsidian 연동 | 코퍼스를 볼트 안에 두고 원본 Markdown과 백링크를 직접 관리합니다. |
 | Graph RAG | 개념과 근거를 SQLite에 저장하고 explain/path/subgraph 순회와 오프라인 Evidence Map 렌더를 지원합니다. |
 | 안전한 운영 | 동기화 전 정리 후보 확인, 문서 아카이브·복구, 상태 점검, 검색 품질 평가를 지원합니다. |
+| 접근 제어 | 선택 기능인 경로 규칙 정책과 Bearer 토큰으로, 검색·목록·파일·미디어·개념 그래프가 호출자마다 읽을 수 있는 것만 보여 줍니다 ([자세히](docs/ko/access-control.md)). |
 
 ## 동작 구조
 

@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import mimetypes
 import stat
+import unicodedata
 from pathlib import Path
 
+from pkb import access
 from pkb.config import data_dir
 
 MAX_FILE_BYTES = 10 * 1024 * 1024
@@ -39,6 +41,12 @@ def list_files(directory: str = "data", offset: int = 0, limit: int = 100) -> di
     if offset < 0 or not 1 <= limit <= 200:
         raise ValueError("offset은 0 이상, limit은 1~200이어야 합니다.")
     root, target = _resolve(directory)
+    # 폴더는 그 아래 읽을 수 있는 것이 하나라도 있을 때만 보인다. iterdir 이름은 실제 항목 이름이라
+    # 자식 자원은 부모 자원에 이름을 붙이기만 하면 된다.
+    checked = access.is_restricted()
+    parent = access.file_resource("data/", root, target) if checked else ""
+    if checked and not access.can_list(parent):
+        raise access.AccessDeniedError(f"접근 권한이 없거나 존재하지 않습니다: {directory}")
     if not target.is_dir():
         raise ValueError(f"폴더가 없습니다: {directory}")
     entries = []
@@ -48,6 +56,10 @@ def list_files(directory: str = "data", offset: int = 0, limit: int = 100) -> di
         info = child.stat()
         if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
             continue
+        if checked:
+            resource = f"{parent}/{unicodedata.normalize('NFC', child.name)}"
+            if not (access.can_list(resource) if stat.S_ISDIR(info.st_mode) else access.can("read", resource)):
+                continue
         entry = {
             "file_path": "data/" + child.relative_to(root).as_posix(),
             "name": child.name,
@@ -68,6 +80,7 @@ def list_files(directory: str = "data", offset: int = 0, limit: int = 100) -> di
 
 def read_file_bytes(file_path: str) -> tuple[dict, bytes]:
     root, target = _resolve(file_path)
+    access.require_file("read", "data/", root, target, label=file_path)
     if not target.is_file():
         raise ValueError(f"일반 파일이 아닙니다: {file_path}")
     if target.stat().st_size > MAX_FILE_BYTES:

@@ -6,6 +6,7 @@ from functools import lru_cache
 
 from elasticsearch import Elasticsearch, NotFoundError
 
+from pkb import access
 from pkb.config import settings
 from pkb.items import ITEM_MAPPING_PROPERTIES, ITEM_METADATA_FIELDS
 from pkb.legal import LEGAL_MAPPING_PROPERTIES
@@ -453,7 +454,8 @@ def list_categories(es: Elasticsearch, include_archived: bool = False) -> dict[s
     index = doc_index_name()
     if not es.indices.exists(index=index):
         raise ValueError("문서 색인이 없습니다. 서버에서 `uv run pkb doc-index`로 채우세요.")
-    clauses = list(exclude_media_filter(None))
+    # 집계는 query가 고른 문서만 센다 — 권한 필터를 query에 넣어야 개수로도 새지 않는다.
+    clauses = [*exclude_media_filter(None), *access.search_filter()]
     if not include_archived:
         clauses.append({"bool": {"must_not": {"exists": {"field": "archived_at"}}}})
     query = {"bool": {"filter": clauses}}
@@ -624,7 +626,7 @@ def list_documents(
     문서 색인이 있으면 그 행을 읽는다. 없으면(`pkb doc-index` 전) 청크를 doc_id로 묶어
     세는데, 문서가 많으면 카테고리 없이 부를 때 시간 초과가 난다. 반환 형태는 같다.
     """
-    clauses: list[dict] = list(exclude_media_filter(None))
+    clauses: list[dict] = [*exclude_media_filter(None), *access.search_filter()]
     if category:
         clauses.append({"term": {"category": category}})
     if not include_archived:
@@ -632,7 +634,7 @@ def list_documents(
     query: dict = {"bool": {"must": clauses}}
 
     if es.indices.exists(index=doc_index_name()):
-        return _list_document_rows(es, query)
+        return access.readable(_list_document_rows(es, query))
 
     docs = []
     sub_aggs = {
@@ -643,7 +645,7 @@ def list_documents(
         hit = bucket["meta"]["hits"]["hits"][0]["_source"]
         hit["chunks"] = bucket["chunk_count"]["value"]
         docs.append(hit)
-    return docs
+    return access.readable(docs)
 
 
 def _list_document_rows(es: Elasticsearch, query: dict) -> list[dict]:

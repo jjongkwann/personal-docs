@@ -291,6 +291,9 @@ def build_health_report_status(es) -> HealthReport:
                 evidence_covered, evidence_total = gstore.edge_evidence_coverage(conn)
                 evidence_rebuild_active = gstore.edge_evidence_rebuild_active(conn)
                 orphans = gstore.orphan_concept_slugs(conn)
+                from pkb.graph.validate import validate_graph
+
+                tbox = validate_graph(conn, sample_limit=0)
             if not s["concepts"]:
                 lines.append("그래프가 비어 있음 (개념 0개)")
             else:
@@ -306,6 +309,14 @@ def build_health_report_status(es) -> HealthReport:
                         f"  ⚠ edge evidence coverage: {evidence_covered}/{evidence_total} "
                         "— `pkb graph reset-evidence --yes` 후 전량 재추출 필요"
                     )
+                hard = {key: section["count"] for key, section in tbox["hard"].items() if section["count"]}
+                lines.append(
+                    f"  TBox {tbox['tbox_version']}: hard 위반 {sum(hard.values())}"
+                    + (f" ({', '.join(f'{k}={v}' for k, v in hard.items())})" if hard else "")
+                    + f" | 미분류 개념 {tbox['soft']['unclassified_concepts']['count']}"
+                    + f" | 시그니처 미검사 관계 {tbox['soft']['unchecked_edges']['count']}"
+                    + " — 자세히는 `pkb graph validate`"
+                )
                 if orphans:
                     lines.append(f"  고아 개념(멘션 0): {len(orphans)}")
                     for slug in orphans[:10]:  # ES 측 후보 나열과 동일한 10건 캡

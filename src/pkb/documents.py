@@ -136,11 +136,12 @@ def fetch_document_sources(
     es: Elasticsearch, doc_id: str, *, limit: int = 500
 ) -> list[dict]:
     """doc_id의 청크를 순서대로 읽고 embedding을 제외한 source 목록을 반환."""
+    from pkb import access
     from pkb.config import settings
 
     result = es.search(
         index=settings.es_index,
-        query={"term": {"doc_id": doc_id}},
+        query={"bool": {"filter": [{"term": {"doc_id": doc_id}}, *access.search_filter()]}},
         size=limit,
         source_excludes=["embedding"],
         sort=[{"chunk_index": {"order": "asc"}}],

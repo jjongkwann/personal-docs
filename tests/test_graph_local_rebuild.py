@@ -38,7 +38,7 @@ def _batch():
                 doc_id="data/rag/x.md",
                 chunk_index=0,
                 concepts=[
-                    ExtractedConcept(name="RRF", aliases=[], description="검색 순위 결합")
+                    ExtractedConcept(name="RRF", kind="algorithm", aliases=[], description="검색 순위 결합")
                 ],
                 relations=[
                     ExtractedRelation(
@@ -66,7 +66,7 @@ def test_storage_payload_uses_trusted_chunk_metadata():
 def test_storage_payload_keeps_relations_with_local_endpoints():
     batch = _batch()
     batch.items[0].concepts.append(
-        ExtractedConcept(name="검색", aliases=[], description="정보를 찾는 과정")
+        ExtractedConcept(name="검색", kind="field", aliases=[], description="정보를 찾는 과정")
     )
 
     payload = json.loads(_storage_payload(batch, [_chunk()]))
@@ -83,8 +83,8 @@ def test_storage_payload_drops_navigation_concepts_and_their_relations():
                 doc_id="data/rag/x.md",
                 chunk_index=0,
                 concepts=[
-                    ExtractedConcept(name="학습 로드맵"),
-                    ExtractedConcept(name="RRF"),
+                    ExtractedConcept(name="학습 로드맵", kind="field"),
+                    ExtractedConcept(name="RRF", kind="algorithm"),
                 ],
                 relations=[
                     ExtractedRelation(
@@ -108,8 +108,8 @@ def test_storage_payload_requires_source_grounding_for_concepts():
                 doc_id="data/rag/x.md",
                 chunk_index=0,
                 concepts=[
-                    ExtractedConcept(name="RRF"),
-                    ExtractedConcept(name="Data Parallelism", aliases=["DP"]),
+                    ExtractedConcept(name="RRF", kind="algorithm"),
+                    ExtractedConcept(name="Data Parallelism", kind="technique", aliases=["DP"]),
                 ],
             )
         ]
@@ -205,14 +205,14 @@ def test_ollama_extract_merges_split_items_for_same_chunk(monkeypatch):
                 "doc_id": "data/rag/x.md",
                 "chunk_index": 0,
                 "concepts": [
-                    {"name": f"C{i}", "aliases": [], "description": "d"} for i in range(8)
+                    {"name": f"C{i}", "kind": "technique", "aliases": [], "description": "d"} for i in range(8)
                 ],
                 "relations": [],
             },
             {
                 "doc_id": "data/rag/x.md",
                 "chunk_index": 0,
-                "concepts": [{"name": "C8", "aliases": [], "description": "d"}],
+                "concepts": [{"name": "C8", "kind": "technique", "aliases": [], "description": "d"}],
                 "relations": [
                     {"src": "C0", "dst": "C8", "type": "related_to", "confidence": 0.7}
                 ],
@@ -250,13 +250,13 @@ def test_ollama_extract_drops_hallucinated_extra_chunk_key(monkeypatch):
             {
                 "doc_id": "data/rag/x.md",
                 "chunk_index": 0,
-                "concepts": [{"name": "C0", "aliases": [], "description": "d"}],
+                "concepts": [{"name": "C0", "kind": "technique", "aliases": [], "description": "d"}],
                 "relations": [],
             },
             {
                 "doc_id": "data/rag/x.md",
                 "chunk_index": 1,
-                "concepts": [{"name": "C1", "aliases": [], "description": "d"}],
+                "concepts": [{"name": "C1", "kind": "technique", "aliases": [], "description": "d"}],
                 "relations": [],
             },
         ]
@@ -328,7 +328,7 @@ def test_ollama_extract_repairs_mangled_doc_id(monkeypatch):
                 # 밑줄 하나 누락 — 실제 gpt-oss:20b 응답에서 관측된 형태
                 "doc_id": "data/rag/1.1.01_NLP_과제_스펙트럼과_지식의존도.md",
                 "chunk_index": 0,
-                "concepts": [{"name": "RAG", "aliases": [], "description": "d"}],
+                "concepts": [{"name": "RAG", "kind": "technique", "aliases": [], "description": "d"}],
                 "relations": [],
             }
         ]

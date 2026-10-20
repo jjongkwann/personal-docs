@@ -6,6 +6,7 @@ from time import perf_counter
 
 from elasticsearch import Elasticsearch
 
+from pkb import access
 from pkb.config import settings
 from pkb.embeddings import embed_queries
 from pkb.items import normalize_person
@@ -303,6 +304,8 @@ def _search_filters(
     filters.extend(_exclude_doc_prefix_filter(exclude_doc_prefix))
     filters.extend(legal_filter(**legal_filters))
     filters.extend(scope_filters or [])
+    # 권한 필터는 BM25·kNN·이웃 확장이 모두 이 함수를 거치므로 여기 한 곳에 붙인다.
+    filters.extend(access.search_filter())
     return filters
 
 
@@ -499,7 +502,7 @@ def hybrid_search(
                 merged[hit["_id"]]["score"] += hit["score"]
             else:
                 merged[hit["_id"]] = hit
-    candidates = sorted(merged.values(), key=lambda h: -h["score"])
+    candidates = access.readable(sorted(merged.values(), key=lambda h: -h["score"]))
     # Apply before reranking only when no reranker will overwrite ``score``;
     # reranked searches apply the same operation below after CrossEncoder
     # scores are available.
@@ -745,8 +748,10 @@ def related_documents(
 
     if not 1 <= top_k <= 100:
         raise ValueError("top_k는 1~100이어야 합니다")
+    access.require("read", doc_id)
     filters = [
         {"bool": {"must_not": {"term": {"doc_id": doc_id}}}},
+        *access.search_filter(),
         *_lifecycle_filter(include_archived),
         *scope_filter(
             doc_ids=doc_ids, source_types=source_types, people=people,
@@ -776,4 +781,4 @@ def related_documents(
         size=top_k,
         source_excludes=["doc_vector"],
     )
-    return [{**hit["_source"], "score": hit["_score"]} for hit in result["hits"]["hits"]]
+    return access.readable({**hit["_source"], "score": hit["_score"]} for hit in result["hits"]["hits"])

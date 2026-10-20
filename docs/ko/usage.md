@@ -403,6 +403,12 @@ uv run pkb graph path "BM25" "RRF"              # 제한된 최단 경로
 uv run pkb graph query "키워드 검색과 벡터 검색은 어떻게 연결돼?"   # 의미 시드 하위 그래프
 uv run pkb graph affected "BM25" --relation prerequisite_of  # 저장 방향 하위 순회
 
+# 온톨로지(TBox) — docs/ko/graph-rag.md의 "온톨로지 (TBox)" 참고
+uv run pkb graph ontology                       # kind, 관계 특성·시그니처
+uv run pkb graph inferred "BM25" --relation is_a  # 전제 경로가 붙은 추론 상위 개념
+uv run pkb graph validate                       # hard/soft 보고서. hard 위반이 있으면 종료 코드 1
+uv run pkb graph export --out graph.ttl         # OWL TBox + SKOS 개념 (--format trig는 추론 폐포 포함)
+
 # 오프라인 Evidence Map HTML (전체 옵션 표는 docs/ko/graph-rag.md 참고)
 uv run pkb graph map --concept "BM25" --open
 
@@ -508,7 +514,9 @@ GRAPH_DEDUP_THRESHOLD=0.88
 | `GRAPH_DEDUP_THRESHOLD` | `0.88` | 개념 병합 임베딩 유사도 임계값 (bge-m3 기준. jina v5 small은 `0.89`가 같은 병합 비율) |
 | `DEFAULT_TOP_K` | `5` | `pkb query`·`search_knowledge` 기본 결과 수 |
 | `MCP_PORT` | `8787` | 공유 HTTP MCP 서버 포트 |
-| `MCP_HOST` | `127.0.0.1` | 바인딩 주소. 서버를 다른 머신에 두고 신뢰하는 LAN/VPN에서 붙을 때만 `0.0.0.0`으로. 인증이 없고 `write_file`이 볼트 어디든 쓸 수 있음. |
+| `MCP_HOST` | `127.0.0.1` | 바인딩 주소. 서버를 다른 머신에 두고 신뢰하는 LAN/VPN에서 붙을 때만 `0.0.0.0`으로. `ACCESS_POLICY`가 없으면 인증이 없고 `write_file`이 볼트 어디든 쓸 수 있음. |
+| `ACCESS_POLICY` | (비어 있음) | 접근 제어 정책 YAML 경로([접근 제어](access-control.md)). 비우면 단일 사용자 모드로 모든 호출이 관리자. 설정하면 Bearer 토큰이 필요하고 경로 규칙이 읽기·쓰기를 정함 |
+| `MCP_PUBLIC_URL` | (비어 있음) | 클라이언트가 접속하는 MCP 주소. OAuth 메타데이터에 보호 자원으로 알린다. 비우면 `http://MCP_HOST:MCP_PORT/mcp` |
 | `WARMUP_ON_START` | `false` | MCP 서버 기동 시 모델 예열. 끄면 첫 검색까지 서버가 ~50MB로 유휴 |
 | `MODEL_IDLE_SECONDS` | `300` | 마지막 사용 뒤 이 시간(초)이 지나면 임베딩·리랭커 모델을 내려 메모리를 돌려줍니다. 다음 호출 때 다시 올립니다. `0`이면 계속 유지 |
 | `EMBEDDING_TRUST_REMOTE_CODE` | `false` | 모델 저장소의 코드를 실행 (`jinaai/jina-embeddings-v5-text-small`에 필요, EmbeddingGemma 2는 불필요). 믿는 모델에만 |

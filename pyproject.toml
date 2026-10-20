@@ -23,6 +23,8 @@ dependencies = [
     "transformers>=5.13",
     # EmbeddingGemma 2의 프로세서가 텍스트만 올려도 이미지 프로세서(torchvision)를 불러온다
     "torchvision>=0.26,<0.27",
+    # 개념 그래프 TBox·개념을 OWL/SKOS(Turtle·TriG)로 내보내기 (pkb graph export)
+    "rdflib>=7.6",
 ]
 
 [project.scripts]

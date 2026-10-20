@@ -88,7 +88,7 @@ def _store_both_chunks():
     items = {
         "items": [
             {"doc_id": "data/study/x.md", "chunk_index": 0, "category": "study", "title": "X",
-             "concepts": [{"name": "BM25", "description": "랭킹 함수"}]},
+             "concepts": [{"name": "BM25", "kind": "algorithm", "description": "랭킹 함수"}]},
             {"doc_id": "data/study/x.md", "chunk_index": 1, "category": "study", "title": "X",
              "concepts": []},
         ]
@@ -236,7 +236,7 @@ def test_reextraction_replaces_mentions_of_chunk(graph_db, fake_es):
     _store(json.dumps({
         "items": [
             {"doc_id": "data/study/x.md", "chunk_index": 0, "category": "study", "title": "X",
-             "concepts": [{"name": "RRF", "description": "순위 융합"}]},
+             "concepts": [{"name": "RRF", "kind": "algorithm", "description": "순위 융합"}]},
         ]
     }, ensure_ascii=False))
 
@@ -265,7 +265,7 @@ def test_reextraction_replaces_edge_evidence_without_inflation(graph_db, fake_es
                 "chunk_index": 0,
                 "category": "study",
                 "title": "X",
-                "concepts": [{"name": "BM25"}, {"name": "RRF"}],
+                "concepts": [{"name": "BM25", "kind": "algorithm"}, {"name": "RRF", "kind": "algorithm"}],
                 "relations": [{"src": "BM25", "dst": "RRF", "type": "related_to"}],
             }
         ]
@@ -286,7 +286,7 @@ def test_reextraction_replaces_edge_evidence_without_inflation(graph_db, fake_es
                 "chunk_index": 0,
                 "category": "study",
                 "title": "X",
-                "concepts": [{"name": "BM25"}, {"name": "Vector Search"}],
+                "concepts": [{"name": "BM25", "kind": "algorithm"}, {"name": "Vector Search", "kind": "technique"}],
                 "relations": [
                     {"src": "BM25", "dst": "Vector Search", "type": "prerequisite_of"}
                 ],
@@ -318,7 +318,7 @@ def test_partial_recall_preserves_existing_mentions(graph_db, fake_es):
     _store(json.dumps({  # 같은 청크에 누락 개념만 추가 (해시 동일)
         "items": [
             {"doc_id": "data/study/x.md", "chunk_index": 0, "category": "study", "title": "X",
-             "concepts": [{"name": "RRF", "description": "순위 융합"}],
+             "concepts": [{"name": "RRF", "kind": "algorithm", "description": "순위 융합"}],
              "relations": [{"src": "RRF", "dst": "BM25", "type": "related_to"}]},
         ]
     }, ensure_ascii=False))
@@ -330,7 +330,8 @@ def test_partial_recall_preserves_existing_mentions(graph_db, fake_es):
         assert len(gstore.list_mentions(conn, bm25["id"])) == 1  # 1차 저장분 보존
         assert bm25["mention_count"] == 1
         assert len(gstore.list_mentions(conn, rrf["id"])) == 1
-        assert len(gstore.list_edges(conn, rrf["id"], "related_to")) == 1  # 관계 해소 성공
+        # 관계 해소 성공 — 대칭 관계라 id가 작은 BM25 쪽으로 저장된다
+        assert len(gstore.list_edges(conn, bm25["id"], "related_to")) == 1
     finally:
         conn.close()
 

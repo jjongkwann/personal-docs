@@ -25,7 +25,7 @@
 
 | 테이블 | 역할 |
 |--------|------|
-| `concepts` | 정규화된 개념 노드 (name, slug, description, embedding, mention_count) |
+| `concepts` | 정규화된 개념 노드 (name, slug, kind `concept_type`, description, embedding, mention_count) |
 | `concept_aliases` | DI → Dependency Injection 같은 별칭 |
 | `documents` | ES `doc_id`와 연결되는 문서 노드 |
 | `concept_edges` | 개념 간 관계의 집계 투영 (relation, weight, evidence_count) |
@@ -33,7 +33,7 @@
 | `concept_mentions` | 개념이 등장한 `doc_id`/`chunk_index` |
 | `concept_curation` | 개념 큐레이션(real/vocab) + 증류 산문 |
 | `extracted_chunks` | 추출 완료 마커 `(doc_id, chunk_index)` → `content_hash`, `input_hash` |
-| `graph_meta` | key/value 마커 — 1회성 스키마 마이그레이션과 `edge_evidence_rebuild` staging 플래그 |
+| `graph_meta` | key/value 마커 — 1회성 스키마 마이그레이션, `tbox_version`, `edge_evidence_rebuild` staging 플래그 |
 
 증분 추출은 `extracted_chunks`가 기준이다. 현재 ES 청크와 마커의 두 해시 중 하나라도 다르면
 pending이 된다. `content_hash`는 본문을, `input_hash`는 본문에 더해 `doc_id`, `chunk_index`,
@@ -70,6 +70,118 @@ loser 행은 같은 SQLite 트랜잭션에서 삭제한다. 주의: "MCP Server"
 
 ---
 
+## 온톨로지 (TBox)
+
+`src/pkb/graph/ontology.py`는 모든 개념과 관계가 맞아야 하는 클래스와 관계를 정의한다. 데이터만
+있다(`TBOX_VERSION = "pkb-tbox/1"`, `graph_meta.tbox_version`에 기록). 저장 시 검사, 검증, 질의 시
+추론, 추출 프롬프트, RDF 내보내기가 모두 이 정의를 읽는다.
+
+### 개념 종류 (kind)
+개념마다 `concepts.concept_type`에 leaf kind가 정확히 하나 있고 leaf kind끼리는 서로 배타적이다.
+NULL은 아직 분류하지 않은 레거시 개념이다. 한국어·영어 한 줄 정의는 `ontology.KINDS`에 있다.
+
+| 그룹 | kind |
+|---|---|
+| Abstract | `field`, `problem`, `principle` |
+| Method | `technique`, `algorithm`, `pattern` |
+| Artifact | `software`, `model`, `dataset`, `protocol` |
+| Measure | `metric` |
+
+### 관계
+
+| 관계 | 역방향 (표시용) | 특성 | 시그니처 (src → dst) |
+|---|---|---|---|
+| `is_a` | `has_subtype` | 전이, 비반사, 비순환 | 두 끝의 kind가 같음 |
+| `part_of` | `has_part` | 전이, 비반사, 비순환 | 같은 그룹, 또는 dst가 `field` |
+| `prerequisite_of` | `requires` | 전이, 비반사, 비순환 | any → any |
+| `uses` | `used_by` | 비반사 | Method\|Artifact → Method\|Artifact\|Measure |
+| `implements` | `implemented_by` | 비대칭, 비반사 | software\|model → algorithm\|technique\|pattern\|protocol |
+| `addresses` | `addressed_by` | 비반사 | Method\|Artifact → problem |
+| `alternative_to` | 자기 자신 | 대칭, 비반사 | 같은 그룹 |
+| `related_to` | 자기 자신 | 대칭, 비반사 | any → any. 더 구체적인 관계가 없을 때만 |
+
+`example_of`는 어휘에서 빠졌고(기존 행은 `is_a`로 이관) 자유 라벨은 거부한다. `ontology.describe()`는
+TBox 전체를 JSON으로, `ontology.allowed_relations(src_kind, dst_kind)`는 두 kind에 시그니처가 맞는
+관계를 돌려준다.
+
+### 저장 시 규칙
+`store.add_edge`가 쓰기 전에 모든 관계를 검사하므로 `graph_store_concepts`와 로컬 Ollama 재구축이
+같은 규칙을 따른다.
+
+- 관계 타입은 카탈로그에 있어야 하고 자기 자신을 가리킬 수 없다.
+- 두 끝에 모두 kind가 있으면 시그니처가 맞아야 한다. 한쪽이라도 미분류면 저장하고 unchecked로 센다.
+- 비순환 관계는 dst에서 같은 관계를 따라 src에 닿으면(순환이 생기면) 거부한다.
+- 대칭 관계는 `src_id < dst_id` 한 방향으로만 저장한다.
+
+`graph_store_concepts` 결과는 거부한 관계를 한 줄에 하나씩 JSON으로 싣는다. `code`
+(`unknown_relation`, `self_loop`, `signature`, `cycle`), `reason`, 두 kind, `allowed_relations`가
+들어 있다. 같은 payload의 다른 유효 항목·관계는 그대로 저장한다. 개념에는 `kind`를 붙인다. 유효한
+kind가 없는 새 개념은 거부하고(`allowed_kinds`와 함께 보고), 미분류 기존 개념에는 payload의 kind를
+채우며, 다른 kind가 이미 있는 기존 개념은 저장된 kind를 유지하고 경고한다. kind 변경은 명시적
+분류로만 한다.
+
+### 이관
+그래프에 연결할 때마다 `concept_type` 열이 없으면 더하고, `tbox_version`을 기록하고, TBox에 맞지 않는
+관계 키를 정규화한다. `src_id > dst_id`로 저장된 `related_to`/`alternative_to` 행을 반대 방향으로
+옮기고(근거는 청크별로 합치고 confidence는 최댓값, 집계 관계는 근거에서 다시 계산), `example_of` 행을
+`is_a`로 옮긴다. 양방향으로 저장돼 있던 쌍만 하나로 합쳐진다. 한 번만 도는 이관이 아닌 이유는, 이 변경
+전에 시작한 프로세스(오래 도는 추출기 등)가 같은 DB에 역방향 행을 계속 쓰기 때문이다. 검사 비용은 수 ms다.
+모르는 라벨은 그대로 두고 검증 보고서에 나온다.
+
+### 분류
+`services.list_unclassified_concepts(conn, offset=0, limit=50)`는 미분류 개념을 언급 수 순으로 이름·
+설명·별칭과 함께 페이지 단위로 준다. `services.classify_concepts(conn, [{"slug", "kind"}])`는 kind를
+지정하거나 바꾼다. kind가 하나라도 틀리면 배치 전체를 거부한다. 결과에는 분류 뒤 시그니처를 어기게
+된 관계가 들어 있어 고칠 수 있다.
+
+### 검증
+`validate.validate_graph(conn)`는 항목별 개수와 제한된 slug 샘플을 돌려준다.
+
+- **hard**: 모르는 관계 라벨, 자기 루프, 시그니처 위반, 비순환 관계의 순환(slug 경로), 두 방향으로
+  저장된 대칭 쌍, 근거 없는 관계.
+- **soft**: 미분류 개념, unchecked 관계, `is_a`/`part_of` 경로로 이미 이어진 개념 사이의
+  `related_to`/`alternative_to`(SKOS 무결성 조건 S27), 같은 관계의 더 긴 경로로 이미 따라 나오는
+  전이 관계, 전체 관계 중 `related_to` 비율.
+
+### 추론
+추론 관계는 질의 시점에 계산한다. 저장하지 않고 근거로 세지 않는다.
+`query.transitive_closure(conn, concept, relation, direction="up"|"down")`는 `is_a`, `part_of`,
+`prerequisite_of`를 따라가 직접 단언되지 않은 관계만 돌려준다. 각 결과에는 `inferred: true`,
+`hops`, 전제 경로 `via`가 있다. `up`은 저장 방향이다. `graph_explain`은 `inferred`
+목록(outbound 폐포), inbound 관계의 `inverse_relation`, 개념과 관계 끝점의 `kind`를 더한다. 방향
+탐색(`graph_affected`, 방향 있는 `graph_path`)은 대칭 관계를 양쪽으로 따라간다.
+
+### RDF 내보내기
+`export.export_rdf(conn, path, fmt="turtle"|"trig", base="urn:pkb:")`가 쓰는 내용:
+
+- OWL 2 TBox: kind마다 그룹과 루트 클래스 `concept`(`skos:Concept`의 하위 클래스) 아래의 클래스,
+  leaf kind 전체에 `owl:AllDisjointClasses`, 관계마다 특성을 붙인 object property, 역방향 이름의
+  `owl:inverseOf`, 제한이 있는 domain/range, `skos:broader`(`is_a`는 `isothes:broaderGeneric`,
+  `part_of`는 `isothes:broaderPartitive`도) 또는 `skos:related`로의 `rdfs:subPropertyOf`. 버전 IRI는
+  `<base>tbox/1`.
+- 개념마다 kind 클래스의 `skos:Concept`(하나의 `skos:ConceptScheme`), `prefLabel`, `altLabel`(별칭),
+  `definition`, 그리고 단언된 관계.
+- TriG는 추론한 전이 폐포를 이름 있는 그래프 `<base>graph/inferred`에 따로 둔다.
+
+개념 IRI는 `<base>concept/<퍼센트 인코딩한 slug>`이고 표시 이름은 쓰지 않는다. OWL 2 DL은 비반사
+특성을 비전이 속성에만 허용하므로 전이 관계에는 대신 주석 `pkbo:acyclic true`를 달고, 같은 kind·같은
+그룹 조건은 `pkbo:signature`에 남긴다.
+
+### 도구와 명령
+
+| MCP 도구 | CLI | 권한 | 용도 |
+|---|---|---|---|
+| `graph_ontology` | `pkb graph ontology` | read | TBox JSON. 추출 전에 읽는다 |
+| `graph_inferred` | `pkb graph inferred 개념 --relation is_a --direction up` | read | 전이 관계로 추론한 관계와 전제 경로 |
+| `graph_validate` | `pkb graph validate` (hard 위반이 있으면 종료 코드 1) | admin | hard/soft 보고서. `pkb doctor`가 개수를 보여 준다 |
+| `graph_classify` | — | admin | 미분류 개념 목록을 받은 뒤 `[{slug, kind}]`로 지정 |
+| — | `pkb graph export --out graph.ttl [--format trig]` | admin (셸 전용) | 그래프 전체 RDF 파일 |
+
+접근 정책이 있으면 읽기 도구는 읽을 수 있는 근거로 이뤄진 하위 그래프만 본다([접근 제어](access-control.md)).
+그래서 추론도 숨겨진 전제를 거치지 않는다.
+
+---
+
 ## 파이프라인: 셀프추출 → 저장 → 네이티브 조회
 
 ### 1. `graph_list_chunks(category|doc_id, offset, limit, pending_only)`
@@ -79,13 +191,16 @@ ES 청크를 `content_hash`와 `input_hash`를 포함한 페이지 단위 JSON�
 겹치는 개념은 기존 name/slug를 재사용한다.
 
 - 개념: 구체적 명사구 (예: "Dependency Injection", "BM25"). 일반 단어/인명/지명 제외
-- 관계 타입: `related_to` | `part_of` | `prerequisite_of` | `example_of` (필요 시 자유 라벨 허용)
+- 개념마다 TBox의 `kind` 하나 (새 개념은 필수)
+- 관계 타입: TBox의 관계 8개. 두 kind에 시그니처가 맞는 가장 구체적인 관계를 고르고 `related_to`는
+  마지막 수단으로만
 - 청크당 개념 8개·관계 12개 이내
 
 ### 2. `graph_store_concepts(items_json)`
 각 item은 개념이 없어도 목록에서 받은 `content_hash`와 `input_hash`를 그대로 전달한다.
 저장 시 현재 ES 청크와 두 해시를 비교한 뒤 SQLite를 변경한다. 해시 누락·청크 삭제·입력
-변경 항목은 개별 거부하고 보고하며, 같은 배치의 유효 항목은 저장한다.
+변경 항목은 개별 거부하고 보고하며, 같은 배치의 유효 항목은 저장한다. TBox를 어긴 개념·관계는
+구조화된 이유와 함께 개별 거부한다(저장 시 규칙 참고).
 
 ### 3. 조회와 열람
 단일 개념은 `graph_explain`, 최단 연결은 `graph_path`, 자연어 관계 질문은 의미 시드 기반
@@ -145,8 +260,8 @@ uv run pkb graph map --path BM25 RAG                     # 두 개념 사이 최
 임베딩하므로 임베딩 모델을 로드하고, `--concept`·`--path`는 SQLite만 읽는다. 구현은
 `src/pkb/graph/viewmap.py`.
 
-일괄 API 빌드나 export CLI는 없다. 구축은 MCP-first로 유지하고, 조회는 SQLite 네이티브 그래프 도구,
-CLI, 오프라인 Evidence Map을 함께 제공한다.
+일괄 API 빌드는 없다. 구축은 MCP-first로 유지하고, 조회는 SQLite 네이티브 그래프 도구, CLI,
+오프라인 Evidence Map, RDF 내보내기(`src/pkb/graph/export.py`)를 함께 제공한다.
 
 ---
 

@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import unquote
 
+from pkb import access
 from pkb.config import data_dir, settings
 
 MEDIA_KINDS = ("image", "audio")
@@ -185,6 +186,15 @@ _sha_cache: dict[Path, tuple[int, int, str]] = {}
 _sha_lock = threading.Lock()
 
 
+def require_media(action: access.Action, doc_id: str) -> MediaFile:
+    """미디어 doc_id 권한을 확인하고 파일을 돌려준다. 문자열 검사를 먼저 해 존재 여부를 숨긴다."""
+    access.require(action, doc_id)
+    media = resolve_media(doc_id)
+    prefix = next(prefix for prefix, root, _ in _roots() if root == media.root)
+    access.require_file(action, prefix, media.root, media.path, label=doc_id)
+    return media
+
+
 def file_sha256(path: Path) -> str:
     info = path.stat()
     key = (info.st_size, info.st_mtime_ns)
@@ -258,7 +268,7 @@ def list_media(es, kinds: list[str] | None = None, missing_only: bool = False, l
     indexed = _indexed_media(es)
     entries = []
     for media in iter_media_files():
-        if media.kind not in wanted:
+        if media.kind not in wanted or not access.can("read", media.doc_id):
             continue
         info = media.path.stat()
         sha = file_sha256(media.path)
@@ -284,7 +294,7 @@ def get_media(doc_id: str, offset: int = 0, length: int | None = None) -> dict:
     from pkb.attachments import MAX_CHUNK_BYTES
 
     length = MAX_CHUNK_BYTES if length is None else length
-    media = resolve_media(doc_id)
+    media = require_media("read", doc_id)
     if not 1 <= length <= MAX_CHUNK_BYTES:
         raise ValueError(f"length는 1~{MAX_CHUNK_BYTES}바이트(4 MiB)여야 합니다.")
     total = media.path.stat().st_size
@@ -536,10 +546,10 @@ def put_media_embeddings(es, doc_id: str, kind: str, sha256: str, model: str, se
     from pkb.search_log import log_change
     from pkb.store import apply_chunk_delta, create_index, get_existing_chunks, refresh_document_rows
 
+    media = require_media("write", doc_id)
     accepted = media_model()
     if model != accepted:
         raise ValueError(f"model이 서버의 MEDIA_EMBEDDING_MODEL과 다릅니다: 받은 {model!r}, 서버 {accepted!r}")
-    media = resolve_media(doc_id)
     if kind != media.kind:
         raise ValueError(f"kind가 파일 종류와 다릅니다: 받은 {kind!r}, 파일 {media.kind!r}")
     actual = file_sha256(media.path)
@@ -611,6 +621,7 @@ def search_media(
             doc_ids=doc_ids, source_types=list(_kinds(kinds)), people=people,
             date_from=date_from, date_to=date_to, path_prefix=path_prefix,
         ),
+        *access.search_filter(),
     ]
     vector = embed_queries([query.strip()])[0]
     result = es.search(
@@ -628,6 +639,11 @@ def search_media(
     results = []
     for hit in result["hits"]["hits"]:
         source = hit["_source"]
+        if not access.can("read", source["doc_id"]):
+            continue
+        # 맥락은 이 파일을 넣은 노트들의 주변 줄을 합친 것이다. 그 노트를 전부 읽을 수 있을 때만 보인다.
+        linked = source.get("linked_from") or []
+        visible = [note for note in linked if access.can("read", note)]
         results.append({
             "doc_id": source["doc_id"],
             "kind": source.get("source_type"),
@@ -635,8 +651,8 @@ def search_media(
             "start": source.get("media_start"),
             "end": source.get("media_end"),
             "score": hit["_score"],
-            "context": (source.get("content") or "")[:500],
-            "linked_from": source.get("linked_from") or [],
+            "context": (source.get("content") or "")[:500] if len(visible) == len(linked) else "",
+            "linked_from": visible,
         })
     return {"query": query, "results": results}
 

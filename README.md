@@ -36,6 +36,7 @@ and the concept graph all stay on your machine.
 | Obsidian integration | Keep the corpus inside your vault and manage original Markdown and backlinks directly. |
 | Graph RAG | Stores concepts and evidence in SQLite, supports native explain/path/subgraph traversal, and renders an offline Evidence Map. |
 | Safe operations | Pre-sync cleanup previews, document archive/restore, health checks, and search quality evaluation. |
+| Access control | Optional path-rule policy with bearer tokens. Search, listings, files, media and the concept graph show each caller only what it may read ([details](docs/access-control.md)). |
 
 ## How It Works
 

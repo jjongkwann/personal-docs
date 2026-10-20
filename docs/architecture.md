@@ -267,6 +267,11 @@ format.
 `src/pkb/mcp_server.py` is PKB's primary interface. It transports over Streamable HTTP, and a
 single server kept always-on via launchd is shared by Claude Code, Codex, and Gemini.
 
+With `ACCESS_POLICY` set, every request needs a bearer token that maps to a principal, and every
+tool is classed `read`, `write` or `admin`. Search adds the policy as an Elasticsearch pre-filter,
+file tools check the path, and graph tools read through views that hide evidence the principal
+cannot read. See [Access Control](access-control.md).
+
 ### Stateless Streamable HTTP (MCP 2026-07-28)
 
 The current MCP transport has no protocol sessions: the `initialize` handshake and `Mcp-Session-Id`

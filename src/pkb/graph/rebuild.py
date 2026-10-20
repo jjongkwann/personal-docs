@@ -14,6 +14,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from pkb.config import data_dir, settings
+from pkb.graph import ontology
 from pkb.graph import store as graph_store
 from pkb.graph.schema import graph_connection
 from pkb.graph.services import (
@@ -46,6 +47,7 @@ class ExtractedConcept(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     name: str = Field(max_length=120)
+    kind: Literal[ontology.KIND_IDS]
     aliases: list[str] = Field(default_factory=list, max_length=5)
     description: str = Field(default="", max_length=400)
 
@@ -55,7 +57,7 @@ class ExtractedRelation(BaseModel):
 
     src: str
     dst: str
-    type: Literal["part_of", "prerequisite_of", "related_to"]
+    type: Literal[ontology.RELATION_IDS]
     confidence: Literal[0.7, 0.9]
 
 
@@ -89,7 +91,7 @@ Prefer canonical established names.
 Aliases are only genuine alternate spellings or abbreviations.
 Descriptions are one factual sentence grounded only in the chunk. Do not add examples,
 components, use cases, or background facts that the chunk does not state.
-Relations must be explicit and use only part_of, prerequisite_of, or related_to.
+Relations must be explicit and use only the relation types listed below.
 Every relation endpoint must exactly match a concept name in the same item's concepts
 array. Include a supported legacy hint in concepts before using it as an endpoint.
 Mere co-occurrence in a list, table, roadmap, checklist, or section is not a relation.
@@ -98,7 +100,8 @@ part_of means a real domain component, never membership in a document section or
 prerequisite_of requires the text to state that src must be known or done before dst.
 Confidence rubric: 0.9 explicit statement, 0.7 clear implication. Omit weak relations.
 Do not invent concepts or relations. Empty concepts/relations is valid.
-Return only the JSON matching the supplied schema."""
+Return only the JSON matching the supplied schema.
+""" + ontology.prompt_rules()
 
 
 def _doc_id_key(doc_id: str) -> str:

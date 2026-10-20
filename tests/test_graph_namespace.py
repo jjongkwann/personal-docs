@@ -148,7 +148,7 @@ def test_store_concepts_reports_scoped_alias_conflict(monkeypatch, tmp_path):
                 "content_hash": "h",
                 "input_hash": "ih",
                 "category": "ai",
-                "concepts": [{"name": "ReAct", "aliases": ["React"]}],
+                "concepts": [{"name": "ReAct", "kind": "pattern", "aliases": ["React"]}],
                 "relations": [],
             },
             {
@@ -157,7 +157,7 @@ def test_store_concepts_reports_scoped_alias_conflict(monkeypatch, tmp_path):
                 "content_hash": "h",
                 "input_hash": "ih",
                 "category": "frontend",
-                "concepts": [{"name": "React", "aliases": ["ReAct"]}],
+                "concepts": [{"name": "React", "kind": "software", "aliases": ["ReAct"]}],
                 "relations": [],
             },
         ]
