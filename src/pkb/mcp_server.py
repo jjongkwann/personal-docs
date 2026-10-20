@@ -1518,7 +1518,7 @@ def graph_list_chunks(
         from pkb.graph.schema import graph_connection
         from pkb.graph.services import load_pending_batch
 
-        with graph_connection(_settings.graph_db_path) as conn:
+        with graph_connection(_settings.graph_db_path, normalize=False) as conn:
             chunks, pending, _ = load_pending_batch(es, conn, query=query, limit=limit)
         return json.dumps(
             {
@@ -1801,7 +1801,7 @@ def graph_validate(sample_limit: int = 20) -> str:
 
     if not 0 <= sample_limit <= 100:
         raise ValueError("sample_limit은 0~100이어야 합니다")
-    with graph_connection(_settings.graph_db_path) as conn:
+    with graph_connection(_settings.graph_db_path, normalize=False) as conn:
         return json.dumps(validate_graph(conn, sample_limit=sample_limit), ensure_ascii=False)
 
 

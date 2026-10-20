@@ -181,10 +181,13 @@ def _migrate_concept_identity(conn: sqlite3.Connection) -> None:
     # Legacy concepts have no base_slug.  Do not infer a namespace from the
     # old category column: category was descriptive metadata in v1, and doing
     # so would silently change identity for every existing concept.
-    conn.execute(
-        "UPDATE concepts SET base_slug = slug "
-        "WHERE trim(COALESCE(base_slug, '')) = ''"
-    )
+    # 고칠 행이 없으면 UPDATE를 하지 않는다 — 0행 UPDATE도 쓰기 잠금을 잡아, 다른 프로세스가 쓰는 동안
+    # 읽기 연결까지 "database is locked"로 실패한다.
+    if conn.execute("SELECT 1 FROM concepts WHERE trim(COALESCE(base_slug, '')) = '' LIMIT 1").fetchone():
+        conn.execute(
+            "UPDATE concepts SET base_slug = slug "
+            "WHERE trim(COALESCE(base_slug, '')) = ''"
+        )
 
 
 def _migrate_concept_type(conn: sqlite3.Connection) -> None:
@@ -194,15 +197,16 @@ def _migrate_concept_type(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE concepts ADD COLUMN concept_type TEXT")
 
 
-def _migrate_tbox(conn: sqlite3.Connection) -> None:
-    """TBox(pkb-tbox/1)에 맞게 관계 키를 정규화하고 graph_meta에 TBox 버전을 기록한다.
+def normalize_relation_keys(conn: sqlite3.Connection) -> None:
+    """TBox(pkb-tbox/1)에 맞지 않는 관계 키를 옮긴다. 쓰기 연결에서만 부른다.
 
     - 대칭 관계(related_to, alternative_to)를 src_id < dst_id 한 방향으로 옮긴다. 근거 행은 정방향으로
       합치고(겹치면 confidence 최댓값), 집계 관계는 근거에서 다시 계산한다. 같은 쌍이 양방향으로 있던
       중복만 하나로 합쳐진다.
     - 어휘에서 빠진 example_of를 is_a로 옮긴다.
     한 번만 도는 이관이 아니다. 이 코드 이전 버전의 프로세스(오래 도는 추출기 등)가 같은 DB에 계속 쓰면
-    역방향 행이 다시 생기므로, 연결마다 남은 행이 있는지 보고 있으면 옮긴다(관계 수천 건이라 수 ms).
+    역방향 행이 다시 생기므로, 쓰기 연결마다 남은 행이 있는지 보고 있으면 옮긴다(관계 수천 건이라 수 ms).
+    읽기 연결은 이것을 하지 않는다 — 다른 프로세스가 쓰는 중이면 쓰기 잠금을 못 얻어 읽기까지 실패한다.
     카탈로그에 없는 자유 라벨은 지우지 않는다 — validate가 보고한다.
     """
     moves: list[tuple[tuple[int, int, str], tuple[int, int, str]]] = []
@@ -225,6 +229,10 @@ def _migrate_tbox(conn: sqlite3.Connection) -> None:
     moves.extend(((src_id, dst_id, relation), (dst_id, src_id, relation)) for src_id, dst_id, relation in rows)
     if moves:
         store.rekey_edges(conn, moves)
+
+
+def _record_tbox_version(conn: sqlite3.Connection) -> None:
+    """graph_meta에 TBox 버전을 기록한다. 이미 같으면 쓰지 않는다."""
     row = conn.execute("SELECT value FROM graph_meta WHERE key = ?", (TBOX_VERSION_KEY,)).fetchone()
     if row is None or row[0] != ontology.TBOX_VERSION:
         conn.execute(
@@ -243,8 +251,8 @@ def _cleanup_invalid_slugs(conn: sqlite3.Connection) -> None:
     conn.execute("INSERT INTO graph_meta (key, value) VALUES (?, 'complete')", (key,))
 
 
-def init_schema(db_path: str) -> None:
-    """스키마 초기화 (존재하지 않는 테이블만 생성)."""
+def init_schema(db_path: str, *, normalize: bool = True) -> None:
+    """스키마 초기화 (존재하지 않는 테이블만 생성). normalize=False면 관계 키 정규화를 건너뛴다(읽기 연결)."""
     # `with conn`은 트랜잭션만 관리하고 커넥션은 닫지 않는다. closing()을 밖에 둬야
     # 커밋 후 닫힌다. 없으면 호출마다 FD가 새고 launchd 자식(maxfiles 256)에서
     # Errno 24로 터진다 — graph_connection이 매번 여기를 거치므로 호출당 2개씩 샜다.
@@ -259,13 +267,18 @@ def init_schema(db_path: str) -> None:
         # 셀프추출 마커로 대체된 미사용 run 인프라 제거. 기존 DB에도 1회 적용된다.
         conn.execute("DROP TABLE IF EXISTS graph_runs")
         _cleanup_invalid_slugs(conn)
-        _migrate_tbox(conn)
+        _record_tbox_version(conn)
+        if normalize:
+            normalize_relation_keys(conn)
         conn.commit()
 
 
 @contextmanager
-def graph_connection(db_path: str) -> Iterator[sqlite3.Connection]:
-    """스키마 초기화가 보장된 그래프 연결을 트랜잭션 컨텍스트로 제공."""
-    init_schema(db_path)
+def graph_connection(db_path: str, *, normalize: bool = True) -> Iterator[sqlite3.Connection]:
+    """스키마 초기화가 보장된 그래프 연결을 트랜잭션 컨텍스트로 제공.
+
+    읽기만 하는 호출자는 normalize=False로 연다 — 관계 키 정규화는 쓰기 잠금이 필요하다.
+    """
+    init_schema(db_path, normalize=normalize)
     with contextlib.closing(get_connection(db_path)) as conn, conn:
         yield conn

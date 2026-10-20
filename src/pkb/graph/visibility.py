@@ -127,7 +127,7 @@ def restrict_to_readable(conn: sqlite3.Connection, principal: access.Principal) 
 def graph_read_connection(db_path: str) -> Iterator[sqlite3.Connection]:
     """읽기 전용 그래프 연결. 지금 주체가 모든 문서를 읽지 못하면 걸러진 그래프를 본다."""
     principal = access.current_principal()
-    with graph_connection(db_path) as conn:
+    with graph_connection(db_path, normalize=False) as conn:
         if access.is_restricted(principal):
             restrict_to_readable(conn, principal)
         yield conn

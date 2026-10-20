@@ -286,7 +286,7 @@ def build_health_report_status(es) -> HealthReport:
         if not db_path.exists():
             lines.append("그래프 DB 없음 (아직 빌드되지 않음)")
         else:
-            with graph_connection(_settings.graph_db_path) as conn:
+            with graph_connection(_settings.graph_db_path, normalize=False) as conn:
                 s = gstore.stats(conn)
                 evidence_covered, evidence_total = gstore.edge_evidence_coverage(conn)
                 evidence_rebuild_active = gstore.edge_evidence_rebuild_active(conn)
@@ -329,7 +329,7 @@ def build_health_report_status(es) -> HealthReport:
             try:
                 from pkb.graph.services import scan_pending_chunks
 
-                with graph_connection(_settings.graph_db_path) as conn:
+                with graph_connection(_settings.graph_db_path, normalize=False) as conn:
                     pending, total_chunks = scan_pending_chunks(es, conn)
                 lines.append(f"그래프 미추출 청크: {len(pending)} / {total_chunks}")
             except Exception:

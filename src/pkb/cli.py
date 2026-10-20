@@ -936,7 +936,7 @@ def graph_stats():
     from pkb.graph import store as gstore
     from pkb.graph.schema import graph_connection
 
-    with graph_connection(settings.graph_db_path) as conn:
+    with graph_connection(settings.graph_db_path, normalize=False) as conn:
         s = gstore.stats(conn)
     typer.echo(f"DB: {settings.graph_db_path}")
     for k, v in s.items():
@@ -1297,7 +1297,7 @@ def graph_validate(
     from pkb.graph.schema import graph_connection
     from pkb.graph.validate import validate_graph
 
-    with graph_connection(settings.graph_db_path) as conn:
+    with graph_connection(settings.graph_db_path, normalize=False) as conn:
         report = validate_graph(conn, sample_limit=sample_limit)
     _echo_graph_json(report)
     if not report["ok"]:
@@ -1314,7 +1314,7 @@ def graph_export(
     from pkb.graph.export import export_rdf
     from pkb.graph.schema import graph_connection
 
-    with graph_connection(settings.graph_db_path) as conn:
+    with graph_connection(settings.graph_db_path, normalize=False) as conn:
         try:
             result = export_rdf(conn, out, fmt=fmt, base=base)
         except ValueError as exc:

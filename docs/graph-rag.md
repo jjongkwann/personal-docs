@@ -128,14 +128,15 @@ unclassified concept takes the payload kind, and an existing concept with a diff
 stored one and is reported as a warning. Kinds change only through explicit classification.
 
 ### Migration
-Every graph connection adds `concept_type` if it is missing, records `tbox_version`, and normalizes
-relation keys that do not fit the TBox. It moves `related_to`/`alternative_to` rows stored as
+Every graph connection adds `concept_type` if it is missing and records `tbox_version`. Connections
+that write also normalize relation keys that do not fit the TBox. It moves `related_to`/`alternative_to` rows stored as
 `src_id > dst_id` to the other orientation, merging evidence per chunk with the highest confidence
 and recomputing edge aggregates from evidence, and moves `example_of` rows to `is_a`. Only pairs
 stored in both directions collapse into one edge. This runs on each connection, not once, because a
 process started before this change (a long-running extractor, for example) keeps writing reverse
-rows into the same database; the check costs a few milliseconds. Unknown labels stay in place and
-appear in the validation report.
+rows into the same database; the check costs a few milliseconds. Read-only connections skip it and
+take no write lock, so graph reads keep working while another process holds a write transaction.
+Unknown labels stay in place and appear in the validation report.
 
 ### Classification
 `services.list_unclassified_concepts(conn, offset=0, limit=50)` pages unclassified concepts by

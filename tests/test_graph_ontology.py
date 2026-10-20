@@ -244,6 +244,29 @@ def test_reverse_rows_written_after_migration_are_fixed_on_next_connection(db_pa
     assert edges == [(a, b, "related_to")]
 
 
+def test_read_connection_does_not_need_the_write_lock(db_path):
+    """다른 프로세스가 쓰기 잠금을 쥔 동안에도 읽기 연결은 열린다 — 정규화는 쓰기 연결에서만 한다."""
+    import time
+
+    from pkb.graph.visibility import graph_read_connection
+
+    conn = get_connection(db_path)
+    a, b = (_concept(conn, name) for name in ("A", "B"))
+    conn.execute("INSERT INTO concept_edges VALUES (?, ?, 'related_to', 1.0, 1, 0.7)", (b, a))
+    conn.commit()
+    writer = get_connection(db_path)
+    writer.execute("BEGIN IMMEDIATE")  # 오래 도는 추출기의 쓰기 트랜잭션
+    try:
+        started = time.monotonic()
+        with graph_read_connection(db_path) as reader:
+            assert [tuple(row) for row in reader.execute("SELECT src_id, dst_id FROM concept_edges")] == [(b, a)]
+        assert time.monotonic() - started < 1
+    finally:
+        writer.rollback()
+        writer.close()
+        conn.close()
+
+
 def test_merge_keeps_symmetric_relations_canonical(conn):
     winner = _concept(conn, "Winner")
     other = _concept(conn, "Other")
