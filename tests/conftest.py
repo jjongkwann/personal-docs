@@ -6,6 +6,14 @@ from pkb import search_log
 
 
 @pytest.fixture(autouse=True)
+def _isolated_embedding_runtime(tmp_path, monkeypatch):
+    """Never read a production active manifest or take its migration gate in tests."""
+    from pkb import embedding_runtime
+
+    monkeypatch.setattr(embedding_runtime, "_directory", tmp_path / ".embedding-runtime")
+
+
+@pytest.fixture(autouse=True)
 def _isolated_logs(tmp_path, monkeypatch):
     """검색·변경 로그가 실제 코퍼스(DATA_ROOT/.logs)에 쌓이지 않게 임시 폴더로 돌린다."""
     log_dir = tmp_path / ".logs"
@@ -28,6 +36,8 @@ def _isolated_graph_and_policy(tmp_path, monkeypatch):
 
 # .env가 바꿔도 테스트는 코드 기본값으로 본다. 차원(EMBEDDING_DIMS)은 import 시점에 색인 매핑을 정하므로 그대로 둔다.
 _EMBEDDING_FIELDS = (
+    "embedding_provider", "embedding_ollama_endpoint", "embedding_ollama_model", "embedding_ollama_digest",
+    "embedding_ollama_query_prefix", "embedding_ollama_document_prefix",
     "embedding_model", "embedding_revision", "embedding_dtype", "embedding_trust_remote_code", "embedding_task",
     "embedding_query_prompt", "embedding_document_prompt", "embedding_normalize", "embedding_text_only",
     "media_embedding_model",

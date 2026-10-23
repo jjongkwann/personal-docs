@@ -1,12 +1,19 @@
 """CrossEncoder 기반 다국어 리랭커."""
 
-from sentence_transformers import CrossEncoder
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from pkb.config import resolve_device, settings
 from pkb.idle_model import IdleModel
 
+if TYPE_CHECKING:
+    from sentence_transformers import CrossEncoder
+
 
 def _load() -> CrossEncoder:
+    from sentence_transformers import CrossEncoder
+
     kwargs: dict = {"max_length": 512, "device": resolve_device(settings.rerank_device)}
     if settings.rerank_revision:
         kwargs["revision"] = settings.rerank_revision

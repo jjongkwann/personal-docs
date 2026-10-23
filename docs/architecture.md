@@ -206,7 +206,7 @@ tracks body identity for graph extraction and chunk relocation (`ingest.py:inges
 `search_knowledge` (MCP) and `pkb query` (CLI) share the same pipeline (`retrieve.hybrid_search`).
 
 1. BM25 search — nori Korean analyzer, weighted matching across `content`/`title`/`section_path`
-2. kNN search — sentence-transformers embeddings, ES dense_vector (HNSW)
+2. kNN search — selected local sentence-transformers or remote Ollama embeddings, ES dense_vector (HNSW)
 3. RRF fusion by default (`RRF_K=60`); CLI comparison runs can select linear fusion
 4. CrossEncoder reranking — disabled by default (`RERANK_ENABLED=false`), model
    `BAAI/bge-reranker-v2-m3`. In the 2026-07 benchmark, no-rerank (MRR 0.517) beat bge (0.388) and
@@ -447,7 +447,7 @@ Claude Code
 ## Swappable Components
 
 - **Elasticsearch → Qdrant/Chroma/pgvector**: replace `store.py`, `retrieve.py`
-- **sentence-transformers → a different embedding model**: replace `embeddings.py`
+- **Embedding model selection**: the Ollama adapter discovers models and validates vectors; `embedding_runtime.py` migrates text/concept stores and atomically activates the new configuration. See [Windows Ollama embeddings](windows-ollama-embeddings.md). Local Python models remain an explicit provider.
 - **SQLite Graph DB → Neo4j**: replace the `src/pkb/graph/store.py` layer
 - **markitdown → docling/unstructured**: replace the file-reading path in `ingest.py`
 - **Claude Code MCP → a different MCP client**: `mcp_server.py` can be used as-is

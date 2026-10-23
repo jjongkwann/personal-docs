@@ -24,6 +24,16 @@ _EDGE_SELECT = (
 )
 
 
+def resolve_concept(conn: sqlite3.Connection, identifier: str) -> sqlite3.Row | None:
+    """Read stable physical slugs exactly; names and aliases retain ambiguity checks.
+
+    A graph node carries its unique physical slug. The unscoped name resolver can
+    reject that same string when another namespace shares its base name.
+    """
+    exact = gstore.find_concept_by_slug(conn, identifier)
+    return exact if exact is not None else gstore.get_concept(conn, identifier)
+
+
 def _bounded(value: int, *, minimum: int, maximum: int, name: str) -> int:
     if not minimum <= value <= maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum}.")
@@ -211,7 +221,7 @@ def explain(
         evidence_limit, minimum=0, maximum=20, name="evidence_limit"
     )
     mention_limit = _bounded(mention_limit, minimum=0, maximum=100, name="mention_limit")
-    row = gstore.get_concept(conn, identifier)
+    row = resolve_concept(conn, identifier)
     if row is None:
         raise ValueError(f"Concept not found: {identifier}")
 
@@ -313,7 +323,7 @@ def transitive_closure(
         raise ValueError("direction must be 'up' or 'down'.")
     max_depth = _bounded(max_depth, minimum=2, maximum=10, name="max_depth")
     limit = _bounded(limit, minimum=1, maximum=200, name="limit")
-    row = gstore.get_concept(conn, identifier)
+    row = resolve_concept(conn, identifier)
     if row is None:
         raise ValueError(f"Concept not found: {identifier}")
     return {
@@ -340,7 +350,7 @@ def concept_subgraph(
     evidence_limit = _bounded(
         evidence_limit, minimum=0, maximum=20, name="evidence_limit"
     )
-    root = gstore.get_concept(conn, identifier)
+    root = resolve_concept(conn, identifier)
     if root is None:
         raise ValueError(f"Concept not found: {identifier}")
     depth_by_id, edges = _expand(
@@ -384,8 +394,8 @@ def shortest_path(
     evidence_limit = _bounded(
         evidence_limit, minimum=0, maximum=20, name="evidence_limit"
     )
-    source_row = gstore.get_concept(conn, source)
-    target_row = gstore.get_concept(conn, target)
+    source_row = resolve_concept(conn, source)
+    target_row = resolve_concept(conn, target)
     if source_row is None:
         raise ValueError(f"Source concept not found: {source}")
     if target_row is None:
@@ -466,15 +476,16 @@ def _seed_candidates(
         return []
     terms = q.split()
     candidates: dict[int, dict] = {}
-    curation_by_slug = {
-        row["slug"]: row["label"]
-        for row in conn.execute("SELECT slug, label FROM concept_curation")
+    vocab_ids = {
+        row[0] for row in conn.execute(
+            "SELECT c.id FROM concept_curation cc JOIN concepts c ON c.slug = cc.slug WHERE cc.label = 'vocab'"
+        )
     }
     aliases_by_id: dict[int, list[str]] = {}
     for alias in conn.execute(
-        "SELECT concept_id, alias FROM concept_aliases ORDER BY concept_id, alias_slug"
+        "SELECT concept_id, alias_slug FROM concept_aliases"
     ):
-        aliases_by_id.setdefault(alias["concept_id"], []).append(alias["alias"])
+        aliases_by_id.setdefault(alias["concept_id"], []).append(alias["alias_slug"])
     connected_ids = {
         row["concept_id"]
         for row in conn.execute(
@@ -483,15 +494,16 @@ def _seed_candidates(
         )
     }
 
-    for row in gstore.list_concepts(conn):
-        if row["id"] not in connected_ids:
+    # Both SELECTs are covered by text indexes. SELECT * ORDER BY slug fetches every
+    # vector through random disk reads and can exceed the gateway's 60-second limit.
+    texts_by_id = aliases_by_id
+    for row in conn.execute("SELECT id, slug AS text FROM concepts UNION ALL SELECT id, base_slug FROM concepts"):
+        if row["id"] in connected_ids and row["id"] not in vocab_ids:
+            texts_by_id.setdefault(row["id"], []).append(row["text"])
+    lexical = []
+    for concept_id, texts in texts_by_id.items():
+        if concept_id not in connected_ids or concept_id in vocab_ids:
             continue
-        if curation_by_slug.get(row["slug"]) == "vocab":
-            continue
-        texts = [row["slug"], gstore.make_slug(row["name"])]
-        texts.extend(
-            gstore.make_slug(alias) for alias in aliases_by_id.get(row["id"], [])
-        )
         score = 0.0
         match = ""
         if q in texts:
@@ -504,15 +516,20 @@ def _seed_candidates(
                 score = 0.4 + 0.4 * (matched / len(terms))
                 match = "lexical"
         if score:
-            candidates[row["id"]] = {"row": row, "score": score, "match": match}
+            lexical.append((concept_id, score, match))
+    # Materialize only a bounded candidate window, never the entire vector table.
+    for concept_id, score, match in sorted(lexical, key=lambda item: (-item[1], item[0]))[:max(30, limit * 10)]:
+        row = _concept_by_id(conn, concept_id)
+        candidates[concept_id] = {"row": row, "score": score, "match": match}
 
     if query_embedding:
         for row, score in gstore.top_concepts_by_embedding(
-            conn, query_embedding, k=max(limit * 3, 10), threshold=min_similarity
+            conn, query_embedding, k=max(limit * 3, 10), threshold=min_similarity,
+            concept_ids=connected_ids - vocab_ids,
         ):
             if row["id"] not in connected_ids:
                 continue
-            if curation_by_slug.get(row["slug"]) == "vocab":
+            if row["id"] in vocab_ids:
                 continue
             current = candidates.get(row["id"])
             if current is None or score > current["score"]:
@@ -526,6 +543,43 @@ def _seed_candidates(
         candidates.values(),
         key=lambda item: (-item["score"], -item["row"]["mention_count"], item["row"]["slug"]),
     )[:limit]
+
+
+def overview(conn: sqlite3.Connection, *, limit: int = 60) -> dict:
+    """Bound a representative snapshot by nodes and edges without loading vectors."""
+    _bounded(limit, minimum=1, maximum=200, name="limit")
+    rows = conn.execute(
+        "SELECT src_id, dst_id, relation, weight, evidence_count, confidence FROM concept_edges "
+        "ORDER BY evidence_count DESC, weight DESC, src_id, dst_id, relation LIMIT ?", (limit * 2,)
+    ).fetchall()
+    node_ids: set[int] = set()
+    selected = []
+    for edge in rows:
+        expanded = node_ids | {edge["src_id"], edge["dst_id"]}
+        if len(expanded) > limit:
+            continue
+        node_ids = expanded
+        selected.append(edge)
+    nodes_by_id = {
+        node_id: {**_concept_dict(conn, _concept_by_id(conn, node_id)), "seed": False}
+        for node_id in sorted(node_ids)
+    }
+    edges = [
+        {
+            "source": {"name": nodes_by_id[row["src_id"]]["name"], "slug": nodes_by_id[row["src_id"]]["slug"]},
+            "target": {"name": nodes_by_id[row["dst_id"]]["name"], "slug": nodes_by_id[row["dst_id"]]["slug"]},
+            "relation": row["relation"], "weight": row["weight"], "evidence_count": row["evidence_count"],
+            "confidence": row["confidence"], "confidence_label": _confidence_label(row["confidence"]), "evidence": [],
+        }
+        for row in selected
+    ]
+    return {
+        "nodes": list(nodes_by_id.values()), "edges": edges,
+        "total_concepts": conn.execute("SELECT COUNT(*) FROM concepts").fetchone()[0],
+        "total_edges": conn.execute("SELECT COUNT(*) FROM concept_edges").fetchone()[0],
+        "shown_nodes": len(nodes_by_id), "shown_edges": len(edges),
+        "scope": "연결 근거 수가 많은 관계의 일부입니다. 전체 그래프가 아니며 고립 개념은 표시하지 않습니다.",
+    }
 
 
 def _expand(
@@ -644,7 +698,7 @@ def affected(
     evidence_limit = _bounded(
         evidence_limit, minimum=0, maximum=20, name="evidence_limit"
     )
-    root = gstore.get_concept(conn, identifier)
+    root = resolve_concept(conn, identifier)
     if root is None:
         raise ValueError(f"Concept not found: {identifier}")
     depth_by_id, edges = _expand(

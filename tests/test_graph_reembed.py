@@ -106,21 +106,30 @@ def test_reembed_recomputes_every_concept_and_records_identity(conn, monkeypatch
 
 def test_reembed_resumes_and_blocks_vector_use_until_done(conn, monkeypatch):
     _legacy_graph(conn)
+    conn.execute("UPDATE concepts SET id = 30 WHERE id = 3")
+    conn.commit()
     _use_jina(monkeypatch)
     calls: list[list[str]] = []
+    reported = []
+    queries = []
+    conn.set_trace_callback(queries.append)
 
-    partial = gstore.reembed_concepts(conn, _embed(calls), JINA_IDENTITY, batch_size=2, max_batches=1)
+    partial = gstore.reembed_concepts(conn, _embed(calls), JINA_IDENTITY, batch_size=1, max_batches=1,
+                                     progress=lambda done, total: reported.append((done, total)))
 
-    assert partial["complete"] is False and partial["updated"] == 2
+    assert partial["complete"] is False and partial["updated"] == 1
     progress = json.loads(gstore._meta(conn, gstore.EMBEDDING_REEMBED_KEY))
     assert progress["identity"] == JINA_IDENTITY
     with pytest.raises(gstore.EmbeddingModelMismatchError, match="다시 계산하는 중"):
         gstore.top_concepts_by_embedding(conn, [1.0, 0.0])
 
-    rest = gstore.reembed_concepts(conn, _embed(calls), JINA_IDENTITY, batch_size=2)
+    rest = gstore.reembed_concepts(conn, _embed(calls), JINA_IDENTITY, batch_size=1,
+                                  progress=lambda done, total: reported.append((done, total)))
 
-    assert rest == {"updated": 1, "total": 3, "complete": True}
-    assert calls[1] == ["하이브리드 검색: BM25와 kNN 결합"]
+    assert rest == {"updated": 2, "total": 3, "complete": True}
+    assert calls[1:] == [["RRF"], ["하이브리드 검색: BM25와 kNN 결합"]]
+    assert reported == [(1, 3), (2, 3), (3, 3)]
+    assert sum(query.startswith("SELECT count(*) FROM concepts WHERE id <=") for query in queries) == 1
     assert gstore._meta(conn, gstore.EMBEDDING_REEMBED_KEY) is None
 
 

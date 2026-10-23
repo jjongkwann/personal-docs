@@ -161,6 +161,23 @@ def test_status_is_unhealthy_when_es_connection_fails(doctor_env, monkeypatch):
     assert "ES: 연결 실패" in status.text
 
 
+def test_status_is_unhealthy_when_graph_has_hard_violation(doctor_env, monkeypatch, tmp_path):
+    monkeypatch.setattr("pkb.report._server_status", lambda: (["MCP OK"], True))
+    db_path = str(tmp_path / "graph.sqlite")
+    monkeypatch.setattr("pkb.config.settings.graph_db_path", db_path)
+    init_schema(db_path)
+    conn = get_connection(db_path)
+    src = gstore.upsert_concept(conn, name="PostgreSQL", kind="software")
+    dst = gstore.upsert_concept(conn, name="BM25", kind="algorithm")
+    conn.execute("INSERT INTO concept_edges (src_id, dst_id, relation) VALUES (?, ?, 'is_a')", (src, dst))
+    conn.commit()
+    conn.close()
+
+    status = build_health_report_status(_FakeES())
+    assert not status.ok
+    assert "signature_violations=1" in status.text
+
+
 def test_expired_agg_query_shape(doctor_env):
     es = _FakeES()
     build_health_report(es)

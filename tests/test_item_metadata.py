@@ -97,9 +97,15 @@ def test_existing_index_gets_item_fields_once_per_process(monkeypatch):
     ensure_item_mapping(es)
     ensure_item_mapping(es)
 
-    es.indices.put_mapping.assert_called_once()
-    properties = es.indices.put_mapping.call_args.kwargs["properties"]
-    assert set(properties) == set(ITEM_METADATA_FIELDS) | set(MEDIA_MAPPING_PROPERTIES)
+    assert es.indices.put_mapping.call_count == 2
+    properties = es.indices.put_mapping.call_args_list[0].kwargs["properties"]
+    assert set(properties) == set(ITEM_METADATA_FIELDS) | set(MEDIA_MAPPING_PROPERTIES) | {
+        "import_extraction", "import_document_id", "import_version",
+    }
+    assert es.indices.put_mapping.call_args_list[1].kwargs["properties"] == {
+        "import_document_id": {"type": "keyword"}, "import_version": {"type": "integer"},
+    }
+    assert properties["import_extraction"] == {"type": "keyword"}
 
 
 def test_missing_index_is_left_for_create_index(monkeypatch):

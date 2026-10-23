@@ -93,6 +93,60 @@ CREATE TABLE IF NOT EXISTS graph_meta (
     value       TEXT NOT NULL
 );
 
+-- Additive execution history: existing concepts, evidence and markers are untouched.
+CREATE TABLE IF NOT EXISTS graph_extraction_runs (
+    run_id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    endpoint TEXT NOT NULL,
+    model TEXT NOT NULL,
+    model_digest TEXT NOT NULL,
+    options_json TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    schema_version TEXT NOT NULL,
+    prompt_hash TEXT NOT NULL,
+    schema_hash TEXT NOT NULL,
+    system_prompt TEXT NOT NULL,
+    pending_before INTEGER NOT NULL,
+    error TEXT
+);
+CREATE TABLE IF NOT EXISTS graph_extraction_items (
+    run_id TEXT NOT NULL REFERENCES graph_extraction_runs(run_id),
+    doc_id TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    input_hash TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    error TEXT,
+    result_json TEXT,
+    PRIMARY KEY (run_id, doc_id, chunk_index)
+);
+CREATE TABLE IF NOT EXISTS graph_extraction_events (
+    id INTEGER PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES graph_extraction_runs(run_id),
+    doc_id TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    error TEXT,
+    result_json TEXT
+);
+
+-- Scheduling is separate from immutable execution provenance. A new input hash
+-- is immediately eligible even when an older version remains in retry backoff.
+CREATE TABLE IF NOT EXISTS graph_extraction_retries (
+    doc_id TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    input_hash TEXT NOT NULL,
+    attempts INTEGER NOT NULL,
+    next_attempt_at REAL NOT NULL,
+    error TEXT NOT NULL,
+    PRIMARY KEY (doc_id, chunk_index, input_hash)
+);
+
 -- Existing databases intentionally keep any pre-existing alias collisions.
 -- New writes are guarded in graph.store, while this table records rejected
 -- attempts so operators can audit/repair old ambiguity without data loss.
@@ -252,11 +306,28 @@ def _cleanup_invalid_slugs(conn: sqlite3.Connection) -> None:
 
 
 def init_schema(db_path: str, *, normalize: bool = True) -> None:
-    """스키마 초기화 (존재하지 않는 테이블만 생성). normalize=False면 관계 키 정규화를 건너뛴다(읽기 연결)."""
+    """Initialize/migrate schema; write connections enable WAL before starting a transaction.
+
+    Read connections (normalize=False) do not change the journal mode. A writer's
+    first WAL transition needs a quiet window; subsequent readers can coexist
+    with its commits. In-memory databases retain their memory journal.
+    """
     # `with conn`은 트랜잭션만 관리하고 커넥션은 닫지 않는다. closing()을 밖에 둬야
     # 커밋 후 닫힌다. 없으면 호출마다 FD가 새고 launchd 자식(maxfiles 256)에서
     # Errno 24로 터진다 — graph_connection이 매번 여기를 거치므로 호출당 2개씩 샜다.
     with contextlib.closing(get_connection(db_path)) as conn, conn:
+        if normalize:
+            journal = conn.execute("PRAGMA journal_mode").fetchone()[0].lower()
+            if journal not in {"wal", "memory"}:
+                try:
+                    changed = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower()
+                except sqlite3.OperationalError as exc:
+                    raise sqlite3.OperationalError(
+                        "그래프 WAL 전환에 실패했습니다. 진행 중인 검색·점검이 끝난 뒤 쓰기 명령을 다시 실행하세요. "
+                        f"기존 데이터는 유지됩니다: {exc}"
+                    ) from exc
+                if changed != "wal":
+                    raise sqlite3.OperationalError(f"그래프 WAL 전환이 적용되지 않았습니다: {changed}")
         _migrate_concept_identity(conn)
         _migrate_concept_type(conn)
         _migrate_extracted_chunks(conn)
@@ -281,4 +352,34 @@ def graph_connection(db_path: str, *, normalize: bool = True) -> Iterator[sqlite
     """
     init_schema(db_path, normalize=normalize)
     with contextlib.closing(get_connection(db_path)) as conn, conn:
+        yield conn
+
+
+@contextmanager
+def readonly_graph_connection(db_path: str) -> Iterator[sqlite3.Connection]:
+    """Open an existing graph without creating, migrating or locking it for writes.
+
+    Writers own initialization/migrations. Readers reject an absent or legacy
+    schema explicitly rather than silently modifying the graph during a search.
+    TEMP tables remain writable for the principal's visibility views.
+    """
+    path = Path(db_path).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"그래프 DB가 없습니다. 먼저 그래프 쓰기 작업으로 초기화하세요: {path}")
+    with contextlib.closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            # Compile only: this validates the migration-dependent columns and
+            # base read tables without scanning concept vectors or issuing DDL.
+            conn.execute(
+                "SELECT c.namespace, c.base_slug, c.concept_type, e.confidence, x.input_hash "
+                "FROM concepts c, concept_edges e, extracted_chunks x, concept_mentions m, "
+                "concept_edge_evidence ee, concept_aliases a, concept_curation cc, "
+                "concept_alias_conflicts ac, documents d, graph_meta gm LIMIT 0"
+            )
+        except sqlite3.OperationalError as exc:
+            raise RuntimeError(
+                "그래프 스키마를 갱신해야 합니다. 그래프 쓰기 작업으로 마이그레이션한 뒤 다시 조회하세요."
+            ) from exc
         yield conn

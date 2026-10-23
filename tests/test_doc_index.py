@@ -137,20 +137,20 @@ def test_list_documents_reads_rows_in_the_same_shape():
     assert docs == [{"doc_id": DOC, "category": "meetings", "title": "스탠드업", "chunks": 4}]
     call = es.search.call_args.kwargs
     assert call["index"] == f"{settings.es_index}_docs"
-    assert {"term": {"category": "meetings"}} in call["query"]["bool"]["must"]
+    assert {"term": {"category": "meetings"}} not in call["query"]["bool"]["must"]
     assert "doc_vector" not in call["source_includes"]
     es.search.assert_called_once()  # 집계 없이 행 한 페이지
 
 
 def test_list_categories_counts_documents_by_category():
     es = _es()
-    es.search.return_value = {"aggregations": {"categories": {"buckets": [
-        {"key": "study", "doc_count": 7}, {"key": "meetings", "doc_count": 3},
-    ]}}}
+    es.search.return_value = _hits([
+        {"doc_id": f"data/{category}/{i}.md", "category": category, "chunk_count": 1}
+        for category, count in (("study", 7), ("meetings", 3)) for i in range(count)
+    ])
     assert store.list_categories(es) == {"meetings": 3, "study": 7}
     call = es.search.call_args.kwargs
-    assert call["size"] == 0
-    assert call["query"] == {"bool": {"filter": [
+    assert call["query"] == {"bool": {"must": [
         {"bool": {"must_not": {"terms": {"source_type": ["image", "audio"]}}}},
         {"bool": {"must_not": {"exists": {"field": "archived_at"}}}},
     ]}}
@@ -205,7 +205,8 @@ def test_create_index_creates_doc_index_only_with_a_fresh_chunk_index(monkeypatc
     existing.indices.exists.return_value = True
     store.create_index(existing)
     existing.indices.create.assert_not_called()
-    existing.indices.put_mapping.assert_called_once()
+    assert existing.indices.put_mapping.call_count == 2
+    assert existing.indices.put_mapping.call_args_list[1].kwargs["index"] == store.doc_index_name()
 
 
 def test_doc_index_follows_the_physical_index_behind_an_alias(monkeypatch):
@@ -219,6 +220,25 @@ def test_doc_index_follows_the_physical_index_behind_an_alias(monkeypatch):
 
     assert es.indices.create.call_args.kwargs["index"] == "pkb_v2_docs"
     es.indices.put_alias.assert_called_once_with(index="pkb_v2_docs", name="pkb_docs")
+
+
+@pytest.mark.parametrize("alias", [False, True])
+def test_doc_index_uses_current_dimensions_after_model_selection(monkeypatch, alias):
+    original_dims = store.DOC_INDEX_SETTINGS["mappings"]["properties"]["doc_vector"]["dims"]
+    es = MagicMock()
+    es.indices.exists.return_value = False
+    es.indices.exists_alias.return_value = alias
+    es.indices.get_alias.return_value = {"pkb_v2": {}}
+
+    for dimensions in (original_dims + 1, original_dims + 2):
+        monkeypatch.setattr(settings, "embedding_dims", dimensions)
+        assert store.create_doc_index(es) is True
+
+    mappings = [call.kwargs["body"] for call in es.indices.create.call_args_list]
+    assert [body["mappings"]["properties"]["doc_vector"]["dims"] for body in mappings] == [
+        original_dims + 1, original_dims + 2,
+    ]
+    assert store.DOC_INDEX_SETTINGS["mappings"]["properties"]["doc_vector"]["dims"] == original_dims
 
 
 def test_switch_read_alias_moves_the_doc_alias_too(monkeypatch):
@@ -286,3 +306,66 @@ def test_mcp_related_documents_returns_trimmed_json(monkeypatch):
 def test_mcp_related_documents_reports_errors_as_text(monkeypatch):
     monkeypatch.setattr("pkb.store.get_client", lambda: None)
     assert mcp_server.related_documents(DOC, top_k=0).startswith("오류: ValueError")
+
+
+def test_import_versions_choose_numeric_latest_and_count_visible_revisions():
+    identity = "12345678-1234-4234-8234-123456789abc"
+    es = _es()
+    rows = [
+        {"doc_id": "data/study/old.md", "category": "study", "chunk_count": 1,
+         "import_document_id": identity, "import_version": 2, "date_modified": "2030-01-01"},
+        {"doc_id": "data/study/new.md", "category": "study", "chunk_count": 1,
+         "import_document_id": identity, "import_version": 10, "date_modified": "2020-01-01"},
+        {"doc_id": "data/study/normal.md", "category": "study", "chunk_count": 1},
+    ]
+    es.search.side_effect = lambda **kw: _hits([row.copy() for row in rows])
+    docs = store.list_documents(es)
+    assert {doc["doc_id"] for doc in docs} == {"data/study/new.md", "data/study/normal.md"}
+    assert next(doc for doc in docs if "import_version" in doc)["version_count"] == 2
+    assert len(store.list_documents(es, include_versions=True)) == 3
+    assert store.list_categories(es) == {"study": 2}
+
+
+def test_latest_grouping_happens_after_acl_without_hidden_version_counts(tmp_path, monkeypatch):
+    import yaml
+
+    from pkb import access
+
+    identity = "12345678-1234-4234-8234-123456789abc"
+    policy = tmp_path / "policy.yml"
+    policy.write_text(yaml.safe_dump({
+        "version": 1, "default": {}, "principals": {"reader": {}},
+        "rules": [{"path": "data/public", "read": ["user:reader"]}],
+    }))
+    monkeypatch.setattr(settings, "access_policy", str(policy))
+    es = _es()
+    rows = [
+        {"doc_id": "data/public/v1.md", "category": "public", "chunk_count": 1,
+         "import_document_id": identity, "import_version": 1},
+        {"doc_id": "data/private/v2.md", "category": "private", "chunk_count": 1,
+         "import_document_id": identity, "import_version": 2},
+    ]
+    es.search.side_effect = lambda **kw: _hits([row.copy() for row in rows])
+    with access.acting_as(access.load_policy().principal("reader")):
+        docs = store.list_documents(es)
+        assert len(docs) == 1 and docs[0]["import_version"] == 1 and docs[0]["version_count"] == 1
+        assert store.list_categories(es) == {"public": 1}
+        assert len(store.list_documents(es, include_versions=True)) == 1
+    assert "data/private" not in json.dumps(es.search.call_args.kwargs)
+
+
+def test_latest_category_counts_and_filtered_lists_agree_after_category_change():
+    identity = "12345678-1234-4234-8234-123456789abc"
+    es = _es()
+    rows = [
+        {"doc_id": "data/old/v1.md", "category": "old", "chunk_count": 1,
+         "import_document_id": identity, "import_version": 1},
+        {"doc_id": "data/new/v2.md", "category": "new", "chunk_count": 1,
+         "import_document_id": identity, "import_version": 2},
+    ]
+    es.search.side_effect = lambda **kw: _hits([row.copy() for row in rows])
+    assert store.list_categories(es) == {"new": 1}
+    assert store.list_documents(es, "old") == []
+    assert len(store.list_documents(es, "new")) == 1
+    assert store.list_documents(es, "new")[0]["version_count"] == 2
+    assert len(store.list_documents(es, "old", include_versions=True)) == 1

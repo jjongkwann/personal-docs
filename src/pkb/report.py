@@ -1,7 +1,7 @@
 """PKB 상태 점검(doctor) 리포트 생성. CLI/MCP 공용.
 
 조치 후보(만료 미아카이브·purge 대상·고아 개념)는 결정적으로 나열만 한다 —
-판단·해소는 Claude 세션 몫.
+판단·해소는 별도 검토 작업에서 수행한다.
 """
 
 from dataclasses import dataclass
@@ -157,7 +157,7 @@ def _doc_id_agg(es, query: dict) -> tuple[int, list[str]]:
 
 
 def build_health_report_status(es) -> HealthReport:
-    """PKB 상태 문자열과 필수 구성요소(MCP·ES·인덱스)의 정상 여부를 반환."""
+    """PKB 상태 문자열과 필수 구성요소·그래프 무결성의 정상 여부를 반환."""
     from pkb.config import settings as _settings
     from pkb.store import count_chunks_without_hash, count_documents
 
@@ -310,6 +310,8 @@ def build_health_report_status(es) -> HealthReport:
                         "— `pkb graph reset-evidence --yes` 후 전량 재추출 필요"
                     )
                 hard = {key: section["count"] for key, section in tbox["hard"].items() if section["count"]}
+                if hard:
+                    healthy = False
                 lines.append(
                     f"  TBox {tbox['tbox_version']}: hard 위반 {sum(hard.values())}"
                     + (f" ({', '.join(f'{k}={v}' for k, v in hard.items())})" if hard else "")
@@ -336,6 +338,7 @@ def build_health_report_status(es) -> HealthReport:
                 pass
     except Exception as e:
         lines.append(f"그래프 통계 조회 실패: {e}")
+        healthy = False
 
     return HealthReport("\n".join(lines), ok=healthy)
 

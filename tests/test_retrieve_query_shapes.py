@@ -116,6 +116,9 @@ def test_rrf_k_constant():
 
 def test_linear_fusion_normalizes_channels_and_keeps_ties():
     class FakeES:
+        def options(self, **kwargs):
+            return self
+
         def msearch(self, **kwargs):
             return {"responses": [
                 {"hits": {"hits": [
@@ -141,6 +144,9 @@ def test_linear_fusion_normalizes_channels_and_keeps_ties():
 @pytest.mark.parametrize("weight,expected", [(0.0, "vector"), (1.0, "lexical")])
 def test_linear_fusion_endpoint_excludes_zero_weight_candidates_even_with_rerank(monkeypatch, weight, expected):
     class FakeES:
+        def options(self, **kwargs):
+            return self
+
         def msearch(self, **kwargs):
             return {"responses": [
                 {"hits": {"hits": [

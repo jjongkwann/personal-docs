@@ -18,6 +18,7 @@ ADMIN_TOOLS = {
     "convert_and_ingest", "sync_obsidian", "sync_corpus", "doctor",
     "graph_list_chunks", "graph_store_concepts", "graph_curate", "graph_merge",
     "graph_validate", "graph_classify",
+    "embedding_status", "embedding_models", "configure_embedding",
 }
 
 

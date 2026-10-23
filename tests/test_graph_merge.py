@@ -200,3 +200,80 @@ def test_merge_carries_label_when_winner_uncurated(conn):
     assert row is not None
     assert row["label"] == "real"
     assert row["prose"] is None
+
+
+@pytest.mark.parametrize("staging", [False, True])
+def test_merge_rejects_new_cycle_without_losing_data(conn, staging):
+    a, b, c = [gstore.upsert_concept(conn, name=name, kind="algorithm") for name in ("A", "B", "C")]
+    gstore.add_edge(conn, a, b, "is_a", doc_id="data/a.md", chunk_index=0, materialize=not staging)
+    gstore.add_edge(conn, b, c, "is_a", doc_id="data/a.md", chunk_index=1, materialize=not staging)
+    gstore.add_alias(conn, c, "C alias")
+    conn.commit()
+    before = list(conn.iterdump())
+
+    with pytest.raises(gstore.RelationRejectedError, match="순환"):
+        gstore.merge_concepts(conn, "a", ["c"])
+
+    assert list(conn.iterdump()) == before
+
+
+def test_merge_checks_the_combined_result_for_all_losers(conn):
+    a, b, c, d = [gstore.upsert_concept(conn, name=name, kind="algorithm") for name in ("A", "B", "C", "D")]
+    gstore.add_edge(conn, b, c, "is_a")
+    gstore.add_edge(conn, c, d, "is_a")
+    conn.commit()
+    before = list(conn.iterdump())
+
+    with pytest.raises(gstore.RelationRejectedError, match="순환"):
+        gstore.merge_concepts(conn, "a", ["b", "d"])
+
+    assert list(conn.iterdump()) == before
+
+
+def test_merge_inherits_classification_and_checks_its_relations(conn):
+    a = gstore.upsert_concept(conn, name="A")
+    gstore.upsert_concept(conn, name="Alias", kind="algorithm")
+    b = gstore.upsert_concept(conn, name="B", kind="software")
+    gstore.add_edge(conn, a, b, "is_a")  # 미분류 개념이므로 최초에는 시그니처 검사 불가.
+    conn.commit()
+
+    with pytest.raises(gstore.RelationRejectedError):
+        gstore.merge_concepts(conn, "a", ["alias"])
+
+    assert gstore.find_concept_by_slug(conn, "a")["concept_type"] is None
+    assert gstore.find_concept_by_slug(conn, "alias") is not None
+
+
+def test_merge_preserves_known_kind_and_caller_transaction(conn):
+    gstore.upsert_concept(conn, name="A")
+    gstore.upsert_concept(conn, name="Alias", kind="software")
+    conn.commit()
+    gstore.merge_concepts(conn, "a", ["alias"])
+    assert gstore.find_concept_by_slug(conn, "a")["concept_type"] == "software"
+    conn.rollback()
+    assert gstore.find_concept_by_slug(conn, "a")["concept_type"] is None
+    assert gstore.find_concept_by_slug(conn, "alias") is not None
+
+
+def test_merge_rejects_different_classified_kinds(conn):
+    gstore.upsert_concept(conn, name="A", kind="software")
+    gstore.upsert_concept(conn, name="B", kind="algorithm")
+    with pytest.raises(ValueError, match="서로 다른 kind"):
+        gstore.merge_concepts(conn, "a", ["b"])
+    assert gstore.find_concept_by_slug(conn, "b") is not None
+
+
+def test_merge_keeps_rebuild_evidence_separate_from_serving_edges(conn):
+    from pkb.graph.validate import validate_graph
+
+    a, b, c = [gstore.upsert_concept(conn, name=name, kind="algorithm") for name in ("A", "B", "C")]
+    gstore.add_edge(conn, a, b, "is_a")
+    gstore.prepare_edge_evidence_rebuild(conn)
+    gstore.add_edge(conn, b, c, "is_a", doc_id="data/a.md", chunk_index=0, materialize=False)
+    conn.commit()
+
+    gstore.merge_concepts(conn, "a", ["c"])
+
+    assert [tuple(row) for row in conn.execute("SELECT src_id, dst_id FROM concept_edges")] == [(a, b)]
+    assert [tuple(row) for row in conn.execute("SELECT src_id, dst_id FROM concept_edge_evidence")] == [(b, a)]
+    assert validate_graph(conn)["hard"]["cycles"]["count"] == 0

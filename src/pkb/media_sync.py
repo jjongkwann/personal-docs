@@ -1,7 +1,7 @@
-"""`pkb media-sync`: 이 Mac에서 이미지·오디오 벡터를 만들어 PKB 서버에 올린다.
+"""`pkb media-sync`: 서버가 선택한 임베딩 백엔드로 미디어 벡터를 만들어 PKB에 올린다.
 
-PKB 서버(메모리 8GB mini)는 같은 모델의 텍스트 탑만 올리고 이미지·오디오 인코더는 올리지 않는다.
-흐름은 list_media(missing_only) → get_media → EmbeddingGemma 2 → put_media_embeddings.
+list_media의 활성 설정에 따라 로컬 EmbeddingGemma 2 또는 Ollama로 이미지·오디오를 임베딩한다.
+흐름은 list_media(missing_only) → get_media → 임베딩 → put_media_embeddings.
 서버 URL은 PKB 서버(`http://<host>:8787/mcp`)나 MCP 게이트웨이 어느 쪽이든 된다. 게이트웨이는 도구를
 `pkb-` + 하이픈 이름으로 내놓으므로 tools/list에서 이름을 찾는다.
 
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import itertools
 import json
 import shutil
@@ -108,13 +109,12 @@ class McpClient:
 
 
 class MediaEmbedder:
-    """EmbeddingGemma 2로 이미지·오디오 벡터를 만든다 (MPS면 bf16). 미디어에는 프롬프트를 붙이지 않는다."""
+    """서버가 선택한 백엔드로 이미지·오디오를 임베딩한다. 미디어에는 프롬프트를 붙이지 않는다."""
 
     def __init__(self, device: str = "auto", model_id: str = MODEL) -> None:
-        from pkb.config import resolve_device
-
-        self.device = resolve_device(device)
+        self.device = device
         self.model_id = model_id
+        self.backend = {"provider": "local"}
         self._model = None
         self.load_seconds = 0.0  # 모델 적재 시간 — 처리량에서 따로 뺀다
 
@@ -124,6 +124,9 @@ class MediaEmbedder:
         import torch
         from sentence_transformers import SentenceTransformer
 
+        from pkb.config import resolve_device
+
+        self.device = resolve_device(self.device)
         started = time.perf_counter()
         dtype = torch.float32 if self.device == "cpu" else torch.bfloat16  # float16은 이 모델에서 NaN이 난다
         kwargs = {"device": self.device, "model_kwargs": {"dtype": dtype}}
@@ -143,10 +146,51 @@ class MediaEmbedder:
         # bf16 벡터라 소수 6자리면 충분하다 — 요청 크기가 절반으로 준다
         return [[round(float(value), 6) for value in vector] for vector in vectors]
 
+    def configure(self, backend: dict) -> None:
+        """MCP 서버의 활성 설정을 쓴다. 클라이언트 장치의 .env로 덮어쓰지 않는다."""
+        if not isinstance(backend, dict) or backend.get("provider") not in {"local", "ollama"}:
+            raise ToolError("서버의 미디어 임베딩 백엔드 설정을 확인하지 못했습니다.")
+        if backend["provider"] == "ollama" and not all(
+            backend.get(key) for key in ("endpoint", "model", "digest", "dimensions")
+        ):
+            raise ToolError("서버의 Ollama 임베딩 설정이 불완전합니다.")
+        self.backend = dict(backend)
+
+    def _remote(self, inputs: list[dict]) -> list[list[float]]:
+        from pkb.ollama_embeddings import embed
+
+        try:
+            return embed(
+                self.backend["endpoint"], self.backend["model"], inputs,
+                self.backend["dimensions"], expected_digest=self.backend["digest"],
+                batch_size=self.backend.get("batch_size", 32),
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise ToolError(str(exc)) from exc
+
     def image(self, image) -> list[float]:
+        if self.backend["provider"] == "ollama":
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+            return self._remote([{"image": base64.b64encode(buffer.getvalue()).decode("ascii")}])[0]
         return self._encode([image])[0]
 
     def audio(self, windows: list) -> list[list[float]]:
+        if self.backend["provider"] == "ollama":
+            import numpy as np
+
+            inputs = []
+            for window in windows:
+                buffer = io.BytesIO()
+                # decode_audio의 16-bit PCM을 복원하며 부호·끝점 overflow를 막는다.
+                pcm = np.clip(np.rint(np.asarray(window) * 32768), -32768, 32767).astype("<i2")
+                with wave.open(buffer, "wb") as stream:
+                    stream.setnchannels(1)
+                    stream.setsampwidth(2)
+                    stream.setframerate(SAMPLE_RATE)
+                    stream.writeframes(pcm.tobytes())
+                inputs.append({"audio": base64.b64encode(buffer.getvalue()).decode("ascii")})
+            return self._remote(inputs)
         return self._encode([{"array": window, "sampling_rate": SAMPLE_RATE} for window in windows])
 
 
@@ -240,18 +284,25 @@ def download(client: McpClient, doc_id: str, sha256: str, target: Path) -> None:
         raise ToolError(f"받은 파일의 sha256이 목록과 다릅니다 (파일이 바뀌었으면 다시 실행): {doc_id}")
 
 
-def pending_media(client: McpClient, kinds: list[str]) -> tuple[str | None, list[dict]]:
-    """(서버가 받는 모델, 미색인 파일). 이미지 먼저, 그다음 오디오."""
+def pending_media(client: McpClient, kinds: list[str]) -> tuple[str | None, dict, list[dict]]:
+    """(서버가 받는 모델, 활성 백엔드, 미색인 파일). 이미지 먼저, 그다음 오디오."""
     entries: list[dict] = []
     model = None
+    backend = None
     while True:
         page = client.call_json("list_media", kinds=kinds, missing_only=True, limit=1000, offset=len(entries))
         model = page["model"]
+        current_backend = page.get("embedding_backend")
+        if not isinstance(current_backend, dict):
+            raise ToolError("서버가 미디어 임베딩 백엔드를 제공하지 않습니다. PKB 서버를 업데이트하세요.")
+        if backend is not None and backend != current_backend:
+            raise ToolError("목록을 읽는 동안 임베딩 설정이 바뀌었습니다. 다시 실행하세요.")
+        backend = current_backend
         entries.extend(page["media"])
         if not page["media"] or len(entries) >= page["total"]:
             break
     order = {"image": 0, "audio": 1}
-    return model, sorted(entries, key=lambda entry: (order[entry["kind"]], entry["doc_id"]))
+    return model, backend, sorted(entries, key=lambda entry: (order[entry["kind"]], entry["doc_id"]))
 
 
 def run(
@@ -264,7 +315,7 @@ def run(
 ) -> dict:
     """미색인 미디어를 임베딩해 올린다. 반환: 처리·건너뜀·실패 수와 임베딩 시간."""
     client.connect(("list_media", "get_media", "put_media_embeddings"))
-    server_model, pending = pending_media(client, kinds)
+    server_model, backend, pending = pending_media(client, kinds)
     if server_model is None:
         raise ToolError(
             "서버의 미디어 색인이 꺼져 있거나 EMBEDDING_MODEL과 공간이 맞지 않습니다 (MEDIA_EMBEDDING_MODEL)."
@@ -282,6 +333,7 @@ def run(
             echo(f"  {entry['kind']:5} {entry['size_bytes']:>10,} B  {entry['doc_id']}")
         return stats
     assert embedder is not None
+    embedder.configure(backend)
     started = time.perf_counter()
     for number, entry in enumerate(pending, 1):
         doc_id, kind = entry["doc_id"], entry["kind"]

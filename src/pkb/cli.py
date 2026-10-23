@@ -36,10 +36,18 @@ def _principal(
         typer.echo(f"--as로는 읽기 명령만 실행할 수 있습니다: {', '.join(sorted(_READ_COMMANDS))}")
         raise typer.Exit(1)
     ctx.with_resource(access.acting_as(principal))
+    # Long-running services acquire the gate per tick; ordinary commands keep
+    # one generation for their entire read/write operation.
+    if ctx.invoked_subcommand not in {"graph", "watch"}:
+        from pkb.embedding_runtime import embedding_operation
+
+        ctx.with_resource(embedding_operation())
 
 
 _READ_COMMANDS = frozenset({"query", "show", "list", "graph"})
-_GRAPH_READ_COMMANDS = frozenset({"explain", "path", "query", "affected", "map", "ontology", "inferred"})
+_GRAPH_READ_COMMANDS = frozenset({
+    "explain", "path", "query", "affected", "map", "ontology", "inferred", "models",
+})
 
 
 @app.command()
@@ -854,6 +862,7 @@ def watch(
     import time
     from datetime import UTC, datetime
 
+    from pkb.embedding_runtime import EmbeddingBusyError, embedding_operation
     from pkb.ingest import format_delta_stats, ingest_files, reconcile, write_sync_marker
     from pkb.store import PRUNE_CONFIRM_THRESHOLD, delete_document, get_client
 
@@ -871,12 +880,12 @@ def watch(
         typer.echo(f"감시할 원본 트리가 없습니다: {data_root} / OBSIDIAN_PATH")
         raise typer.Exit(1)
 
-    for root, prefix, exclude in trees:
-        stats, stale_docs = reconcile(es, root, prefix, exclude=exclude)
-        typer.echo(f"기준선 {prefix}: {format_delta_stats(stats)}")
-        if stale_docs:
-            typer.echo(f"   원본에 없는 문서 {len(stale_docs)}개 — `pkb sync`로 정리하세요.")
-
+    with embedding_operation():
+        for root, prefix, exclude in trees:
+            stats, stale_docs = reconcile(es, root, prefix, exclude=exclude)
+            typer.echo(f"기준선 {prefix}: {format_delta_stats(stats)}")
+            if stale_docs:
+                typer.echo(f"   원본에 없는 문서 {len(stale_docs)}개 — `pkb sync`로 정리하세요.")
     snaps = {prefix: snapshot(root, exclude) for root, prefix, exclude in trees}
     typer.echo(f"감시 시작 (interval={interval}s, Ctrl+C로 종료)")
 
@@ -885,33 +894,37 @@ def watch(
     try:
         while True:
             time.sleep(interval)
-            poll_ts = datetime.now(UTC).isoformat()  # 마커 ts는 스냅샷 직전 캡처 (reconcile과 동일 이유)
-            applied = False
-            for root, prefix, exclude in trees:
-                new_snap = snapshot(root, exclude)
-                changed, removed = snapshot_diff(snaps[prefix], new_snap)
-                if changed:
-                    stats = ingest_files(changed, base_dir=root, doc_id_prefix=prefix)
-                    applied = True
-                    typer.echo(
-                        f"[{prefix}] 변경 {len(changed)}개 — {format_delta_stats(stats)}"
-                    )
-                if len(removed) > PRUNE_CONFIRM_THRESHOLD:
-                    typer.echo(
-                        f"[{prefix}] 삭제 {len(removed)}개 감지 — "
-                        f"임계({PRUNE_CONFIRM_THRESHOLD}) 초과라 자동 삭제 안 함. "
-                        "`pkb sync`로 확인 후 정리하세요."
-                    )
-                else:
-                    for p in removed:
-                        doc_id = f"{prefix}{p.relative_to(root)}"
-                        n = delete_document(es, doc_id)
-                        _graph_purge(doc_id)
-                        applied = True
-                        typer.echo(f"[{prefix}] 삭제: {doc_id} ({n}개 청크)")
-                snaps[prefix] = new_snap
-            if applied:
-                write_sync_marker(poll_ts)  # 델타 반영 성공 — pkb stale 오탐 방지
+            try:
+                with embedding_operation():
+                    poll_ts = datetime.now(UTC).isoformat()  # 마커 ts는 스냅샷 직전 캡처 (reconcile과 동일 이유)
+                    applied = False
+                    for root, prefix, exclude in trees:
+                        new_snap = snapshot(root, exclude)
+                        changed, removed = snapshot_diff(snaps[prefix], new_snap)
+                        if changed:
+                            stats = ingest_files(changed, base_dir=root, doc_id_prefix=prefix)
+                            applied = True
+                            typer.echo(
+                                f"[{prefix}] 변경 {len(changed)}개 — {format_delta_stats(stats)}"
+                            )
+                        if len(removed) > PRUNE_CONFIRM_THRESHOLD:
+                            typer.echo(
+                                f"[{prefix}] 삭제 {len(removed)}개 감지 — "
+                                f"임계({PRUNE_CONFIRM_THRESHOLD}) 초과라 자동 삭제 안 함. "
+                                "`pkb sync`로 확인 후 정리하세요."
+                            )
+                        else:
+                            for p in removed:
+                                doc_id = f"{prefix}{p.relative_to(root)}"
+                                n = delete_document(es, doc_id)
+                                _graph_purge(doc_id)
+                                applied = True
+                                typer.echo(f"[{prefix}] 삭제: {doc_id} ({n}개 청크)")
+                        snaps[prefix] = new_snap
+                    if applied:
+                        write_sync_marker(poll_ts)  # 델타 반영 성공 — pkb stale 오탐 방지
+            except EmbeddingBusyError:
+                continue  # Keep the previous snapshot; retry after activation.
     except KeyboardInterrupt:
         typer.echo("\nwatch 종료.")
 
@@ -928,6 +941,87 @@ def _graph_principal(ctx: typer.Context):
     if not access.current_principal().admin and ctx.invoked_subcommand not in _GRAPH_READ_COMMANDS:
         typer.echo(f"--as로는 그래프 조회 명령만 실행할 수 있습니다: {', '.join(sorted(_GRAPH_READ_COMMANDS))}")
         raise typer.Exit(1)
+    if ctx.invoked_subcommand != "worker":
+        from pkb.embedding_runtime import embedding_operation
+
+        ctx.with_resource(embedding_operation())
+
+
+@graph_app.command("models")
+def graph_models(
+    endpoint: str = typer.Option(None, help="Ollama 주소 (기본 GRAPH_OLLAMA_ENDPOINT)"),
+    model: str = typer.Option("", help="정확한 설치 태그 하나만 조회"),
+):
+    """설치 모델의 digest·capability를 조회. generation=true인 태그를 --model로 선택."""
+    from pkb.graph.ollama import models
+
+    try:
+        _echo_graph_json({"endpoint": endpoint or settings.graph_ollama_endpoint,
+                          "models": models(endpoint or settings.graph_ollama_endpoint, model=model)})
+    except (ValueError, RuntimeError) as exc:
+        typer.echo(f"모델 조회 실패: {exc}")
+        raise typer.Exit(1) from exc
+
+
+@graph_app.command("extract")
+def graph_extract(
+    doc_id: str = typer.Option("", help="이 문서의 pending 청크만 선택"),
+    max_chunks: int = typer.Option(20, min=1, max=1000, help="이번 실행의 최대 청크 수"),
+    batch_size: int = typer.Option(1, min=1, max=8),
+    retries: int = typer.Option(1, min=0, max=5, help="실패한 배치의 추가 재시도 수"),
+    endpoint: str = typer.Option(None, help="기본 GRAPH_OLLAMA_ENDPOINT"),
+    model: str = typer.Option(None, help="기본 GRAPH_OLLAMA_MODEL; 정확한 설치 태그"),
+    context: int = typer.Option(None, help="기본 GRAPH_OLLAMA_CONTEXT"),
+    output: int = typer.Option(None, help="기본 GRAPH_OLLAMA_OUTPUT"),
+    timeout: int = typer.Option(None, help="기본 GRAPH_OLLAMA_TIMEOUT (초)"),
+    resume: str = typer.Option("", help="기록된 실행 ID의 미완료 항목 재개 (모델·범위·배치 옵션은 기록값 사용)"),
+):
+    """reset 없이 새/변경 pending 청크를 제한 추출. 원문이 선택한 Ollama 서버로 전송됩니다."""
+    from pkb.graph.extraction import extract_pending
+
+    try:
+        result = extract_pending(
+            doc_id=doc_id, max_chunks=max_chunks, batch_size=batch_size, retries=retries,
+            endpoint=endpoint, model=model, context_tokens=context, output_tokens=output,
+            timeout=timeout, resume=resume, progress=typer.echo,
+        )
+    except (ValueError, RuntimeError) as exc:
+        typer.echo(f"추출 실패: {exc}")
+        raise typer.Exit(1) from exc
+    _echo_graph_json(result)
+    typer.echo("stored는 구조·원문 표면 검사를 통과해 저장했다는 뜻이며 사실 검증 완료를 뜻하지 않습니다.")
+    if not result["selection_complete"]:
+        raise typer.Exit(1)
+
+
+@graph_app.command("extraction-runs")
+def graph_extraction_runs(
+    run_id: str = typer.Option("", help="하나의 실행 ID"),
+    limit: int = typer.Option(20, min=1, max=100),
+):
+    """추출 모델·digest·계약 버전·입력 hash·저장/실패·재개 상태 조회."""
+    from pkb.graph.extraction import runs
+
+    _echo_graph_json({"runs": runs(run_id=run_id, limit=limit)})
+
+
+@graph_app.command("worker")
+def graph_worker(
+    interval: int = typer.Option(20, min=1, help="대기 청크 확인 간격 (초)"),
+    once: bool = typer.Option(False, help="한 번 확인·처리하고 종료"),
+):
+    """새/변경 문서를 설정된 Ollama로 자동 추출. GRAPH_AUTO_EXTRACT=true일 때만 실행합니다."""
+    from pkb.graph.worker import run_worker
+
+    run_worker(interval=interval, once=once)
+
+
+@graph_app.command("worker-status")
+def graph_worker_status():
+    """자동 그래프 작업자의 최근 상태와 재시도 대기를 조회합니다."""
+    from pkb.graph.worker import worker_status
+
+    _echo_graph_json(worker_status())
 
 
 @graph_app.command("stats")
@@ -1222,6 +1316,9 @@ def graph_rebuild_evidence_local(
     batch_size: int = typer.Option(8, min=1, max=8, help="생성 1회당 청크 수"),
     max_batches: int = typer.Option(0, min=0, help="0=완료까지, 양수=해당 배치만 실행"),
     endpoint: str = typer.Option("http://127.0.0.1:11434", help="Ollama API 주소"),
+    context: int = typer.Option(4096, min=1024, help="Ollama context 토큰"),
+    output: int = typer.Option(1024, min=128, help="Ollama 최대 출력 토큰"),
+    timeout: int = typer.Option(1800, min=1, help="생성 요청 timeout(초)"),
 ):
     """Ollama structured output으로 pending evidence를 재시작 가능하게 전량 추출."""
     from pkb.graph.rebuild import rebuild_with_ollama
@@ -1238,6 +1335,9 @@ def graph_rebuild_evidence_local(
             batch_size=batch_size,
             max_batches=max_batches,
             endpoint=endpoint,
+            context_tokens=context,
+            output_tokens=output,
+            timeout=timeout,
             progress=typer.echo,
         )
     except Exception as exc:

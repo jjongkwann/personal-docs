@@ -1,4 +1,5 @@
 import contextlib
+import copy
 import math
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -64,6 +65,9 @@ INDEX_SETTINGS = {
             "canonical_id": {"type": "keyword"},
             "status": {"type": "keyword"},
             "authority": {"type": "keyword"},
+            "import_extraction": {"type": "keyword"},
+            "import_document_id": {"type": "keyword"},
+            "import_version": {"type": "integer"},
             "aliases": {"type": "keyword"},
             "source_ids": {"type": "keyword"},
             "supports": {"type": "keyword"},
@@ -98,6 +102,8 @@ _LIST_FIELDS = (
     "source_ids",
     "supports",
     "concept_ids",
+    "import_document_id",
+    "import_version",
 )
 DOC_ROW_FIELDS = (*_LIST_FIELDS, "archived_at", "archive_reason", *ITEM_METADATA_FIELDS)
 DOC_INDEX_SUFFIX = "_docs"
@@ -164,7 +170,16 @@ def ensure_item_mapping(es: Elasticsearch) -> None:
     index = settings.es_index
     if index in _item_mapping_checked or not es.indices.exists(index=index):
         return
-    es.indices.put_mapping(index=index, properties={**ITEM_MAPPING_PROPERTIES, **MEDIA_MAPPING_PROPERTIES})
+    es.indices.put_mapping(index=index, properties={
+        **ITEM_MAPPING_PROPERTIES, **MEDIA_MAPPING_PROPERTIES,
+        "import_extraction": {"type": "keyword"},
+        "import_document_id": {"type": "keyword"},
+        "import_version": {"type": "integer"},
+    })
+    if es.indices.exists(index=doc_index_name()):
+        es.indices.put_mapping(index=doc_index_name(), properties={
+            "import_document_id": {"type": "keyword"}, "import_version": {"type": "integer"},
+        })
     _item_mapping_checked.add(index)
 
 
@@ -177,16 +192,18 @@ def create_doc_index(es: Elasticsearch) -> bool:
     name = doc_index_name()
     if es.indices.exists(index=name):
         return False
+    mapping = copy.deepcopy(DOC_INDEX_SETTINGS)
+    mapping["mappings"]["properties"]["doc_vector"]["dims"] = settings.embedding_dims
     if es.indices.exists_alias(name=settings.es_index):
         targets = sorted(es.indices.get_alias(name=settings.es_index))
         if len(targets) != 1:
             raise ValueError(f"'{settings.es_index}' alias가 물리 인덱스 하나를 가리켜야 합니다: {targets}")
         physical = f"{targets[0]}{DOC_INDEX_SUFFIX}"
         if not es.indices.exists(index=physical):
-            es.indices.create(index=physical, body=DOC_INDEX_SETTINGS)
+            es.indices.create(index=physical, body=mapping)
         es.indices.put_alias(index=physical, name=name)
         return True
-    es.indices.create(index=name, body=DOC_INDEX_SETTINGS)
+    es.indices.create(index=name, body=mapping)
     return True
 
 
@@ -450,23 +467,14 @@ def backfill_document_index(es: Elasticsearch) -> dict:
 
 
 def list_categories(es: Elasticsearch, include_archived: bool = False) -> dict[str, int]:
-    """카테고리별 문서 수. 문서 색인 집계 한 번이라 문서 수와 무관하게 빠르다. 이미지·오디오는 세지 않는다."""
-    index = doc_index_name()
-    if not es.indices.exists(index=index):
+    """권한이 있는 최신 문서 목록과 같은 기준으로 카테고리별 수를 센다."""
+    if not es.indices.exists(index=doc_index_name()):
         raise ValueError("문서 색인이 없습니다. 서버에서 `uv run pkb doc-index`로 채우세요.")
-    # 집계는 query가 고른 문서만 센다 — 권한 필터를 query에 넣어야 개수로도 새지 않는다.
-    clauses = [*exclude_media_filter(None), *access.search_filter()]
-    if not include_archived:
-        clauses.append({"bool": {"must_not": {"exists": {"field": "archived_at"}}}})
-    query = {"bool": {"filter": clauses}}
-    result = es.search(
-        index=index,
-        query=query,
-        size=0,
-        aggs={"categories": {"terms": {"field": "category", "size": _AGG_PAGE_SIZE}}},
-    )
-    buckets = result["aggregations"]["categories"]["buckets"]
-    return {bucket["key"]: bucket["doc_count"] for bucket in sorted(buckets, key=lambda b: b["key"])}
+    counts: dict[str, int] = {}
+    for doc in list_documents(es, include_archived=include_archived):
+        category = doc["category"]
+        counts[category] = counts.get(category, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def count_chunks_without_hash(es: Elasticsearch) -> int:
@@ -620,6 +628,7 @@ def list_documents(
     es: Elasticsearch,
     category: str | None = None,
     include_archived: bool = False,
+    include_versions: bool = False,
 ) -> list[dict]:
     """저장된 고유 문서 목록 반환. 기본적으로 archived 문서는 제외. 이미지·오디오는 list_media가 다룬다.
 
@@ -627,14 +636,13 @@ def list_documents(
     세는데, 문서가 많으면 카테고리 없이 부를 때 시간 초과가 난다. 반환 형태는 같다.
     """
     clauses: list[dict] = [*exclude_media_filter(None), *access.search_filter()]
-    if category:
-        clauses.append({"term": {"category": category}})
     if not include_archived:
         clauses.append({"bool": {"must_not": {"exists": {"field": "archived_at"}}}})
     query: dict = {"bool": {"must": clauses}}
 
     if es.indices.exists(index=doc_index_name()):
-        return access.readable(_list_document_rows(es, query))
+        docs = _import_versions(access.readable(_list_document_rows(es, query)), include_versions)
+        return [doc for doc in docs if not category or doc.get("category") == category]
 
     docs = []
     sub_aggs = {
@@ -645,7 +653,28 @@ def list_documents(
         hit = bucket["meta"]["hits"]["hits"][0]["_source"]
         hit["chunks"] = bucket["chunk_count"]["value"]
         docs.append(hit)
-    return access.readable(docs)
+    visible = _import_versions(access.readable(docs), include_versions)
+    return [doc for doc in visible if not category or doc.get("category") == category]
+
+
+def _import_versions(docs: list[dict], include_versions: bool) -> list[dict]:
+    """Group only visible immutable import versions; timestamps never determine latest."""
+    groups: dict[str, list[dict]] = {}
+    normal = []
+    from pkb.import_versions import validate_identity
+
+    for doc in docs:
+        identity = doc.get("import_document_id")
+        if identity is None:
+            normal.append(doc)
+            continue
+        validate_identity(identity, doc.get("import_version"))
+        groups.setdefault(identity, []).append(doc)
+    for versions in groups.values():
+        count = len(versions)
+        selected = versions if include_versions else [max(versions, key=lambda d: d["import_version"])]
+        normal.extend({**doc, "version_count": count} for doc in selected)
+    return sorted(normal, key=lambda doc: doc["doc_id"])
 
 
 def _list_document_rows(es: Elasticsearch, query: dict) -> list[dict]:

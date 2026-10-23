@@ -188,9 +188,15 @@ and `related_documents` need it; `list_documents` uses it when present.
 
 ### Switching the Embedding Model on a Small Server (`reembed`)
 
-A server with 8 GB of RAM cannot re-embed the whole corpus. Fill the new physical index from a
-machine with a GPU over an SSH tunnel, recompute the concept graph vectors on a copy, then switch
-while the server is stopped.
+For Windows Ollama, use **Settings → Search embeddings → Check models → Apply and reindex** in
+PKB 자료함. The server builds a new index and graph copy, then activates them together. See the
+[Windows Ollama embedding guide](windows-ollama-embeddings.md), including media compatibility,
+progress and recovery. Normal searches and writes pause during that migration.
+
+The manual procedure below is for the local Python provider without an active runtime manifest.
+When that model exceeds the server's memory budget, fill the new physical index from a machine
+with a GPU over an SSH tunnel, recompute the concept graph vectors on a copy, then switch while
+the server is stopped. Do not combine manual alias/configuration changes with an active manifest.
 
 ```bash
 uv run pkb reembed --target <new physical index> [--source <index or alias, default ES_INDEX>]
@@ -348,8 +354,9 @@ maintenance. `doctor` warns about config-index mismatches (e.g. integration turn
 
 ### Image and Audio Vectors (`media-sync`)
 
-The server loads only the model's text tower, not its image and audio encoders. On a Mac with enough memory, embed new or changed images
-and recordings and upload the vectors to the server (or through the MCP gateway):
+`media-sync` reads PKB's active embedding backend. With Ollama it sends images and audio to the
+selected Windows server; with the local provider it loads the Python model on the client Mac.
+The client decodes files and uploads the resulting vectors to PKB (or through the MCP gateway):
 
 ```bash
 uv sync                                                  # includes torchvision (the server needs it too)
@@ -365,13 +372,13 @@ uv run pkb media-sync --kinds audio --limit 20                # one kind, first 
 | `--kinds` | `image,audio` | Which media to process |
 | `--limit` | `0` (all) | Maximum files this run |
 | `--dry-run` | off | Print the files without downloading or embedding |
-| `--device` | `auto` | `mps`, `cuda` or `cpu` |
+| `--device` | `auto` | Local provider only: `mps`, `cuda` or `cpu` |
 
 It prints one line per file and, at the end, model load time, seconds per image and seconds per
 30-second audio segment. Files already indexed with the current hash and model are skipped, so it
-can run repeatedly. Requires macOS `afconvert` for audio and `sips` for SVG/HEIC; the server needs
-`MEDIA_EMBEDDING_MODEL=google/embeddinggemma-2` with the EmbeddingGemma 2 settings from step 1 of
-the [model switch runbook](#switching-the-embedding-model-on-a-small-server-reembed).
+can run repeatedly. Requires macOS `afconvert` for audio and `sips` for SVG/HEIC. The server must
+have compatible EmbeddingGemma 2 media enabled. The app's Ollama migration sets this after
+compatibility checks; manual local setup uses the [model switch runbook](#switching-the-embedding-model-on-a-small-server-reembed).
 
 To keep new files searchable, run it periodically from a LaunchAgent with `StartInterval` 3600 that
 calls a script running the command above only on AC power (`pmset -g ps | grep -q "AC Power" || exit 0`).
@@ -408,7 +415,104 @@ start (`~/.claude/settings.json`, replace `<repo-path>` with this repo's absolut
 
 ## Graph RAG Operations CLI
 
-Building the concept graph is done directly by Claude Code via MCP's `graph_list_chunks`/`graph_store_concepts` (no API calls). The CLI covers stats, the four read queries, the Evidence Map snapshot, and evidence rebuild.
+### Normal incremental extraction
+
+After ingesting a new or changed document, use `graph extract` to process a bounded selection of
+pending chunks. It calls Ollama directly and needs no Claude/Codex conversation. It does **not**
+reset existing evidence or extraction markers. Ingest and graph extraction are separate steps. With `GRAPH_AUTO_EXTRACT=true`, the independent `pkb graph worker` automatically picks up new and changed indexed text; imports return before inference completes. See [automatic extraction](auto-graph-extraction.md).
+MCP clients can still extract explicitly through `graph_list_chunks` → `graph_store_concepts`.
+
+For a Windows Ollama server, set these values in `.env` (the default endpoint is localhost):
+
+```dotenv
+GRAPH_OLLAMA_ENDPOINT=http://192.168.0.2:11434
+GRAPH_OLLAMA_MODEL=gemma4:12b-it-qat
+GRAPH_OLLAMA_CONTEXT=4096
+GRAPH_OLLAMA_OUTPUT=1024
+GRAPH_OLLAMA_TIMEOUT=180
+```
+
+Use the exact installed tag, not a guessed model name. `models` checks `/api/tags` and `/api/show`
+and prints digest, capabilities, `generation` and the reported context limit. Select a
+`generation: true` model; an embedding-only model is rejected. This command does not download a
+model or prove generation quality. The first bounded extraction tests the actual structured-output
+request and **writes accepted results to the graph**:
+
+```bash
+uv run pkb graph models
+uv run pkb graph models --model gemma4:12b-it-qat
+uv run pkb graph extract --doc-id 'data/study/example.md' --max-chunks 1 --batch-size 1 --output 1024
+uv run pkb graph extraction-runs --run-id RUN_ID
+```
+
+Replace the example doc_id with an indexed document and `RUN_ID` with the printed run ID. Inspect
+the stored concepts/relations with `graph explain` and their source chunks with `pkb show DOC_ID`
+(or MCP `get_document` with `chunk_range`). Run `pkb graph validate` for structural violations.
+After reviewing the sample, `pkb graph extract --max-chunks 20` processes another bounded selection.
+Without `--doc-id`, it selects pending chunks across the corpus. The maximum is 1,000 chunks per
+run; the default is 20. The default batch size is 1 and `--retries 1` allows one extra attempt for
+a failed batch. `selection_complete` refers to this selection, not the entire corpus.
+
+`--endpoint`, `--model`, `--context`, `--output` and `--timeout` override the corresponding setting
+for a new run. To change the default model for later runs, edit `GRAPH_OLLAMA_MODEL` in `.env`.
+Changing a generation model or prompt does **not** automatically re-extract already completed
+chunks. Pending selection follows source content/input hashes. Keep existing results unless a
+separate, reviewed full rebuild is intended.
+
+A partial run exits with code 1 and preserves item errors. Resume unfinished items with:
+
+```bash
+uv run pkb graph extract --resume RUN_ID
+uv run pkb graph extraction-runs --run-id RUN_ID
+```
+
+Resume uses the saved endpoint, model digest, scope, batch size, context and output settings;
+`--retries` controls the extra attempts on this invocation. It skips stored items and rejects a
+changed model digest or extraction contract. Changed/deleted source inputs become `stale`; start
+a new bounded run against the current source instead of reusing the old input. Start a new run
+also when changing context/output/model settings. History is an administrator-only CLI view and
+retains run metadata, per-item attempts and append-only failure/status events in SQLite. The
+schema additions preserve existing graph data.
+
+
+Graph write initialization (including `graph extract`) checks the local SQLite journal before any
+migration transaction and switches an existing DELETE journal to WAL once. This lets a search
+reader and an extraction writer commit concurrently. Read paths using `normalize=False` (such as
+`doctor`) leave an existing journal mode unchanged; in-memory databases retain their memory
+journal. The first transition needs a quiet window: let ongoing searches, `doctor` and SQLite
+checks finish, then retry if the CLI reports a WAL-transition lock. WAL permits concurrent readers
+and one writer; it does not allow multiple simultaneous writers.
+
+Before the first write with the upgraded code, keep a consistent SQLite backup (SQLite's backup
+API or the `sqlite3 .backup` command to a new file). This copies existing records without changing
+the working DB. After WAL is enabled, copying only the main `.sqlite` file while it is in use can
+omit committed data still in `-wal`; use the backup API rather than deleting or detaching the
+`-wal`/`-shm` sidecars. This applies to local SQLite storage, not a network-shared database file.
+
+The input budget counts the complete sent messages, source JSON, hints, at most 20 corpus terms,
+and JSON schema using the existing cl100k tokenizer estimate. It adds 20% plus 256 template tokens
+and reserves the requested output. It refuses an oversized request instead of silently removing
+source text. Token counts vary by model: actual reported prompt saturation and a length-limited
+response are also rejected before storage. On an input-budget error, reduce `--batch-size` or
+`--output`, or increase `--context` within the model's reported limit. A single oversized chunk
+needs a larger context. The context requested by the CLI is sent explicitly to Ollama.
+
+`stored` means output was saved after schema, ontology and conservative source-surface checks.
+It does **not** mean independent factual verification. Read the source and inspect dropped items
+and storage warnings in run history; a valid relation signature or JSON document can still be
+semantically wrong.
+
+Ollama graph extraction and search embeddings have separate model selections. Selecting a graph
+generation model does not change embeddings or CrossEncoder reranking. With the Ollama embedding
+provider, document, query and concept vectors run on the selected server; `media-sync` also reads
+that backend from PKB. With the local provider they use the existing Python model. Change the
+embedding model through the migration described above, not by editing the generation setting.
+
+### Read queries and explicit full rebuild
+
+Normal extraction does not require any reset/finalize command. The following reset/rebuild/finalize
+sequence is only for an intentional full evidence replacement, after backup and scope review.
+It is not a retry procedure for a single new document.
 
 ```bash
 # Current graph stats
@@ -436,14 +540,14 @@ uv run pkb graph reembed --db path/to/pkb_graph.copy.sqlite
 # Keeps the existing graph, resets only staging evidence and extraction markers
 uv run pkb graph reset-evidence --yes
 
-# Optional: auto-extract all pending items with an installed Ollama model (resumable if interrupted)
+# Full rebuild only: requires the reset above; resumes from pending markers if interrupted
 uv run pkb graph rebuild-evidence-local --yes
 #   --model gpt-oss:20b            # any installed Ollama generation model
 #   --batch-size 8                 # chunks per generation (1-8)
-#   --max-batches 0                # 0 = run to completion, 1 = sample validation
-#   --endpoint http://127.0.0.1:11434   # local Ollama endpoint
+#   --max-batches 0                # 0 = run to completion, 1 = bounded batch
+#   --endpoint http://192.168.0.2:11434 --context 4096 --output 1024 --timeout 180
 
-# After manually processing all graph_list_chunks → graph_store_concepts, atomically switch over once pending=0
+# After all chunks are processed and quality is reviewed, atomically switch over once pending=0
 uv run pkb graph finalize-evidence --yes
 ```
 
@@ -520,7 +624,8 @@ Other tuning options in `pkb.config.Settings` (overridable via environment varia
 |------|--------|------|
 | `EMBEDDING_MODEL` | `BAAI/bge-m3` | sentence-transformers model (1024d, change together with `EMBEDDING_DIMS`) |
 | `EMBED_CONTEXT_PREFIX` | `true` | Include title/section_path prefix in embedding input |
-| `EMBEDDING_DEVICE` | `auto` | Torch device for embedding. `auto` picks mps → cuda → cpu; or pin `cpu`/`mps`/`cuda` |
+| `EMBEDDING_PROVIDER` | `local` | Initial provider. Use the app's embedding migration to select `ollama`; the durable runtime manifest then owns the active model, endpoint, digest, dimensions and store paths |
+| `EMBEDDING_DEVICE` | `auto` | Local provider only: Torch device for embedding. `auto` picks mps → cuda → cpu; or pin `cpu`/`mps`/`cuda` |
 | `EMBEDDING_DTYPE` | `float16` | Weight precision for the embedding model on a GPU device (mps/cuda): `float16`, `bfloat16` or `float32`; CPU always uses `float32`. `float16` halves the weights in memory and needs no reindex. Set `float32` to go back. EmbeddingGemma 2 gives NaN or broken vectors in `float16`, so use `bfloat16` with it |
 | `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | CrossEncoder reranker model |
 | `RERANK_DEVICE` | `auto` | Torch device for the reranker (same resolution rule) |
@@ -531,6 +636,11 @@ Other tuning options in `pkb.config.Settings` (overridable via environment varia
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | 500 / 100 | Fixed-size chunking |
 | `GRAPH_DB_PATH` | `data/.graph/pkb_graph.sqlite` | SQLite concept graph file |
 | `GRAPH_DEDUP_THRESHOLD` | `0.88` | Embedding similarity threshold for concept merging (bge-m3; `0.89` for jina v5 small gives the same merge rate) |
+| `GRAPH_OLLAMA_ENDPOINT` | `http://127.0.0.1:11434` | Generation endpoint for new incremental graph extraction; Windows example: `http://192.168.0.2:11434` |
+| `GRAPH_OLLAMA_MODEL` | `gemma4:12b-it-qat` | Exact installed generation tag; inspect with `pkb graph models` |
+| `GRAPH_OLLAMA_CONTEXT` | `4096` | Explicit context requested for incremental extraction |
+| `GRAPH_OLLAMA_OUTPUT` | `1024` | Maximum generated tokens reserved by the input-budget check |
+| `GRAPH_OLLAMA_TIMEOUT` | `180` | Generation request timeout in seconds |
 | `DEFAULT_TOP_K` | `5` | Default result count for `pkb query` and `search_knowledge` |
 | `MCP_PORT` | `8787` | Shared HTTP MCP server port |
 | `MCP_HOST` | `127.0.0.1` | Bind address. Set to `0.0.0.0` only to reach the server from another machine over a trusted LAN/VPN. Without `ACCESS_POLICY` there is no authentication and `write_file` can write anywhere in the vault. |

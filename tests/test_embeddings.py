@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+
 import pytest
 
 from pkb import embeddings
@@ -63,7 +66,10 @@ def test_prompt_model_settings_split_query_and_document(model, monkeypatch):
 
 def test_trust_remote_code_reaches_the_loader(monkeypatch):
     calls: list[dict] = []
-    monkeypatch.setattr(embeddings, "SentenceTransformer", lambda name, **kwargs: calls.append(kwargs))
+    monkeypatch.setitem(
+        sys.modules, "sentence_transformers",
+        SimpleNamespace(SentenceTransformer=lambda name, **kwargs: calls.append(kwargs)),
+    )
     monkeypatch.setattr(settings, "embedding_device", "cpu")
 
     embeddings._load()
@@ -78,7 +84,10 @@ def test_text_only_and_bfloat16_reach_the_loader(monkeypatch):
     import torch
 
     calls: list[dict] = []
-    monkeypatch.setattr(embeddings, "SentenceTransformer", lambda name, **kwargs: calls.append(kwargs))
+    monkeypatch.setitem(
+        sys.modules, "sentence_transformers",
+        SimpleNamespace(SentenceTransformer=lambda name, **kwargs: calls.append(kwargs)),
+    )
     monkeypatch.setattr(settings, "embedding_device", "mps")
 
     embeddings._load()

@@ -77,6 +77,7 @@ def test_restricted_graph_recounts_from_readable_evidence(graph):
 def test_nothing_from_the_private_document_reaches_any_graph_tool(graph):
     with _as("bob"):
         outputs = [
+            _fn(mcp_server.graph_overview)(limit=30),
             _fn(mcp_server.graph_explain)("Shared"),
             _fn(mcp_server.graph_list_concepts)(),
             _fn(mcp_server.graph_query)("anything", depth=2),

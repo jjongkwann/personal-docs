@@ -65,6 +65,9 @@ class _FakeES:
     def __init__(self):
         self.searches: list[list[dict]] = []
 
+    def options(self, **kwargs):
+        return self
+
     def msearch(self, index, searches):
         self.searches.append(searches)
         if len(searches) == 4 and "knn" in searches[3]:

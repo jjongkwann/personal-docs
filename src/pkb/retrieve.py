@@ -4,7 +4,7 @@ from datetime import date, datetime
 from math import isfinite
 from time import perf_counter
 
-from elasticsearch import Elasticsearch
+from elasticsearch import ConnectionTimeout, Elasticsearch
 
 from pkb import access
 from pkb.config import settings
@@ -15,6 +15,24 @@ from pkb.query import analyze_query, normalize_legal_filters
 
 RRF_K = 60  # Reciprocal Rank Fusion 상수 (Elastic 기본값)
 MAX_CHUNKS_PER_DOC = 2  # 최종 결과에서 문서당 허용할 최대 청크 수 (다양성 캡)
+SEARCH_REQUEST_TIMEOUT = 20
+
+
+def _retrieval_msearch(es: Elasticsearch, searches: list[dict]) -> dict:
+    # Each read allows two 20s attempts, below the gateway's 60s and app's 120s
+    # deadlines. options() leaves the shared write client unchanged.
+    client = es.options(request_timeout=SEARCH_REQUEST_TIMEOUT, retry_on_timeout=True, max_retries=1)
+    try:
+        return client.msearch(index=settings.es_index, searches=searches)
+    except ConnectionTimeout as exc:
+        raise TimeoutError("Elasticsearch 검색 응답 시간이 초과됐습니다 (최대 2회 시도)") from exc
+
+
+def _check_search_response(response: dict, name: str) -> None:
+    if response.get("error"):
+        raise RuntimeError(f"{name} 검색 실패: {response['error']}")
+    if response.get("timed_out"):
+        raise TimeoutError(f"Elasticsearch {name} 검색 시간이 초과되어 일부 결과만 반환됐습니다")
 
 # Search profiles are deliberately small and deterministic.  They map to the
 # optional frontmatter contract fields, while ``all`` keeps the historical
@@ -592,8 +610,10 @@ def _attach_neighbors(
     if not searches:
         return hits
 
-    result = es.msearch(index=settings.es_index, searches=searches)
+    result = _retrieval_msearch(es, searches)
     responses = result.get("responses", [])
+    for response in responses:
+        _check_search_response(response, "이웃 청크")
     for (hit, ci), response in zip(searchable, responses, strict=False):
         neighbors = []
         for nh in response.get("hits", {}).get("hits", []):
@@ -647,9 +667,8 @@ def _rrf_search(
     # BM25·kNN을 msearch 한 요청으로 묶는다 — HTTP 왕복 2회→1회.
     # (ES 내부 하위 검색 비용은 동일. Basic 라이선스라 네이티브 RRF retriever는 403 — 클라이언트 RRF 유지)
     t = perf_counter()
-    result = es.msearch(
-        index=settings.es_index,
-        searches=[
+    result = _retrieval_msearch(
+        es, [
             {},
             {
                 "query": _bm25_query(
@@ -680,8 +699,7 @@ def _rrf_search(
     )
     bm25_result, knn_result = result["responses"]
     for name, resp in (("bm25", bm25_result), ("knn", knn_result)):
-        if resp.get("error"):
-            raise RuntimeError(f"{name} 검색 실패: {resp['error']}")
+        _check_search_response(resp, name)
     if timings is not None:
         timings["msearch_ms"] = round((perf_counter() - t) * 1000, 2)
         # 하위 검색별 서버측 소요시간 (ES took, ms)

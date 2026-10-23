@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from elasticsearch import Elasticsearch
@@ -34,6 +35,7 @@ def scan_pending_chunks(
     conn: sqlite3.Connection,
     *,
     query: dict | None = None,
+    on_source: Callable[[dict, str], None] | None = None,
 ) -> tuple[list[dict], int]:
     """ES 청크를 search_after로 전량 순회해 (pending source, 전체 수)를 반환. 이미지·오디오 청크는 뺀다."""
     from pkb.media import exclude_media_filter
@@ -46,23 +48,31 @@ def scan_pending_chunks(
     while True:
         scan = es.search(
             index=settings.es_index,
-            query={"bool": {"must": [query or {"match_all": {}}], "filter": exclude_media_filter(None)}},
+            query={"bool": {
+                "must": [query or {"match_all": {}}],
+                "filter": exclude_media_filter(None),
+                "must_not": [{"terms": {"import_extraction": ["unsupported", "empty"]}}],
+            }},
             size=SCAN_PAGE_SIZE,
             source_includes=["doc_id", "chunk_index", "content_hash", "content", "title", "section_path", "category"],
             sort=[{"doc_id": "asc"}, {"chunk_index": "asc"}],
             **({"search_after": search_after} if search_after else {}),
         )
+        if scan.get("timed_out") or scan.get("_shards", {}).get("failed", 0):
+            raise RuntimeError("Graph discovery source search returned incomplete results")
         hits = scan["hits"]["hits"]
         if not hits:
             break
         total += len(hits)
-        pending.extend(
-            source
-            for source in (hit["_source"] for hit in hits)
-            if not source.get("content_hash")
-            or by_idx.get((source["doc_id"], source["chunk_index"])) != source["content_hash"]
-            or input_by_idx.get((source["doc_id"], source["chunk_index"])) != graph_input_hash(source)
-        )
+        for hit in hits:
+            source = hit["_source"]
+            input_hash = graph_input_hash(source)
+            if on_source is not None:
+                on_source(source, input_hash)
+            key = (source["doc_id"], source["chunk_index"])
+            if (not source.get("content_hash") or by_idx.get(key) != source["content_hash"]
+                    or input_by_idx.get(key) != input_hash):
+                pending.append(source)
         search_after = hits[-1]["sort"]
     return pending, total
 
@@ -150,12 +160,20 @@ def _chunk_versions(keys: list[tuple[str, int]]) -> dict[tuple[str, int], tuple[
     docs = get_client().mget(
         index=settings.es_index,
         ids=[f"{doc_id}_{index}" for doc_id, index in keys],
-        source_includes=["doc_id", "chunk_index", "content_hash", "content", "title", "section_path", "category"],
+        source_includes=[
+            "doc_id", "chunk_index", "content_hash", "content", "title", "section_path", "category",
+            "source_type", "import_extraction",
+        ],
     )["docs"]
     versions = {}
     for key, doc in zip(keys, docs, strict=False):
         source = doc.get("_source") or {}
-        if doc.get("found") and source.get("content_hash"):
+        if (
+            doc.get("found")
+            and source.get("content_hash")
+            and source.get("source_type") not in {"image", "audio"}
+            and source.get("import_extraction") not in {"unsupported", "empty"}
+        ):
             versions[key] = (source["content_hash"], graph_input_hash(source))
     return versions
 

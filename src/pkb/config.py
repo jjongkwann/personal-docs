@@ -8,6 +8,12 @@ class Settings(BaseSettings):
     es_host: str = "http://localhost:9200"
     es_index: str = "pkb_documents"
     embedding_model: str = "BAAI/bge-m3"  # 2026-07 매트릭스 실측 채택 (KURE-v1·MiniLM 대비 우위)
+    embedding_provider: Literal["local", "ollama"] = "local"
+    embedding_ollama_endpoint: str = "http://127.0.0.1:11434"
+    embedding_ollama_model: str = ""
+    embedding_ollama_digest: str = ""
+    embedding_ollama_query_prefix: str = ""
+    embedding_ollama_document_prefix: str = ""
     embedding_revision: str = ""  # 선택: 모델 저장소 commit/tag 고정
     embedding_dims: int = 1024
     embedding_device: str = "auto"  # auto | cpu | mps | cuda
@@ -58,11 +64,22 @@ class Settings(BaseSettings):
     media_embedding_model: str = ""
     graph_db_path: str = "data/.graph/pkb_graph.sqlite"  # 개념 그래프 SQLite 파일
     graph_dedup_threshold: float = 0.88  # 임베딩 유사도 기반 개념 병합 임계값
+    graph_ollama_endpoint: str = "http://127.0.0.1:11434"
+    graph_ollama_model: str = "gemma4:12b-it-qat"
+    graph_ollama_context: int = 4096
+    graph_ollama_output: int = 1024
+    graph_ollama_timeout: int = 180
+    graph_auto_extract: bool = False
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 
 settings = Settings()
+
+# One manifest selects a matching embedding provider, chunk index and concept graph.
+from pkb.embedding_runtime import initialize_settings  # noqa: E402
+
+initialize_settings(settings)
 
 
 def data_dir() -> Path:

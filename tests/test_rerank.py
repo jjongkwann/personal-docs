@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+
 from pkb import embeddings
 from pkb import rerank as rerank_module
 from pkb.config import settings
@@ -64,8 +67,10 @@ def test_rerank_context_is_opt_in_and_preserves_content(monkeypatch):
 
 def test_model_loaders_forward_only_configured_revisions(monkeypatch):
     calls = []
-    monkeypatch.setattr(embeddings, "SentenceTransformer", lambda *a, **kw: calls.append(("embed", kw)))
-    monkeypatch.setattr(rerank_module, "CrossEncoder", lambda *a, **kw: calls.append(("rerank", kw)))
+    monkeypatch.setitem(sys.modules, "sentence_transformers", SimpleNamespace(
+        SentenceTransformer=lambda *a, **kw: calls.append(("embed", kw)),
+        CrossEncoder=lambda *a, **kw: calls.append(("rerank", kw)),
+    ))
     monkeypatch.setattr(embeddings, "resolve_device", lambda _: "cpu")
     monkeypatch.setattr(rerank_module, "resolve_device", lambda _: "cpu")
 
@@ -90,7 +95,9 @@ def test_embedding_loader_uses_half_precision_only_on_gpu(monkeypatch):
     import torch
 
     calls = []
-    monkeypatch.setattr(embeddings, "SentenceTransformer", lambda *a, **kw: calls.append(kw))
+    monkeypatch.setitem(
+        sys.modules, "sentence_transformers", SimpleNamespace(SentenceTransformer=lambda *a, **kw: calls.append(kw))
+    )
     monkeypatch.setattr(settings, "embedding_revision", "")
 
     monkeypatch.setattr(embeddings, "resolve_device", lambda _: "mps")
@@ -121,8 +128,9 @@ def test_model_loaders_download_when_not_cached(monkeypatch):
 
         return load
 
-    monkeypatch.setattr(embeddings, "SentenceTransformer", loader("embed"))
-    monkeypatch.setattr(rerank_module, "CrossEncoder", loader("rerank"))
+    monkeypatch.setitem(sys.modules, "sentence_transformers", SimpleNamespace(
+        SentenceTransformer=loader("embed"), CrossEncoder=loader("rerank"),
+    ))
     monkeypatch.setattr(embeddings, "resolve_device", lambda _: "cpu")
     monkeypatch.setattr(rerank_module, "resolve_device", lambda _: "cpu")
 

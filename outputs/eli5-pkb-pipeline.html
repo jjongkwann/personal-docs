@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; img-src data:; font-src data:; media-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PKB: 문서에서 검색과 답변까지</title>
+<style>
+:root{color-scheme:light;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo",sans-serif;color:#17202d;background:#f4f6f8}
+*{box-sizing:border-box}body{margin:0;background:#f4f6f8;color:#17202d}main{max-width:1160px;margin:auto;padding:64px 28px 44px}header{margin-bottom:36px}h1{font-size:clamp(32px,5vw,52px);line-height:1.2;letter-spacing:-.06em;margin:0 0 20px}.roles{display:flex;gap:12px;flex-wrap:wrap;font-size:15px;color:#49566a}.roles span{padding:9px 14px;border:1px solid #d6dce5;border-radius:8px;background:#fff}.grid{display:grid;grid-template-columns:1fr 1fr;gap:24px}section{background:#fff;border:1px solid #dce2e9;border-radius:18px;overflow:hidden;padding:24px 22px 20px}h2{display:flex;align-items:center;gap:15px;margin:0;font-size:29px;letter-spacing:-.04em}h2 b{color:#1768cf;font-size:37px;font-weight:800}svg{display:block;width:100%;height:auto;margin:14px 0 0}svg text{font-family:inherit;font-size:17px;fill:#263445}svg .small{font-size:14px}svg .model{font-size:15px;font-weight:650}footer{padding:26px 0 0;color:#566376;font-size:14px}a:focus-visible,button:focus-visible{outline:3px solid #1768cf;outline-offset:4px}@media(max-width:680px){main{padding:32px 16px}.grid{grid-template-columns:1fr;gap:16px}section{padding:20px 15px 15px}h2{font-size:27px}.roles{font-size:13px;gap:8px}}@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body><main>
+<header><h1>문서가 답이 되기까지</h1><div class="roles"><span>Mac · 보관·검색</span><span>Windows Ollama · 모델 실행</span></div></header>
+<div class="grid">
+<section><h2><b>01</b> 넣기</h2>
+<svg viewBox="0 0 480 245" role="img" aria-label="PDF와 문서를 앱에 넣으면 Mac에 원본을 보관합니다.">
+<rect x="35" y="48" width="98" height="130" rx="9" fill="#e6f0ff" stroke="#1768cf" stroke-width="3"/>
+<path d="M55 78h58M55 96h58M55 114h38" fill="none" stroke="#1768cf" stroke-width="5" stroke-linecap="round"/>
+<text x="84" y="154" text-anchor="middle">PDF</text>
+<path d="M160 112h62m-12-12 12 12-12 12" fill="none" stroke="#69788c" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="254" y="30" width="190" height="161" rx="15" fill="#f7f9fc" stroke="#536379" stroke-width="2"/>
+<path d="M280 152v18h138v-18" fill="none" stroke="#536379" stroke-width="3"/>
+<rect x="294" y="51" width="88" height="101" rx="7" fill="#e6f0ff" stroke="#1768cf" stroke-width="3"/>
+<rect x="308" y="63" width="88" height="101" rx="7" fill="#e6f0ff" stroke="#1768cf" stroke-width="3"/>
+<path d="M326 88h50M326 105h50M326 122h30" fill="none" stroke="#1768cf" stroke-width="4" stroke-linecap="round"/>
+<text x="349" y="224" text-anchor="middle">원본 보관</text>
+</svg></section>
+<section><h2><b>02</b> 읽기</h2>
+<svg viewBox="0 0 480 245" role="img" aria-label="파싱은 파일에서 글자를 꺼내는 일입니다. 본문을 짧은 조각으로 나눕니다.">
+<rect x="35" y="38" width="100" height="142" rx="9" fill="#e6f0ff" stroke="#1768cf" stroke-width="3"/>
+<path d="M54 63h62M54 81h62M54 99h42M54 124h62M54 142h48" fill="none" stroke="#1768cf" stroke-width="4" stroke-linecap="round"/>
+<path d="M162 110h66m-12-12 12 12-12 12" fill="none" stroke="#69788c" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="270" y="33" width="166" height="46" rx="7" fill="#e6f0ff" stroke="#1768cf" stroke-width="3"/>
+<rect x="270" y="91" width="166" height="46" rx="7" fill="#e6f0ff" stroke="#1768cf" stroke-width="3"/>
+<rect x="270" y="149" width="166" height="46" rx="7" fill="#e6f0ff" stroke="#1768cf" stroke-width="3"/>
+<path d="M289 51h126M289 63h90M289 109h126M289 121h90M289 167h126M289 179h90" fill="none" stroke="#1768cf" stroke-width="3" stroke-linecap="round"/>
+<text x="240" y="229" text-anchor="middle">파싱 → 글자 추출·나누기</text>
+</svg></section>
+<section><h2><b>03</b> 색인</h2>
+<svg viewBox="0 0 480 245" role="img" aria-label="Windows의 EmbeddingGemma가 본문 조각을 의미를 나타내는 숫자로 만듭니다. Mac의 검색 저장소에 본문과 함께 저장합니다.">
+<rect x="14" y="58" width="79" height="49" rx="7" fill="#e6f0ff" stroke="#1768cf" stroke-width="3"/>
+<path d="M28 75h49M28 88h34" fill="none" stroke="#1768cf" stroke-width="3" stroke-linecap="round"/>
+<path d="M108 82h29m-9-9 9 9-9 9M316 82h28m-9-9 9 9-9 9" fill="none" stroke="#69788c" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="151" y="34" width="151" height="96" rx="12" fill="#f7f9fc" stroke="#536379" stroke-width="2"/>
+<text x="226" y="74" class="model" text-anchor="middle">EmbeddingGemma</text><text x="226" y="99" class="small" text-anchor="middle">Windows</text>
+<rect x="359" y="45" width="104" height="76" rx="9" fill="#263445" stroke="#263445" stroke-width="2"/>
+<text x="411" y="76" text-anchor="middle" style="fill:#fff">0.2, 0.8</text><text x="411" y="99" text-anchor="middle" style="fill:#fff">…</text>
+<path d="M411 137v29H150m10-10-10 10 10 10" fill="none" stroke="#69788c" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M39 157v53c0 22 103 22 103 0v-53" fill="#f7f9fc" stroke="#536379" stroke-width="2"/>
+<ellipse cx="90.5" cy="157" rx="51.5" ry="13" fill="#fff" stroke="#536379" stroke-width="2"/>
+<text x="91" y="198" text-anchor="middle">Mac</text><text x="293" y="210" text-anchor="middle">임베딩 = 의미의 숫자</text>
+</svg></section>
+<section><h2><b>04</b> 찾기</h2>
+<svg viewBox="0 0 480 245" role="img" aria-label="질문도 Windows에서 같은 모델로 임베딩합니다. Mac에서 단어 검색과 의미 검색을 함께 하여 관련 본문을 찾습니다.">
+<path d="M22 38h66a9 9 0 0 1 9 9v49a9 9 0 0 1-9 9H49l-19 17v-17h-8a9 9 0 0 1-9-9V47a9 9 0 0 1 9-9Z" fill="#fff" stroke="#263445" stroke-width="2"/>
+<text x="55" y="85" text-anchor="middle" style="font-size:36px;font-weight:750">?</text>
+<path d="M110 73h31m-9-9 9 9-9 9M318 73h26m-9-9 9 9-9 9" fill="none" stroke="#69788c" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="153" y="28" width="151" height="90" rx="12" fill="#f7f9fc" stroke="#536379" stroke-width="2"/>
+<text x="228" y="67" class="model" text-anchor="middle">EmbeddingGemma</text><text x="228" y="93" class="small" text-anchor="middle">Windows</text>
+<rect x="358" y="40" width="105" height="66" rx="9" fill="#263445" stroke="#263445" stroke-width="2"/>
+<text x="410" y="79" text-anchor="middle" style="fill:#fff">0.3, 0.7…</text>
+<path d="M410 120v47H304m10-10-10 10 10 10" fill="none" stroke="#69788c" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="133" y="145" width="155" height="46" rx="7" fill="#e6f0ff" stroke="#1768cf" stroke-width="3"/>
+<path d="M150 161h120M150 175h81" fill="none" stroke="#1768cf" stroke-width="3" stroke-linecap="round"/>
+<circle cx="99" cy="170" r="16" fill="#fff" stroke="#536379" stroke-width="3"/><path d="m87 183-12 12" fill="none" stroke="#536379" stroke-width="4" stroke-linecap="round"/>
+<text x="240" y="230" text-anchor="middle">Mac · 단어 + 의미 검색</text>
+</svg></section>
+<section><h2><b>05</b> 답변</h2>
+<svg viewBox="0 0 480 245" role="img" aria-label="찾은 본문 조각과 질문을 Windows Gemma4에 전달합니다. 모델이 근거를 읽고 답변을 생성하는 방식이 RAG입니다.">
+<rect x="15" y="49" width="90" height="48" rx="7" fill="#e6f0ff" stroke="#1768cf" stroke-width="3"/>
+<path d="M31 65h57M31 79h38" fill="none" stroke="#1768cf" stroke-width="3" stroke-linecap="round"/>
+<text x="60" y="140" text-anchor="middle" style="font-size:32px">+ ?</text>
+<path d="M120 94h28m-9-9 9 9-9 9M303 94h29m-9-9 9 9-9 9" fill="none" stroke="#69788c" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="164" y="47" width="123" height="96" rx="12" fill="#f7f9fc" stroke="#536379" stroke-width="2"/>
+<text x="225" y="89" class="model" text-anchor="middle">Gemma4</text><text x="225" y="114" class="small" text-anchor="middle">Windows</text>
+<rect x="349" y="29" width="114" height="150" rx="10" fill="#fff" stroke="#263445" stroke-width="2"/>
+<path d="M366 54h78M366 73h78M366 92h57M366 111h70" fill="none" stroke="#536379" stroke-width="4" stroke-linecap="round"/>
+<rect x="366" y="132" width="78" height="28" rx="5" fill="#e6f0ff" stroke="#1768cf" stroke-width="2"/><text x="405" y="151" class="small" text-anchor="middle">출처</text>
+<text x="240" y="224" text-anchor="middle">RAG · 근거를 읽고 답하기</text>
+</svg></section>
+<section><h2><b>06</b> 그래프</h2>
+<svg viewBox="0 0 480 245" role="img" aria-label="색인 후 별도 작업자가 본문을 Gemma4로 분석합니다. 개념과 관계를 추출해 Mac에 그래프로 저장합니다. 검색이나 답변 때마다 전체 그래프를 다시 만드는 것은 아닙니다.">
+<rect x="15" y="63" width="81" height="48" rx="7" fill="#e6f0ff" stroke="#1768cf" stroke-width="3"/>
+<path d="M29 80h51M29 94h35" fill="none" stroke="#1768cf" stroke-width="3" stroke-linecap="round"/>
+<path d="M111 87h28m-9-9 9 9-9 9M278 87h28m-9-9 9 9-9 9" fill="none" stroke="#69788c" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="151" y="40" width="114" height="96" rx="12" fill="#f7f9fc" stroke="#536379" stroke-width="2"/>
+<text x="208" y="82" class="model" text-anchor="middle">Gemma4</text><text x="208" y="107" class="small" text-anchor="middle">Windows</text>
+<path d="m343 52 81 70m-81-70 5 105m0 0 76-35" fill="none" stroke="#536379" stroke-width="3"/>
+<circle cx="343" cy="52" r="29" fill="#fff" stroke="#536379" stroke-width="2"/>
+<circle cx="424" cy="122" r="30" fill="#fff" stroke="#536379" stroke-width="2"/>
+<circle cx="348" cy="157" r="29" fill="#fff" stroke="#536379" stroke-width="2"/>
+<text x="343" y="58" text-anchor="middle">사람</text><text x="424" y="128" text-anchor="middle">기술</text><text x="348" y="163" text-anchor="middle">일</text>
+<text x="240" y="225" text-anchor="middle">별도 작업 · 개념·관계 저장</text>
+</svg></section>
+</div><footer>사진·음성은 별도 처리</footer>
+</main></body></html>

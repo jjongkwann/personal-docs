@@ -63,6 +63,8 @@ CAPABILITY: dict[str, dict[str, str]] = {
 #   그래프를 눈으로 보고 싶을 때 MCP만 쓰는 사용자가 CLI로 나가야 하는 게 실제 병목이라
 #   MCP에도 노출했다. --open(브라우저 실행)만 CLI에 남는다.
 ALLOWLIST_CLI_ONLY = {
+    "graph worker",  # 영속 자동 추출 작업자
+    "graph worker-status",  # 운영 작업자와 재시도 상태
     "init",
     "reindex",
     "index-switch",
@@ -70,6 +72,10 @@ ALLOWLIST_CLI_ONLY = {
     "purge-archived",
     "eval",
     "graph stats",
+    "graph extract",  # bounded generation writes; explicit local operator scope
+    "graph models",  # installed Ollama tags/capabilities
+    "graph extraction-runs",  # admin-only execution provenance
+
     "graph reset-evidence",
     "graph finalize-evidence",
     "graph rebuild-evidence-local",
@@ -91,6 +97,9 @@ ALLOWLIST_CLI_ONLY = {
 # "read_file"/"patch_file"은 원격 MCP에서 디스크 원문을 읽고 부분 편집하는 경로 — 로컬 CLI는
 #   cat/sed로 충분하므로 CLI 대응 없음.
 ALLOWLIST_MCP_ONLY = {
+    "embedding_status",
+    "embedding_models",
+    "configure_embedding",
     "read_file",
     "list_files",  # 로컬 CLI는 ls로 조회
     "get_file",  # 로컬 CLI는 원본 파일을 직접 복사
@@ -101,10 +110,13 @@ ALLOWLIST_MCP_ONLY = {
     "graph_curate",
     "graph_merge",
     "graph_classify",  # 미분류 개념 kind 지정 — graph_curate와 같은 Claude 루프 전용
+    "graph_overview",  # 앱 초기 화면용 저장된 관계의 제한된 개요
+    "graph_extraction_status",  # 앱 문서별 자동 처리 진행 조회
     "sync_obsidian",
     "list_categories",  # 원격 앱의 카테고리 목록 — 로컬 CLI는 list로 충분
     "related_documents",  # 원격 앱·에이전트의 관련 문서 조회
     "put_attachment",  # 볼트 밖 첨부 원격 업로드 — 로컬에선 파일을 직접 복사
+    "import_attachment",  # 원격 앱이 올린 원본을 안전하게 변환·색인
     "get_attachment",
     "list_media",  # media-sync 클라이언트 전용 — 로컬 CLI는 서버 도구를 거친다
     "get_media",

@@ -1,13 +1,19 @@
+from __future__ import annotations
+
 import contextlib
 from collections.abc import Iterator
-
-from sentence_transformers import SentenceTransformer
+from typing import TYPE_CHECKING
 
 from pkb.config import resolve_device, settings
 from pkb.idle_model import IdleModel
 
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
+
 
 def _load() -> SentenceTransformer:
+    from sentence_transformers import SentenceTransformer
+
     device = resolve_device(settings.embedding_device)
     kwargs: dict = {"device": device}
     if settings.embedding_revision:
@@ -126,9 +132,22 @@ def embed_documents(texts: list[str], *, pad_to_multiple_of: int = 0) -> list[li
     pad_to_multiple_of>0이면 MPS에서 토큰 길이를 그 배수로 맞춘다 — 전량 재임베딩처럼 길이가 다른
     입력을 오래 넣을 때 메모리가 늘지 않게 (_padded_to_multiple).
     """
+    if settings.embedding_provider == "ollama":
+        return _ollama_embed(texts, query=False)
     return _embed(texts, _encode_options(settings.embedding_document_prompt), pad_to_multiple_of)
 
 
 def embed_queries(texts: list[str]) -> list[list[float]]:
     """검색 질의 목록을 벡터로 변환. 질의 변형을 한 번에 배치 인코딩한다."""
+    if settings.embedding_provider == "ollama":
+        return _ollama_embed(texts, query=True)
     return _embed(texts, _encode_options(settings.embedding_query_prompt))
+
+
+def _ollama_embed(texts: list[str], *, query: bool) -> list[list[float]]:
+    from pkb.ollama_embeddings import embed
+
+    prefix = settings.embedding_ollama_query_prefix if query else settings.embedding_ollama_document_prefix
+    return embed(settings.embedding_ollama_endpoint, settings.embedding_ollama_model, texts,
+                 settings.embedding_dims, prefix=prefix, expected_digest=settings.embedding_ollama_digest,
+                 batch_size=settings.embedding_batch_size)

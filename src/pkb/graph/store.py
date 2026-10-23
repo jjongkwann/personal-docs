@@ -180,6 +180,8 @@ def reembed_concepts(
     if state is None and _meta(conn, EMBEDDING_MODEL_KEY) == identity:
         return {"updated": 0, "total": total, "complete": True}
     last_id = state["last_id"] if state and state["identity"] == identity else 0
+    done = (conn.execute("SELECT count(*) FROM concepts WHERE id <= ?", (last_id,)).fetchone()[0]
+            if progress and last_id else 0)
     updated = batches = 0
     while True:
         rows = conn.execute(
@@ -199,9 +201,9 @@ def reembed_concepts(
         _set_meta(conn, EMBEDDING_REEMBED_KEY, json.dumps({"identity": identity, "last_id": last_id}))
         conn.commit()
         updated += len(rows)
+        done += len(rows)
         batches += 1
         if progress:
-            done = conn.execute("SELECT count(*) FROM concepts WHERE id <= ?", (last_id,)).fetchone()[0]
             progress(done, total)
     conn.execute("DELETE FROM graph_meta WHERE key = ?", (EMBEDDING_REEMBED_KEY,))
     _set_meta(conn, EMBEDDING_MODEL_KEY, identity)
@@ -346,20 +348,37 @@ def top_concepts_by_embedding(
     vec: list[float],
     k: int = 5,
     threshold: float = 0.4,
+    *,
+    concept_ids: set[int] | None = None,
 ) -> list[tuple[sqlite3.Row, float]]:
     """임베딩 유사도가 threshold 이상인 상위 k개 개념을 (row, score)로 반환.
 
     검색 쿼리를 코퍼스 개념 어휘로 바꿔 재질의하는 시드용.
     """
     check_embedding_model(conn)
-    # ponytail: 파이썬 코사인 풀스캔 — 개인 규모 N이면 충분
-    scored: list[tuple[sqlite3.Row, float]] = []
-    for row in conn.execute("SELECT * FROM concepts WHERE embedding IS NOT NULL"):
-        score = _cosine(vec, _unpack_embedding(row["embedding"]))
-        if score >= threshold:
-            scored.append((row, score))
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return scored[:k]
+    import numpy as np
+
+    query = np.asarray(vec, dtype=np.float64)
+    query_norm = float(np.linalg.norm(query))
+    if not query_norm:
+        return []
+    scored: list[tuple[int, float]] = []
+    # Stream vectors in storage order and compute bounded batches in NumPy. Loading
+    # whole concept records and Python cosine loops stalls large read-only queries.
+    cursor = conn.execute("SELECT id, embedding FROM concepts WHERE embedding IS NOT NULL")
+    while batch := cursor.fetchmany(256):
+        batch = [row for row in batch if len(row["embedding"]) == len(vec) * 4
+                 and (concept_ids is None or row["id"] in concept_ids)]
+        if not batch:
+            continue
+        matrix = np.asarray([np.frombuffer(row["embedding"], dtype=np.float32) for row in batch], dtype=np.float64)
+        norms = np.linalg.norm(matrix, axis=1) * query_norm
+        dots = np.einsum("ij,j->i", matrix, query)
+        scores = np.divide(dots, norms, out=np.zeros_like(dots), where=norms != 0)
+        scored.extend((row["id"], float(score)) for row, score in zip(batch, scores, strict=True) if score >= threshold)
+    scored.sort(key=lambda item: item[1], reverse=True)
+    return [(conn.execute("SELECT * FROM concepts WHERE id = ?", (concept_id,)).fetchone(), score)
+            for concept_id, score in scored[:k]]
 
 
 def _match_existing(
@@ -1318,24 +1337,25 @@ def mentions_for_chunks(
     """(doc_id, chunk_index) 쌍들에 언급된 개념을 단일 SELECT로 조회.
 
     반환: {(doc_id, chunk_index): [{"name": ..., "slug": ...}, ...]}
-    curated_connected_slugs가 None이면 전 개념 포함(큐레이션 테이블이 비어 있음),
-    set이면 real로 큐레이션되고 관계가 있는 개념만 포함.
+    큐레이션 테이블이 비어 있으면 전 개념을 포함하고, 그렇지 않으면
+    요청된 청크의 개념 중 real로 큐레이션되고 관계가 있는 개념만 포함한다.
     """
     if not pairs:
         return {}
-    allowed = curated_connected_slugs(conn)
     where = " OR ".join(["(m.doc_id = ? AND m.chunk_index = ?)"] * len(pairs))
     params = [v for pair in pairs for v in pair]
     rows = conn.execute(
         "SELECT m.doc_id, m.chunk_index, c.name, c.slug "
         "FROM concept_mentions m JOIN concepts c ON c.id = m.concept_id "
-        f"WHERE {where}",
+        f"WHERE ({where}) AND ("
+        "NOT EXISTS (SELECT 1 FROM concept_curation) OR ("
+        "EXISTS (SELECT 1 FROM concept_curation cc WHERE cc.slug = c.slug AND cc.label = 'real') "
+        "AND (EXISTS (SELECT 1 FROM concept_edges e WHERE e.src_id = c.id) "
+        "OR EXISTS (SELECT 1 FROM concept_edges e WHERE e.dst_id = c.id))))",
         params,
     ).fetchall()
     result: dict[tuple[str, int], list[dict]] = {}
     for r in rows:
-        if allowed is not None and r["slug"] not in allowed:
-            continue
         result.setdefault((r["doc_id"], r["chunk_index"]), []).append(
             {"name": r["name"], "slug": r["slug"]}
         )
@@ -1538,26 +1558,6 @@ def set_curation(
     )
 
 
-def curated_connected_slugs(conn: sqlite3.Connection) -> set[str] | None:
-    """label='real'이고 관계(엣지)를 1개 이상 보유(src 또는 dst)한 slug 집합.
-
-    검색 결과에 붙이는 관련 개념의 품질 판별력은 mention수보다 관계 유무가 높다는
-    검토(2026-07-10) 결과에 따라 고아(관계 0) 개념은 제외한다.
-
-    큐레이션 테이블이 비어있으면 None (전 개념 포함).
-    """
-    if conn.execute("SELECT 1 FROM concept_curation LIMIT 1").fetchone() is None:
-        return None
-    rows = conn.execute(
-        "SELECT cc.slug FROM concept_curation cc "
-        "JOIN concepts c ON c.slug = cc.slug "
-        "WHERE cc.label = 'real' AND EXISTS ("
-        "  SELECT 1 FROM concept_edges e WHERE e.src_id = c.id OR e.dst_id = c.id"
-        ")"
-    ).fetchall()
-    return {r["slug"] for r in rows}
-
-
 def get_prose(conn: sqlite3.Connection, slug: str) -> str | None:
     row = conn.execute(
         "SELECT prose FROM concept_curation WHERE slug = ?", (slug,)
@@ -1568,6 +1568,82 @@ def get_prose(conn: sqlite3.Connection, slug: str) -> str | None:
 # ---------- Merge ----------
 
 def merge_concepts(
+    conn: sqlite3.Connection, winner_slug: str, loser_slugs: list[str]
+) -> dict:
+    """전체 병합 결과를 먼저 검사하고, 실패하면 이번 병합의 변경만 되돌린다."""
+    if not conn.in_transaction:
+        conn.execute("BEGIN")
+    conn.execute("SAVEPOINT merge_concepts")
+    try:
+        _check_merge(conn, winner_slug, loser_slugs)
+        result = _merge_concepts(conn, winner_slug, loser_slugs)
+    except BaseException:
+        conn.execute("ROLLBACK TO SAVEPOINT merge_concepts")
+        conn.execute("RELEASE SAVEPOINT merge_concepts")
+        raise
+    conn.execute("RELEASE SAVEPOINT merge_concepts")
+    return result
+
+
+def _check_merge(conn: sqlite3.Connection, winner_slug: str, loser_slugs: list[str]) -> None:
+    """endpoint를 모두 바꾼 가상 그래프에서 새 시그니처 위반과 순환을 검사한다.
+
+    기존의 무관한 레거시 위반은 병합을 막지 않는다. rebuild 중에는 서비스 관계와
+    staging evidence를 각각 검사한다. 둘을 합쳐 존재하지 않는 경로를 만들지 않는다.
+    """
+    from pkb.graph.validate import path_to, reachable
+
+    winner = find_concept_by_slug(conn, winner_slug)
+    if winner is None:
+        raise ValueError(f"승자 개념을 찾을 수 없습니다: {winner_slug}")
+    winner_id = winner["id"]
+    losers = [find_concept_by_slug(conn, slug) for slug in loser_slugs]
+    losers = [row for row in losers if row is not None and row["id"] != winner_id]
+    if not losers:
+        return
+    kinds = {row["concept_type"] for row in [winner, *losers] if row["concept_type"] is not None}
+    if len(kinds) > 1:
+        raise ValueError(f"서로 다른 kind의 개념은 병합할 수 없습니다: {', '.join(sorted(kinds))}")
+    winner_kind = next(iter(kinds), None)
+    loser_ids = {row["id"] for row in losers}
+    affected_ids = loser_ids | ({winner_id} if winner_kind != winner["concept_type"] else set())
+    concept_kinds = dict(conn.execute("SELECT id, concept_type FROM concepts"))
+    concept_kinds[winner_id] = winner_kind
+
+    for table in ("concept_edges", "concept_edge_evidence"):
+        by_relation: dict[str, dict[int, set[int]]] = {}
+        changed: set[tuple[int, int, str]] = set()
+        for src, dst, relation in conn.execute(f"SELECT DISTINCT src_id, dst_id, relation FROM {table}"):
+            new_src = winner_id if src in loser_ids else src
+            new_dst = winner_id if dst in loser_ids else dst
+            if new_src == new_dst:
+                continue  # 동일 개념 내부 관계는 기존 병합과 같이 제거된다.
+            by_relation.setdefault(relation, {}).setdefault(new_src, set()).add(new_dst)
+            if src in affected_ids or dst in affected_ids:
+                changed.add((new_src, new_dst, relation))
+        for src, dst, relation in sorted(changed):
+            spec = ontology.get_relation(relation)
+            src_kind, dst_kind = concept_kinds[src], concept_kinds[dst]
+            if spec is None:
+                raise RelationRejectedError("unknown_relation", f"TBox에 없는 관계 '{relation}'", relation=relation)
+            reason = ontology.check_signature(relation, src_kind, dst_kind)
+            if reason:
+                raise RelationRejectedError(
+                    "signature", reason, relation=relation, src_kind=src_kind, dst_kind=dst_kind,
+                )
+            if spec.acyclic:
+                parent = reachable(by_relation[relation], dst)
+                if src in parent:
+                    cycle = _slugs(conn, [src, *path_to(parent, src)])
+                    raise RelationRejectedError(
+                        "cycle", f"병합하면 {relation} 순환이 생깁니다: {' → '.join(cycle)}",
+                        relation=relation, src_kind=src_kind, dst_kind=dst_kind, cycle=cycle,
+                    )
+    if winner_kind != winner["concept_type"]:
+        conn.execute("UPDATE concepts SET concept_type = ? WHERE id = ?", (winner_kind, winner_id))
+
+
+def _merge_concepts(
     conn: sqlite3.Connection, winner_slug: str, loser_slugs: list[str]
 ) -> dict:
     """표기 변형으로 쪼개진 동일 개념들을 winner 하나로 병합.
@@ -1692,8 +1768,9 @@ def merge_concepts(
             )
             affected_edges.add((new_src, new_dst, evidence["relation"]))
             result["evidence_repointed"] += 1
-        for src_id, dst_id, relation in affected_edges:
-            _recompute_edge(conn, src_id, dst_id, relation)
+        if not edge_evidence_rebuild_active(conn):
+            for src_id, dst_id, relation in affected_edges:
+                _recompute_edge(conn, src_id, dst_id, relation)
 
         # ---- mentions re-point ----
         mention_rows = conn.execute(

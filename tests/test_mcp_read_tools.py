@@ -159,3 +159,21 @@ def test_list_documents_exposes_paths_and_document_contract(monkeypatch):
     assert "정본=agent-react" in result
     assert "상태=canonical" in result
     assert "data/agent/guides/agent-design.md" not in result
+
+
+def test_version_list_metadata_is_emitted_before_title(monkeypatch):
+    import pkb.store
+
+    received = {}
+
+    def documents(es, category, **kwargs):
+        received.update(kwargs)
+        return [{"doc_id": "data/study/research/import-a.md", "category": "study", "chunks": 1,
+                 "import_document_id": "12345678-1234-4234-8234-123456789abc", "import_version": 3,
+                 "version_count": 3, "title": "Title, with punctuation"}]
+
+    monkeypatch.setattr(pkb.store, "get_client", lambda: object())
+    monkeypatch.setattr(pkb.store, "list_documents", documents)
+    result = list_documents(include_versions=True)
+    assert received["include_versions"] is True
+    assert "문서ID=12345678-1234-4234-8234-123456789abc, 버전=3, 버전수=3, 제목=Title, with punctuation]" in result

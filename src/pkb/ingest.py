@@ -101,6 +101,9 @@ def embed_input(chunk: dict) -> str:
 
 def _embedding_identity_parts() -> list[str]:
     parts = [settings.embedding_model]
+    if settings.embedding_provider == "ollama":
+        parts.append(f"ollama={settings.embedding_ollama_digest} dims={settings.embedding_dims} retrieval-v1")
+        parts.append(f"prefix={settings.embedding_ollama_document_prefix!r}")
     if settings.embedding_revision:
         parts.append(settings.embedding_revision)
     # 문서 쪽 encode 인자도 벡터를 바꾼다. 기본값(빈 값)이면 키에 넣지 않아 기존 fingerprint가 유지된다.
@@ -148,6 +151,9 @@ _META_DIFF_FIELDS = (
     "canonical_id",
     "status",
     "authority",
+    "import_extraction",
+    "import_document_id",
+    "import_version",
     "aliases",
     "source_ids",
     "supports",
@@ -167,6 +173,9 @@ DOCUMENT_METADATA_FIELDS = (
     "canonical_id",
     "status",
     "authority",
+    "import_extraction",
+    "import_document_id",
+    "import_version",
     "aliases",
     "source_ids",
     "supports",
@@ -176,7 +185,7 @@ _DOCUMENT_METADATA_LIST_FIELDS = frozenset(
     {"aliases", "source_ids", "supports", "concept_ids"}
 )
 _DOCUMENT_METADATA_SCALAR_FIELDS = frozenset(
-    {"schema_version", "doc_type", "canonical_id", "status", "authority"}
+    {"schema_version", "doc_type", "canonical_id", "status", "authority", "import_extraction"}
 )
 
 
@@ -228,6 +237,10 @@ def _normalize_document_metadata(frontmatter: dict) -> dict:
     the existing ``tags`` frontmatter behavior.  Explicit ``null`` is kept as
     ``None`` so callers can intentionally clear a field via metadata delta.
     """
+    from pkb.import_versions import validate_identity
+
+    if "import_document_id" in frontmatter or "import_version" in frontmatter:
+        validate_identity(frontmatter.get("import_document_id"), frontmatter.get("import_version"))
     metadata: dict = {}
     for field in DOCUMENT_METADATA_FIELDS:
         if field not in frontmatter:

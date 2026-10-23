@@ -18,6 +18,11 @@ from pkb.graph.rebuild import (
 from pkb.graph.schema import graph_connection, init_schema
 
 
+@pytest.fixture(autouse=True)
+def installed_generation_model(monkeypatch):
+    monkeypatch.setattr("pkb.graph.rebuild.generation_model", lambda *a, **k: {"digest": "sha256:test"})
+
+
 def _chunk():
     return {
         "doc_id": "data/rag/x.md",
@@ -202,7 +207,7 @@ def test_ollama_extract_merges_split_items_for_same_chunk(monkeypatch):
     split = {
         "items": [
             {
-                "doc_id": "data/rag/x.md",
+                "doc_id": "doc_1",
                 "chunk_index": 0,
                 "concepts": [
                     {"name": f"C{i}", "kind": "technique", "aliases": [], "description": "d"} for i in range(8)
@@ -210,7 +215,7 @@ def test_ollama_extract_merges_split_items_for_same_chunk(monkeypatch):
                 "relations": [],
             },
             {
-                "doc_id": "data/rag/x.md",
+                "doc_id": "doc_1",
                 "chunk_index": 0,
                 "concepts": [{"name": "C8", "kind": "technique", "aliases": [], "description": "d"}],
                 "relations": [
@@ -231,7 +236,7 @@ def test_ollama_extract_merges_split_items_for_same_chunk(monkeypatch):
             return json.dumps({"message": {"content": json.dumps(split)}}).encode()
 
     monkeypatch.setattr(
-        "pkb.graph.rebuild.urllib.request.urlopen", lambda *a, **k: _Resp()
+        "pkb.graph.rebuild.request_json", lambda *a, **k: json.loads(_Resp().read())
     )
     batch, _ = rebuild._ollama_extract(
         [_chunk()], {}, model="gpt-oss:20b", endpoint="http://x", timeout=1
@@ -241,115 +246,95 @@ def test_ollama_extract_merges_split_items_for_same_chunk(monkeypatch):
     assert len(batch.items[0].relations) == 1
 
 
-def test_ollama_extract_drops_hallucinated_extra_chunk_key(monkeypatch):
-    """요청한 키가 모두 있으면 지어낸 여분 키는 버리고 통과한다."""
+@pytest.mark.parametrize("returned", [
+    [{"doc_id": "doc_1", "chunk_index": 0}, {"doc_id": "doc_1", "chunk_index": 1}],
+    [{"doc_id": "doc_1", "chunk_index": 9}],
+    [],
+])
+def test_ollama_extract_rejects_unexpected_or_omitted_chunk_indices(monkeypatch, returned):
     from pkb.graph import rebuild
 
-    extra = {
-        "items": [
-            {
-                "doc_id": "data/rag/x.md",
-                "chunk_index": 0,
-                "concepts": [{"name": "C0", "kind": "technique", "aliases": [], "description": "d"}],
-                "relations": [],
-            },
-            {
-                "doc_id": "data/rag/x.md",
-                "chunk_index": 1,
-                "concepts": [{"name": "C1", "kind": "technique", "aliases": [], "description": "d"}],
-                "relations": [],
-            },
-        ]
-    }
-
-    class _Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-        def read(self):
-            return json.dumps({"message": {"content": json.dumps(extra)}}).encode()
-
-    monkeypatch.setattr(
-        "pkb.graph.rebuild.urllib.request.urlopen", lambda *a, **k: _Resp()
-    )
-    batch, _ = rebuild._ollama_extract(
-        [_chunk()], {}, model="gpt-oss:20b", endpoint="http://x", timeout=1
-    )
-    assert [(item.doc_id, item.chunk_index) for item in batch.items] == [
-        ("data/rag/x.md", 0)
-    ]
-
-
-def test_ollama_extract_still_rejects_foreign_chunk_key(monkeypatch):
-    """병합 로직이 있어도 요청하지 않은 청크 키는 계속 거부한다."""
-    from pkb.graph import rebuild
-
-    foreign = {
-        "items": [
-            {
-                "doc_id": "data/rag/OTHER.md",
-                "chunk_index": 9,
-                "concepts": [],
-                "relations": [],
-            }
-        ]
-    }
-
-    class _Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-        def read(self):
-            return json.dumps({"message": {"content": json.dumps(foreign)}}).encode()
-
-    monkeypatch.setattr(
-        "pkb.graph.rebuild.urllib.request.urlopen", lambda *a, **k: _Resp()
-    )
+    monkeypatch.setattr(rebuild, "request_json", lambda *a, **k: {
+        "message": {"content": json.dumps({"items": returned})},
+    })
     with pytest.raises(ValueError, match="항목 키 불일치"):
-        rebuild._ollama_extract(
-            [_chunk()], {}, model="gpt-oss:20b", endpoint="http://x", timeout=1
-        )
+        rebuild._ollama_extract([_chunk()], {}, model="chat:1", endpoint="http://x", timeout=1)
 
 
-def test_ollama_extract_repairs_mangled_doc_id(monkeypatch):
-    """모델이 긴 doc_id의 밑줄을 흘려도 원래 키로 되돌려 통과한다."""
+@pytest.mark.parametrize("reference", ["doc_2", "doc1", "DOC_1", "data/rag/x.md"])
+def test_ollama_extract_rejects_unknown_document_refs_without_repair(monkeypatch, reference):
     from pkb.graph import rebuild
 
-    chunk = {**_chunk(), "doc_id": "data/rag/1.1.01_NLP_과제_스펙트럼과_지식_의존도.md"}
-    mangled = {
-        "items": [
-            {
-                # 밑줄 하나 누락 — 실제 gpt-oss:20b 응답에서 관측된 형태
-                "doc_id": "data/rag/1.1.01_NLP_과제_스펙트럼과_지식의존도.md",
-                "chunk_index": 0,
-                "concepts": [{"name": "RAG", "kind": "technique", "aliases": [], "description": "d"}],
-                "relations": [],
-            }
-        ]
+    monkeypatch.setattr(rebuild, "request_json", lambda *a, **k: {
+        "message": {"content": json.dumps({"items": [{"doc_id": reference, "chunk_index": 0}]})},
+    })
+    with pytest.raises(ValueError, match="알 수 없는 문서 참조"):
+        rebuild._ollama_extract([_chunk()], {}, model="chat:1", endpoint="http://x", timeout=1)
+
+
+def test_ollama_extract_roundtrips_long_unicode_hash_ids_and_only_sends_versioned_fields(monkeypatch):
+    from pkb.graph import rebuild
+
+    # Keep even decomposed Unicode and separators byte-for-byte outside the LLM.
+    source_id = "data/한글_원본/" + "매우_긴_파일명-" * 20 + "import-" + "a" * 64 + ".md"
+    chunk = {**_chunk(), "doc_id": source_id, "input_hash": "private-input-hash", "unversioned": "omit"}
+    captured = []
+
+    def request(*args, payload, **kwargs):
+        sent = json.loads(payload["messages"][1]["content"].split("\n", 1)[1])
+        captured.extend(sent)
+        properties = payload["format"]["$defs"]["ExtractedItem"]["properties"]
+        assert properties["doc_id"]["enum"] == ["doc_1"]
+        assert properties["chunk_index"]["enum"] == [0]
+        assert payload["format"]["properties"]["items"]["minItems"] == 1
+        return {"message": {"content": json.dumps({"items": [
+            {"doc_id": sent[0]["doc_id"], "chunk_index": sent[0]["chunk_index"]},
+        ]})}}
+
+    monkeypatch.setattr(rebuild, "request_json", request)
+    batch, _ = rebuild._ollama_extract([chunk], {(source_id, 0): ["RAG"]},
+                                      model="chat:1", endpoint="http://x", timeout=1)
+    assert batch.items[0].doc_id == source_id
+    assert captured[0]["doc_id"] == "doc_1"
+    assert captured[0]["legacy_concept_hints"] == ["RAG"]
+    assert set(captured[0]) == {
+        "doc_id", "chunk_index", "content", "title", "section_path", "category", "legacy_concept_hints",
+    }
+    assert source_id not in json.dumps(captured, ensure_ascii=False)
+
+
+def test_ollama_extract_maps_multiple_docs_and_same_doc_chunks_without_collisions(monkeypatch):
+    from pkb.graph import rebuild
+
+    chunks = [_chunk(), {**_chunk(), "doc_id": "data/다른_문서.md"}, {**_chunk(), "chunk_index": 1}]
+
+    def request(*args, payload, **kwargs):
+        sent = json.loads(payload["messages"][1]["content"].split("\n", 1)[1])
+        assert [(c["doc_id"], c["chunk_index"]) for c in sent] == [("doc_1", 0), ("doc_2", 0), ("doc_1", 1)]
+        properties = payload["format"]["$defs"]["ExtractedItem"]["properties"]
+        assert properties["doc_id"]["enum"] == ["doc_1", "doc_2"]
+        assert properties["chunk_index"]["enum"] == [0, 1]
+        assert payload["format"]["properties"]["items"]["minItems"] == 3
+        return {"message": {"content": json.dumps({"items": [
+            {"doc_id": c["doc_id"], "chunk_index": c["chunk_index"]} for c in reversed(sent)
+        ]})}}
+
+    monkeypatch.setattr(rebuild, "request_json", request)
+    batch, _ = rebuild._ollama_extract(chunks, {}, model="chat:1", endpoint="http://x", timeout=1)
+    assert {(c.doc_id, c.chunk_index) for c in batch.items} == {
+        ("data/rag/x.md", 0), ("data/rag/x.md", 1), ("data/다른_문서.md", 0),
     }
 
-    class _Resp:
-        def __enter__(self):
-            return self
 
-        def __exit__(self, *exc):
-            return False
+def test_ollama_extract_duplicate_items_cannot_hide_an_omitted_chunk(monkeypatch):
+    from pkb.graph import rebuild
 
-        def read(self):
-            return json.dumps({"message": {"content": json.dumps(mangled)}}).encode()
-
-    monkeypatch.setattr("pkb.graph.rebuild.urllib.request.urlopen", lambda *a, **k: _Resp())
-    batch, _ = rebuild._ollama_extract(
-        [chunk], {}, model="gpt-oss:20b", endpoint="http://x", timeout=1
-    )
-    assert len(batch.items) == 1
-    assert batch.items[0].doc_id == chunk["doc_id"]
+    monkeypatch.setattr(rebuild, "request_json", lambda *a, **k: {
+        "message": {"content": json.dumps({"items": [{"doc_id": "doc_1", "chunk_index": 0}] * 2})},
+    })
+    with pytest.raises(ValueError, match="항목 키 불일치"):
+        rebuild._ollama_extract([_chunk(), {**_chunk(), "chunk_index": 1}], {},
+                                model="chat:1", endpoint="http://x", timeout=1)
 
 
 def test_rebuild_defers_poison_chunk_and_continues(monkeypatch, tmp_path):

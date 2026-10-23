@@ -48,12 +48,12 @@ def test_mentions_for_chunks_empty_curation_includes_all(conn):
     gstore.add_mention(conn, a, "data/study/x.md", 0)
     gstore.add_mention(conn, b, "data/study/x.md", 0)
 
-    # 큐레이션 테이블 비어있음 → curated_connected_slugs=None → 전량 포함
+    # 큐레이션 테이블 비어있음 → 전량 포함
     result = gstore.mentions_for_chunks(conn, [("data/study/x.md", 0)])
     assert {c["slug"] for c in result[("data/study/x.md", 0)]} == {"bm25", "rrf"}
 
 
-def test_mentions_for_chunks_filters_by_curated_connected_slugs(conn):
+def test_mentions_for_chunks_filters_curated_hits_in_one_query(conn):
     a = gstore.upsert_concept(conn, name="BM25")
     b = gstore.upsert_concept(conn, name="RRF")
     orphan = gstore.upsert_concept(conn, name="고아개념")
@@ -64,9 +64,48 @@ def test_mentions_for_chunks_filters_by_curated_connected_slugs(conn):
     gstore.set_curation(conn, "bm25", "real")
     gstore.set_curation(conn, "rrf", "real")
     gstore.set_curation(conn, "고아개념", "vocab")
-
-    result = gstore.mentions_for_chunks(conn, [("data/study/x.md", 0)])
+    real_orphan = gstore.upsert_concept(conn, name="Real orphan")
+    gstore.add_mention(conn, real_orphan, "data/study/x.md", 0)
+    gstore.set_curation(conn, "real orphan", "real")
+    statements = []
+    conn.set_trace_callback(statements.append)
+    try:
+        result = gstore.mentions_for_chunks(conn, [("data/study/x.md", 0)])
+    finally:
+        conn.set_trace_callback(None)
     assert {c["slug"] for c in result[("data/study/x.md", 0)]} == {"bm25", "rrf"}
+    assert len(statements) == 1  # No separate whole-corpus curation lookup.
+    assert "FROM concept_mentions" in statements[0]
+
+
+@pytest.mark.parametrize("hidden_curation_only", [False, True])
+def test_mentions_for_chunks_respects_restricted_graph_views(graph_db, monkeypatch, hidden_curation_only):
+    from pkb import access
+    from pkb.graph.visibility import graph_read_connection
+
+    public, private = "data/public/a.md", "data/private/b.md"
+    c = get_connection(graph_db)
+    ids = {name: gstore.upsert_concept(c, name=name) for name in ("A", "B", "Shared", "Private edge", "Hidden")}
+    for name, cid in ids.items():
+        gstore.add_mention(c, cid, private if name == "Hidden" else public, 0)
+    gstore.add_mention(c, ids["Shared"], private, 0)
+    gstore.add_edge(c, ids["A"], ids["B"], "related_to", doc_id=public, chunk_index=0)
+    gstore.add_edge(c, ids["Shared"], ids["B"], "related_to", doc_id=public, chunk_index=0)
+    gstore.add_edge(c, ids["Private edge"], ids["B"], "related_to", doc_id=private, chunk_index=0)
+    for name in (["Hidden"] if hidden_curation_only else ids):
+        gstore.set_curation(c, gstore.make_slug(name), "real")
+    c.commit()
+    c.close()
+    policy = access.parse_policy({
+        "version": 1, "principals": {"reader": {}},
+        "rules": [{"path": "data/public", "read": ["*"]}],
+    })
+    monkeypatch.setattr(access, "load_policy", lambda: policy)
+    with access.acting_as(policy.principal("reader")), graph_read_connection(graph_db) as c:
+        result = gstore.mentions_for_chunks(c, [(public, 0), (private, 0)])
+    expected = {"a", "b", "shared", "private edge"} if hidden_curation_only else {"a", "b", "shared"}
+    assert {row["slug"] for row in result[(public, 0)]} == expected
+    assert (private, 0) not in result
 
 
 # ---------- top_concepts_by_embedding ----------
@@ -151,3 +190,41 @@ def test_search_knowledge_vocab_attached_even_without_results(graph_db, monkeypa
     result = search_knowledge("bm25란?")
     assert result.startswith("코퍼스 개념 어휘: BM25(Best Match 25)")
     assert "검색 결과가 없습니다" in result
+
+
+def test_search_without_vocab_preserves_ranked_documents_and_mentions(graph_db, monkeypatch):
+    _seed_bm25(graph_db)
+    embed_calls = _stub_search(monkeypatch)
+    hits = [
+        {
+            "_id": f"{doc_id}_0", "doc_id": doc_id, "chunk_index": 0,
+            "source_path": doc_id.removeprefix("data/"), "category": "study",
+            "title": title, "section_path": "", "content": f"{title} 본문", "score": score,
+        }
+        for doc_id, title, score in [
+            ("data/study/y.md", "Second", 0.4),
+            ("data/study/x.md", "First", 0.9),
+        ]
+    ]
+    monkeypatch.setattr("pkb.retrieve._rrf_search", lambda *a, **k: [dict(hit) for hit in hits])
+    default = search_knowledge("bm25란?")
+    assert default.startswith("코퍼스 개념 어휘: BM25(Best Match 25)")
+
+    def unexpected_vocab_read(*args, **kwargs):
+        pytest.fail("vocabulary-disabled search scanned concept vectors or loaded aliases")
+
+    monkeypatch.setattr(gstore, "top_concepts_by_embedding", unexpected_vocab_read)
+    monkeypatch.setattr(gstore, "list_aliases", unexpected_vocab_read)
+    without_vocab = search_knowledge("bm25란?", include_concept_vocabulary=False)
+    assert without_vocab == default.split("\n", 1)[1].lstrip("\n")
+    assert without_vocab.index("First") < without_vocab.index("Second")
+    assert "관련 개념: BM25" in without_vocab
+    assert embed_calls == [["bm25란?"], ["bm25란?"]]
+
+
+def test_search_without_vocab_and_results_skips_vector_scan(graph_db, monkeypatch):
+    _seed_bm25(graph_db)
+    _stub_search(monkeypatch)
+    monkeypatch.setattr("pkb.retrieve._rrf_search", lambda *a, **k: [])
+    monkeypatch.setattr(gstore, "top_concepts_by_embedding", lambda *a, **k: pytest.fail("vector scan"))
+    assert "검색 결과가 없습니다" in search_knowledge("bm25란?", include_concept_vocabulary=False)

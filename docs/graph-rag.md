@@ -4,14 +4,14 @@
 
 **Purpose**: answer questions at the level of *"how are the concepts across my whole corpus connected?"*. It **complements** the existing RRF + reranker search where that search is weak — it does not replace it.
 
-**Core design**: extraction is explicit. Claude Code can read chunks with `graph_list_chunks`, extract concepts/relations, and store them via `graph_store_concepts`; `pkb graph rebuild-evidence-local` can run the same pending loop with a local Ollama model. Native `graph_explain`, `graph_path`, `graph_query`, and `graph_affected` queries read SQLite directly; `graph_map` renders an offline HTML view.
+**Core design**: extraction uses a bounded, auditable Ollama runner. Automatic processing is opt-in through `GRAPH_AUTO_EXTRACT=true` and a separate `pkb graph worker` process. The normal `pkb graph extract` command sends a bounded selection of pending chunks to the configured Ollama generation model, validates the result and stores it without resetting the graph. MCP clients can also read `graph_list_chunks`, extract concepts/relations, and submit `graph_store_concepts`. Full evidence replacement remains a separate reset/rebuild/finalize operation. Native `graph_explain`, `graph_path`, `graph_query`, and `graph_affected` queries read SQLite directly; `graph_map` renders an offline HTML view.
 
 | | Existing (ES + RRF + reranker) | Graph RAG |
 |---|---|---|
 | Good at | **Specific queries** like "what is DI?", "what's the BM25 formula?" | **Relational/global queries** like "how are DI, IoC, Bean, and Container tangled together?" |
 | Data unit | Chunk (500 tokens) | Concept (entity) + relation |
 | Response material | Body chunks | SQLite concepts, relations, curated prose, and source evidence |
-| Build trigger | Immediately on ingest | Explicit MCP extraction or local Ollama rebuild |
+| Build trigger | Immediately on ingest | Bounded Ollama extraction, explicit MCP extraction, or intentional full rebuild |
 
 **Not doing**: automatic full-graph builds (opt-in only), a full graph DB like Neo4j, GNN embeddings, automatic updates driven by conversation history.
 
@@ -34,6 +34,9 @@ Main tables:
 | `concept_curation` | Concept curation (real/vocab) + distilled prose |
 | `extracted_chunks` | Extraction-complete markers `(doc_id, chunk_index)` → `content_hash`, `input_hash` |
 | `graph_meta` | Key/value markers — one-shot schema migrations, `tbox_version`, and the `edge_evidence_rebuild` staging flag |
+| `graph_extraction_runs` | Endpoint, model digest, options, prompt/schema versions and hashes, run status/error |
+| `graph_extraction_items` | Selected source hashes and each item's pending/running/stored/failed/stale status and attempts |
+| `graph_extraction_events` | Append-only item status, failure and result events, retained across resume |
 
 Incremental extraction is driven by `extracted_chunks`. A chunk is pending when either marker hash
 differs from the current ES source. `content_hash` tracks the body; `input_hash` also covers
@@ -47,6 +50,26 @@ so re-running the same chunk doesn't inflate them. When a document is deleted, a
 content changes, the corresponding evidence is cleaned up too.
 
 Schema definitions live in `src/pkb/graph/schema.py`, CRUD in `src/pkb/graph/store.py`.
+
+
+### Concurrent readers and extraction writes
+
+Write initialization checks `PRAGMA journal_mode` before schema/data migration and enables WAL
+once for a local file database. Existing graph records are preserved. An already-WAL database is
+not switched again, and `:memory:` retains its memory journal. Read initialization
+(`normalize=False`, including the doctor/search read paths) does not change an existing journal
+mode. This keeps a read-only status request from initiating the operational journal transition.
+
+The first DELETE→WAL transition needs no active reader lock: let searches and database checks
+finish before retrying a reported transition failure. Afterward a long read cursor can retain its
+snapshot while extraction commits graph changes and execution history. WAL still permits only
+one writer; it is not a guarantee against every kind of lock contention.
+
+Keep a consistent backup before the first upgraded write, using SQLite's backup API or
+`sqlite3 .backup` to a new file. Once WAL is active, the main file alone may not contain the latest
+committed changes while the database is open. Do not delete the `-wal` or `-shm` files; use a
+consistent SQLite backup instead of copying just the live main file. See the
+[operations walkthrough](usage.md#normal-incremental-extraction).
 
 ### Concept Normalization (dedup)
 Extraction reuses an existing concept on a normalized slug match within its category/namespace
@@ -194,7 +217,67 @@ Under an access policy the read tools see only the subgraph backed by readable e
 
 ---
 
-## Pipeline: Self-Extraction → Storage → Native Query
+## Normal incremental extraction
+
+Start with the [incremental CLI walkthrough](usage.md#normal-incremental-extraction). A Windows
+configuration can use `GRAPH_OLLAMA_ENDPOINT=http://192.168.0.2:11434` and the installed tag
+`GRAPH_OLLAMA_MODEL=gemma4:12b-it-qat`. `pkb graph models` reads installed tags and `/api/show`
+capabilities/digest/context limit. Choose `generation: true`; embedding capability alone is
+insufficient. The model tag and capability check do not establish extraction quality.
+
+```bash
+uv run pkb graph models
+# This stores accepted results; replace the doc_id with an indexed source.
+uv run pkb graph extract --doc-id 'data/study/example.md' --max-chunks 1 --output 1024
+uv run pkb graph extraction-runs --run-id RUN_ID
+uv run pkb graph extract --resume RUN_ID
+```
+
+`graph extract` defaults to a maximum of 20 pending chunks, batches of 1, and one extra attempt
+per failed batch. Scope it with `--doc-id`; use `--max-chunks`, `--batch-size` and `--retries` to
+bound work. New runs support `--endpoint`, `--model`, `--context`, `--output` and `--timeout`.
+Defaults are localhost Ollama, `gemma4:12b-it-qat`, 4096 context tokens, 1024 output tokens and
+180 seconds. The matching persistent settings are `GRAPH_OLLAMA_ENDPOINT`, `GRAPH_OLLAMA_MODEL`,
+`GRAPH_OLLAMA_CONTEXT`, `GRAPH_OLLAMA_OUTPUT` and `GRAPH_OLLAMA_TIMEOUT`.
+
+Run history is an additive schema migration: existing concepts, curation, evidence and extraction
+markers are preserved. Each run records the selected model digest, prompt/schema versions and
+hashes, options and selected source hashes. Attempts and errors survive resume. `--resume` uses
+the recorded endpoint/model/context/output/batch and skips stored items. Changed model digests or
+contracts are rejected; changed/deleted source input is marked `stale`. For changed inputs or
+new options start a new bounded run. A partial run exits 1. `selection_complete` covers the
+selected items, not every pending chunk in the corpus. History is an administrator-only CLI view.
+
+Changing the generation model does not automatically invalidate existing extracted chunks.
+Pending selection uses the current source hashes. A model-only change requires no reindex or
+reembedding. Previously completed graph content remains until an explicit, reviewed full rebuild
+is chosen. Ollama extraction does not perform curation/prose generation or reclassify every old
+concept; the MCP curation/classification interfaces remain separate.
+
+The Ollama runner and full rebuild share the output schema, extraction prompt, source checks and
+`store_concepts` service. Both accept at most 8 concepts and 12 relations per chunk. Ollama emits
+only confidence 0.7/0.9, a conservative subset of the MCP storage rubric (which also accepts legacy
+0.5). Storage checks both hashes against the current ES source. The runner supplies these hashes
+from trusted inputs, not model-generated metadata. It removes unsupported concept surfaces and
+requires same-line endpoints; `part_of` additionally requires a component/whole cue. These checks
+can miss valid paraphrases and cannot establish factual truth or correct direction in every case.
+`stored` therefore means processed and saved, not independently verified. Compare sampled results
+and descriptions with their original chunks and inspect history's dropped counts/storage warnings.
+
+The request budget includes the actual messages, source JSON, legacy hints, at most 20 corpus
+vocabulary terms and the JSON schema. cl100k token estimates receive a 20% margin plus 256 template
+tokens, then reserve the output allowance. Oversized requests fail before HTTP transmission;
+reported prompt saturation and length-limited responses are rejected before storage. This is an
+estimate, not the selected model's exact tokenizer. Reduce batch/output or increase context within
+the reported model limit; a single oversized chunk needs a larger context. The source is never
+silently shortened by the runner. A hash of the sent request and budget diagnostics are recorded
+with successful item results.
+
+Search, query and concept vectors still come from local Python `SentenceTransformer`; neither
+`graph extract` nor a Windows generation endpoint switches embeddings, media processing or
+reranking. Embedding changes use the separate migration described in [usage](usage.md#switching-the-embedding-model-on-a-small-server-reembed).
+
+## MCP extraction → Storage → Native Query
 
 ### 1. `graph_list_chunks(category|doc_id, offset, limit, pending_only)`
 Returns ES chunks as paginated JSON, each with `content_hash` and `input_hash`. With
@@ -233,23 +316,36 @@ uv run pkb graph path "BM25" "RRF"  # bounded shortest path
 uv run pkb graph query "how do lexical and vector retrieval connect?"  # semantic-seeded subgraph
 uv run pkb graph affected "BM25" --relation prerequisite_of  # stored-direction downstream traversal
 uv run pkb graph map --concept "BM25"   # offline Evidence Map HTML snapshot
-uv run pkb graph reset-evidence --yes  # keep the existing graph, reset staging evidence/markers
-uv run pkb graph rebuild-evidence-local --yes  # extract all pending with a local Ollama model
-uv run pkb graph finalize-evidence --yes  # after confirming full extraction, atomically switch to the staging graph
 ```
 
-To migrate legacy append-only edges to evidence-based ones, first run `reset-evidence --yes` once,
+### Intentional full evidence replacement
+
+Normal incremental extraction needs no reset or finalize. After backing up the graph and reviewing
+the full scope, to migrate legacy append-only edges to evidence-based ones, first run `reset-evidence --yes` once,
 then re-run the `graph_list_chunks(..., pending_only=True)` → `graph_store_concepts` loop over all
 chunks. During the rebuild, existing relations/mentions keep being served while new evidence
 accumulates in staging. Once pending reaches 0, running `finalize-evidence --yes` replaces the
 existing relations with the evidence aggregate in one shot. Concepts, aliases, and curated prose
 are preserved throughout.
 
-If Ollama has a generation model installed, `rebuild-evidence-local` automates this loop with
-structured output. The default model is `gpt-oss:20b`, the default batch size is 8 chunks, and it
-resumes from the markers if interrupted. Progress is logged to
-`data/.logs/graph-evidence-rebuild.jsonl`. Use `--max-batches 1` for a sample validation run, and
-the default `--max-batches 0` for a full run.
+`rebuild-evidence-local` automates this full-rebuild loop with the same Ollama extraction contract.
+Unlike normal `extract`, it requires an active rebuild and explicit CLI endpoint/model flags when
+using Windows. Its defaults remain `gpt-oss:20b` and batch size 8; use batch size 1 on a 4K context.
+It resumes from extraction markers, records durable run/item events, and also logs progress to
+`DATA_ROOT/.logs/graph-evidence-rebuild.jsonl`. A full rebuild's generated `run_id` is for history;
+resume it by rerunning the rebuild command, not `extract --resume`.
+
+```bash
+uv run pkb graph reset-evidence --yes
+uv run pkb graph rebuild-evidence-local --yes --endpoint http://192.168.0.2:11434 \
+  --model gemma4:12b-it-qat --batch-size 1 --context 4096 --output 1024 --timeout 180 --max-batches 1
+# Review, then rerun without --max-batches 1 to finish all pending chunks.
+# Only after pending=0 and source review:
+uv run pkb graph finalize-evidence --yes
+```
+
+The bounded batch above writes staging data; it is not a dry run. Finalize replaces stored edges
+with the evidence aggregate. Do not use this sequence merely to retry or add one new document.
 
 ### Evidence Map (`graph map`)
 
@@ -276,8 +372,9 @@ Specifying zero or more than one of `--concept`/`--query`/`--path` is a usage er
 embeds the text, so it loads the embedding model; `--concept` and `--path` read SQLite only.
 Implementation: `src/pkb/graph/viewmap.py`.
 
-There's no batch API build. Building remains MCP-first; reading is available through native SQLite
-graph queries, the CLI, the offline Evidence Map, and RDF export (`src/pkb/graph/export.py`).
+Building is available through bounded direct Ollama extraction or the explicit MCP extraction
+loop. Reading is available through native SQLite graph queries, the CLI, the offline Evidence Map
+and RDF export (`src/pkb/graph/export.py`).
 
 ---
 
@@ -287,6 +384,10 @@ graph queries, the CLI, the offline Evidence Map, and RDF export (`src/pkb/graph
 - Fast enough at scales of thousands to tens of thousands of nodes
 - Using just Python's `sqlite3` keeps external dependencies to a minimum
 
-## Why We Dropped API Extraction
+## Extraction interfaces
 
-Claude Code already has a session that can read chunks, so a separate LLM API call (with its cost and key management) was redundant. With just two tools, `graph_list_chunks`/`graph_store_concepts`, the Claude Code session itself acts as the extractor.
+The MCP `graph_list_chunks`/`graph_store_concepts` loop lets an existing AI host act as the
+extractor. The direct Ollama CLI supplies an explicit alternative when extraction should run
+without a Claude/Codex conversation. Both use the same SQLite storage service; introducing the
+Ollama runner does not make ingest automatically extract concepts or make PKB generate final
+answers to search queries.

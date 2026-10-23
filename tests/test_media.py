@@ -352,6 +352,9 @@ class _FakeES:
     def __init__(self):
         self.searches: list[list[dict]] = []
 
+    def options(self, **kwargs):
+        return self
+
     def msearch(self, index, searches):
         self.searches.append(searches)
         return {"responses": [{"hits": {"hits": []}}, {"hits": {"hits": []}}]}

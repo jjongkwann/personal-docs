@@ -23,7 +23,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from pkb import access
-from pkb.graph.schema import graph_connection
+from pkb.graph.schema import readonly_graph_connection
 
 # 근거 청크에서 직접 나온 열 — 근거 하나만 읽을 수 있어도 보여 준다.
 PUBLIC_CONCEPT_COLUMNS = frozenset(
@@ -127,7 +127,7 @@ def restrict_to_readable(conn: sqlite3.Connection, principal: access.Principal) 
 def graph_read_connection(db_path: str) -> Iterator[sqlite3.Connection]:
     """읽기 전용 그래프 연결. 지금 주체가 모든 문서를 읽지 못하면 걸러진 그래프를 본다."""
     principal = access.current_principal()
-    with graph_connection(db_path, normalize=False) as conn:
+    with readonly_graph_connection(db_path) as conn:
         if access.is_restricted(principal):
             restrict_to_readable(conn, principal)
         yield conn

@@ -98,7 +98,8 @@ class _FakeServer:
                  "indexed": False, "model": None, "modified": "2026-10-15T00:00:00+00:00"}
                 for doc_id, (kind, data) in sorted(self.files.items())
             ]
-            return {"total": len(media), "model": self.model, "media": media[args["offset"]:]}
+            return {"total": len(media), "model": self.model, "embedding_backend": {"provider": "local"},
+                    "media": media[args["offset"]:]}
         if tool == "get_media":
             self.downloads.append(args["doc_id"])
             data = self.files[args["doc_id"]][1]
@@ -111,6 +112,9 @@ class _FakeServer:
 
 class _FakeEmbedder:
     load_seconds = 0.0
+
+    def configure(self, backend):
+        self.backend = backend
 
     def image(self, image):
         return [1.0, 0.0]
@@ -169,3 +173,104 @@ def test_load_image_flattens_transparency_on_white(tmp_path):
     path.write_bytes(_png())
     image = media_sync.load_image(path)
     assert image.mode == "RGB" and image.getpixel((0, 0)) == (255, 255, 255)
+
+
+def _remote_embedder(monkeypatch):
+    from pkb.config import settings
+
+    monkeypatch.setattr(settings, "embedding_provider", "local")
+    embedder = media_sync.MediaEmbedder()
+    embedder.configure({"provider": "ollama", "endpoint": "http://windows:11434",
+                        "model": "embeddinggemma-2:740m", "digest": "fixed", "dimensions": 768,
+                        "batch_size": 8})
+    monkeypatch.setattr(embedder, "_load", lambda: pytest.fail("remote backend must not load a local model"))
+    return embedder
+
+
+def test_ollama_media_encodes_png_and_pcm_windows_in_order(monkeypatch):
+    import wave
+
+    from PIL import Image
+
+    from pkb import ollama_embeddings
+
+    calls = []
+
+    def embed(endpoint, model, texts, dimensions, **kwargs):
+        calls.append((endpoint, model, texts, dimensions, kwargs))
+        return [[float(i + 1)] for i in range(len(texts))]
+
+    monkeypatch.setattr(ollama_embeddings, "embed", embed)
+    embedder = _remote_embedder(monkeypatch)
+    assert embedder.image(Image.new("RGB", (4, 3), "red")) == [1.0]
+    with Image.open(io.BytesIO(base64.b64decode(calls[0][2][0]["image"]))) as png:
+        assert png.size == (4, 3) and png.getpixel((0, 0)) == (255, 0, 0)
+    windows = [np.array([-1.0, 0.0, 1.0], dtype=np.float32), _tone(0.1)]
+    assert embedder.audio(windows) == [[1.0], [2.0]]
+    endpoint, model, inputs, dimensions, kwargs = calls[1]
+    assert (endpoint, model, dimensions) == ("http://windows:11434", "embeddinggemma-2:740m", 768)
+    assert kwargs == {"expected_digest": "fixed", "batch_size": 8}
+    assert len(inputs) == 2
+    for item, samples in zip(inputs, windows, strict=True):
+        with wave.open(io.BytesIO(base64.b64decode(item["audio"]))) as wav:
+            assert (wav.getframerate(), wav.getnchannels(), wav.getsampwidth()) == (SAMPLE_RATE, 1, 2)
+            actual = np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2")
+        expected = np.clip(np.rint(samples * 32768), -32768, 32767).astype("<i2")
+        np.testing.assert_array_equal(actual, expected)
+    assert embedder.load_seconds == 0.0
+
+
+def test_remote_media_error_never_falls_back_to_local(monkeypatch):
+    from PIL import Image
+
+    from pkb import ollama_embeddings
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("Ollama unavailable")
+
+    monkeypatch.setattr(ollama_embeddings, "embed", fail)
+    embedder = _remote_embedder(monkeypatch)
+    with pytest.raises(ToolError, match="Ollama unavailable"):
+        embedder.image(Image.new("RGB", (4, 4)))
+
+
+def test_missing_server_backend_fails_before_download(monkeypatch):
+    server = _FakeServer({"obsidian/a.png": ("image", _png())})
+    original = server.call_json
+
+    def call(tool, **args):
+        result = original(tool, **args)
+        result.pop("embedding_backend", None)
+        return result
+
+    monkeypatch.setattr(server, "call_json", call)
+    with pytest.raises(ToolError, match="백엔드"):
+        run(server, _FakeEmbedder(), ["image"], echo=lambda line: None)
+    assert server.downloads == []
+
+
+def test_run_uses_server_backend_and_reports_remote_failure(monkeypatch):
+    from pkb import config, ollama_embeddings
+
+    server = _FakeServer({"obsidian/a.png": ("image", _png())})
+    original = server.call_json
+    remote = {"provider": "ollama", "endpoint": "http://server-selected:11434", "model": "embeddinggemma-2:740m",
+              "digest": "fixed", "dimensions": 768, "batch_size": 8}
+
+    def call(tool, **args):
+        result = original(tool, **args)
+        if tool == "list_media":
+            result["embedding_backend"] = remote
+        return result
+
+    def fail(endpoint, *args, **kwargs):
+        assert endpoint == remote["endpoint"]
+        raise RuntimeError("Ollama unavailable")
+
+    monkeypatch.setattr(config, "resolve_device", lambda *args: pytest.fail("must not resolve local device"))
+    monkeypatch.setattr(server, "call_json", call)
+    monkeypatch.setattr(ollama_embeddings, "embed", fail)
+    embedder = media_sync.MediaEmbedder()
+    stats = run(server, embedder, ["image"], echo=lambda line: None)
+    assert stats["failed"] == 1 and stats["indexed"] == 0
+    assert server.puts == [] and embedder._model is None

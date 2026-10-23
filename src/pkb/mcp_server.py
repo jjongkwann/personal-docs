@@ -104,11 +104,56 @@ def _tool_guard(func):
     @wraps(func)
     def guarded(*args, **kwargs):
         try:
-            return func(*args, **kwargs)
+            if func.__name__ in {"embedding_status", "embedding_models", "configure_embedding"}:
+                return func(*args, **kwargs)
+            from pkb.embedding_runtime import embedding_operation
+
+            with embedding_operation():
+                return func(*args, **kwargs)
         except Exception as exc:
             return f"오류: {type(exc).__name__}: {exc}"
 
     return guarded
+
+
+@mcp.tool()
+@_tool_guard
+@tool_access("admin")
+def embedding_status() -> str:
+    """현재 임베딩 provider/endpoint/model/dimensions와 영속 전환 작업 상태를 조회합니다.
+
+    재임베딩 중에도 즉시 응답합니다. job의 status는 queued/running/completed/failed이며
+    phase, processed, total, error가 진행 상황을 나타냅니다. 실패하면 기존 설정이 유지됩니다.
+    """
+    from pkb.embedding_runtime import embedding_status as status
+
+    return json.dumps(status(), ensure_ascii=False)
+
+
+@mcp.tool()
+@_tool_guard
+@tool_access("admin")
+def embedding_models(endpoint: str) -> str:
+    """Ollama 서버에 설치된 임베딩 모델의 name/dimensions/digest 목록을 조회합니다."""
+    from pkb.embedding_runtime import embedding_models as models
+
+    return json.dumps(models(endpoint), ensure_ascii=False)
+
+
+@mcp.tool()
+@_tool_guard
+@tool_access("admin")
+def configure_embedding(endpoint: str, model: str) -> str:
+    """텍스트·질의·개념 임베딩을 선택한 Ollama 모델로 안전하게 전환합니다.
+
+    영속 백그라운드 작업을 시작하고 상태 JSON을 반환합니다. 새 색인과 그래프 사본의
+    재임베딩·검증이 모두 끝나야 활성 설정이 바뀝니다. 기존 색인과 그래프는 보존합니다.
+    전환 중에는 일반 검색·쓰기 도구가 busy 오류를 반환하므로 embedding_status로 확인하세요.
+    호환되지 않는 기존 미디어 벡터가 있으면 데이터를 삭제하지 않고 실패합니다.
+    """
+    from pkb.embedding_runtime import configure_embedding as configure
+
+    return json.dumps(configure(endpoint, model), ensure_ascii=False)
 
 
 def _sync_summaries(es) -> str:
@@ -180,6 +225,7 @@ def search_knowledge(
     date_from: str | None = None,
     date_to: str | None = None,
     path_prefix: str | None = None,
+    include_concept_vocabulary: bool = True,
 ) -> str:
     """개인 지식 베이스에서 관련 정보를 하이브리드 검색(BM25+kNN)합니다.
     RRF 결합으로 정밀도를 높입니다 (CrossEncoder 재순위는 RERANK_ENABLED 설정 시).
@@ -219,6 +265,8 @@ def search_knowledge(
         date_from: occurred_at 시작 (ISO 8601, 포함). 기간을 주면 occurred_at 없는 문서는 빠집니다.
         date_to: occurred_at 끝 (ISO 8601, 포함). 날짜만 주면 그날 끝까지(UTC).
         path_prefix: doc_id 접두사 (예: data/meetings/2026/).
+        include_concept_vocabulary: 재질의용 코퍼스 개념 어휘를 결과 앞에 포함.
+            False여도 문서 순위·본문·히트별 관련 개념은 유지됩니다.
     """
     from pathlib import Path
 
@@ -269,18 +317,19 @@ def search_knowledge(
             ]
             if pairs:
                 hit_concepts = gstore.mentions_for_chunks(conn, pairs)
-            try:
-                top = gstore.top_concepts_by_embedding(conn, query_vector[0])
-            except gstore.EmbeddingModelMismatchError as exc:
-                top, vocab_line = [], f"코퍼스 개념 어휘 생략: {exc}"
-            if top:
-                terms = []
-                for row, _score in top:
-                    aliases = gstore.list_aliases(conn, row["id"])
-                    terms.append(
-                        f"{row['name']}({'·'.join(aliases)})" if aliases else row["name"]
-                    )
-                vocab_line = "코퍼스 개념 어휘: " + ", ".join(terms)
+            if include_concept_vocabulary:
+                try:
+                    top = gstore.top_concepts_by_embedding(conn, query_vector[0])
+                except gstore.EmbeddingModelMismatchError as exc:
+                    top, vocab_line = [], f"코퍼스 개념 어휘 생략: {exc}"
+                if top:
+                    terms = []
+                    for row, _score in top:
+                        aliases = gstore.list_aliases(conn, row["id"])
+                        terms.append(
+                            f"{row['name']}({'·'.join(aliases)})" if aliases else row["name"]
+                        )
+                    vocab_line = "코퍼스 개념 어휘: " + ", ".join(terms)
 
     preamble = "\n".join(filter(None, [render_query_plan(plan[0]) if analyze and plan else "", vocab_line]))
     return render_search_results(
@@ -455,6 +504,31 @@ def get_file(file_path: str) -> CallToolResult:
 @mcp.tool()
 @_tool_guard
 @tool_access("write")
+def import_attachment(
+    path: str, sha256: str, category: str, title: str = "", *, document_id: str, version: int,
+) -> str:
+    """완료된 첨부를 기존 카테고리에 draft로 가져와 즉시 색인합니다 (원본 최대 2 GiB).
+
+    put_attachment가 반환한 상대경로와 SHA-256을 전달하세요. 지원 문서는 텍스트를
+    추출하고, 이미지·오디오 등은 내용 추출 없이 검색 가능한 메타데이터 카드만 만듭니다.
+    지원 형식도 50 MiB를 넘으면 메타데이터 카드만 만듭니다. 원본은 보존합니다.
+    반환 JSON의 extraction/indexing/graph로 실제 완료 단계를
+    확인하세요. draft는 curated/evidence 검색에서 제외됩니다. 본문이 있는 문서는
+    설정된 Ollama 자동 작업자가 그래프에 반영하며 graph_extraction_status로 진행을 조회합니다.
+    document_id는 소문자 UUID, version은 양의 정수입니다. 같은 버전 재시도는 저장된 메타데이터를 유지합니다.
+    같은 요청은 저장된 문서를 재색인합니다. 수정된 기존 문서는 덮어쓰지 않습니다.
+    """
+    from pkb.imports import import_attachment as _import_attachment
+
+    return json.dumps(
+        _import_attachment(path, sha256, category, title, document_id=document_id, version=version),
+        ensure_ascii=False,
+    )
+
+
+@mcp.tool()
+@_tool_guard
+@tool_access("write")
 def put_attachment(path: str, data_base64: str, offset: int, total_size: int, sha256: str = "") -> str:
     """볼트 밖 첨부 폴더(ATTACHMENTS_ROOT)에 파일을 조각으로 올립니다. 색인하지 않습니다.
 
@@ -519,12 +593,22 @@ def list_media(kinds: list[str] | None = None, missing_only: bool = False, limit
         limit: 페이지 크기 (1~1000).
         offset: 시작 위치.
 
-    Returns: JSON {total, model, media:[{doc_id, kind, size_bytes, modified, sha256, indexed, model}]}
+    Returns: JSON {total, model, embedding_backend,
+        media:[{doc_id, kind, size_bytes, modified, sha256, indexed, model}]}
     """
+    from pkb.config import settings
     from pkb.media import list_media as _list_media
     from pkb.store import get_client
 
-    return json.dumps(_list_media(get_client(), kinds, missing_only, limit, offset), ensure_ascii=False)
+    result = _list_media(get_client(), kinds, missing_only, limit, offset)
+    result["embedding_backend"] = {"provider": settings.embedding_provider}
+    if settings.embedding_provider == "ollama":
+        result["embedding_backend"].update(
+            endpoint=settings.embedding_ollama_endpoint, model=settings.embedding_ollama_model,
+            digest=settings.embedding_ollama_digest, dimensions=settings.embedding_dims,
+            batch_size=settings.embedding_batch_size,
+        )
+    return json.dumps(result, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -674,7 +758,9 @@ def patch_file(
 @mcp.tool()
 @_tool_guard
 @tool_access("read")
-def list_documents(category: str = "", include_archived: bool = False, limit: int = 50) -> str:
+def list_documents(
+    category: str = "", include_archived: bool = False, limit: int = 50, include_versions: bool = False,
+) -> str:
     """저장된 문서와 현재 사용 중인 경로 구조를 확인합니다.
 
     새 문서를 쓰기 전에 category를 지정해 호출하고, 기존 폴더와 문서 유형·canonical_id를
@@ -687,12 +773,13 @@ def list_documents(category: str = "", include_archived: bool = False, limit: in
         category: 카테고리 필터 = 코퍼스 최상위 폴더명. 빈 문자열이면 전체.
         include_archived: True면 아카이브된 문서도 표시. 기본 False.
         limit: 표시할 최대 문서 수. 0 이하이면 전체 표시. 기본 50.
+        include_versions: True면 가져온 문서의 이전 버전도 표시. 기본은 문서별 최대 버전.
     """
     from pkb.store import get_client
     from pkb.store import list_documents as _list_documents
 
     es = get_client()
-    docs = _list_documents(es, category or None, include_archived=include_archived)
+    docs = _list_documents(es, category or None, include_archived=include_archived, include_versions=include_versions)
 
     if not docs:
         return "저장된 문서가 없습니다."
@@ -719,6 +806,9 @@ def list_documents(category: str = "", include_archived: bool = False, limit: in
             details.append(f"정본={doc['canonical_id']}")
         if doc.get("status"):
             details.append(f"상태={doc['status']}")
+        if doc.get("import_document_id"):
+            details.extend([f"문서ID={doc['import_document_id']}", f"버전={doc['import_version']}",
+                            f"버전수={doc['version_count']}"])
         if doc.get("title"):
             details.append(f"제목={doc['title']}")
         lines.append(f"- {doc['doc_id']} [{', '.join(details)}]")
@@ -731,7 +821,7 @@ def list_documents(category: str = "", include_archived: bool = False, limit: in
 def list_categories(include_archived: bool = False) -> str:
     """카테고리(코퍼스 최상위 폴더명)별 문서 수를 JSON으로 반환합니다.
 
-    문서 단위 색인을 한 번 집계하므로 문서가 많아도 빠릅니다. 카테고리 목록만 필요하면
+    권한이 있는 최신 문서 목록과 동일한 기준으로 셉니다. 카테고리 목록만 필요하면
     list_documents 대신 이것을 쓰세요.
 
     Args:
@@ -1276,6 +1366,42 @@ def graph_path(
 @mcp.tool()
 @_tool_guard
 @tool_access("read")
+def graph_overview(limit: int = 60) -> str:
+    """기존 연결 관계의 일부를 즉시 조회합니다. limit은 노드 상한(1~200), 관계는 최대 두 배입니다.
+
+    자연어 질문이나 임베딩 없이 근거 수가 많은 관계부터 보여 줍니다. nodes/edges는
+    실제 배열이고 total_concepts/total_edges는 읽기 권한 안의 전체 수입니다. 고립 개념은
+    표시하지 않습니다. 근거 원문은 graph_explain 또는 get_document에서 확인하세요.
+    """
+    from pkb.config import settings as _settings
+    from pkb.graph.query import overview
+    from pkb.graph.visibility import graph_read_connection
+
+    with graph_read_connection(_settings.graph_db_path) as conn:
+        result = overview(conn, limit=limit)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+@_tool_guard
+@tool_access("read")
+def graph_extraction_status(doc_id: str) -> str:
+    """문서의 현재 그래프 추출 진행을 조회합니다. completed는 현재 입력 청크의 저장 완료입니다.
+
+    queued/running/retrying/waiting은 미완료이며 자동 작업자가 계속 처리합니다.
+    not_applicable은 본문 미추출 자료, disabled는 자동 처리 비활성화입니다.
+    pending_chunks에는 재시도할 failed_chunks가 포함됩니다. 조회는 추출을 시작하지 않습니다.
+    """
+    from pkb import access
+    from pkb.graph.status import document_status
+
+    access.require("read", doc_id)
+    return json.dumps(document_status(doc_id), ensure_ascii=False)
+
+
+@mcp.tool()
+@_tool_guard
+@tool_access("read")
 def graph_query(
     query: str,
     depth: int = 2,
@@ -1456,8 +1582,8 @@ def graph_list_chunks(
     """개념 그래프 빌드를 위한 청크를 가져옵니다.
 
     **사용 방법**: 반환된 각 청크의 content를 직접 읽고 개념(concept)과 관계(relation)를 추출한 뒤
-    `graph_store_concepts` 도구로 저장하세요. 이렇게 하면 별도 API 호출 없이
-    Claude Code 세션이 그대로 추출기로 작동합니다.
+    `graph_store_concepts` 도구로 저장하세요. 호출한 LLM이 추출기로 작동합니다.
+    CLI의 `pkb graph extract`는 세션 없이 설정된 Ollama 모델로 같은 저장 검증을 수행합니다.
 
     **추출 전 준비**: graph_ontology로 TBox(개념 kind와 관계 시그니처)를 확인하고,
     graph_list_concepts로 기존 어휘를 확인해 겹치는 개념은 기존 name/slug를 그대로 재사용하세요
@@ -1571,7 +1697,7 @@ def graph_list_chunks(
 @_tool_guard
 @tool_access("admin")
 def graph_store_concepts(items_json: str) -> str:
-    """Claude Code가 추출한 개념/관계를 SQLite 그래프 DB에 저장합니다.
+    """LLM이 추출한 개념/관계를 검증해 SQLite 그래프 DB에 저장합니다.
 
     Args:
         items_json: JSON 문자열. 스키마:
@@ -1843,6 +1969,9 @@ def graph_classify(items_json: str = "", offset: int = 0, limit: int = 50) -> st
 # 먼저 노출만 줄여 무엇이 아쉬운지 측정한다. PKB_MCP_PROFILE=core 로 켠다.
 CORE_TOOLS = frozenset(
     {
+        "embedding_status",
+        "embedding_models",
+        "configure_embedding",
         "search_knowledge",  # 22회 — 주 진입점
         "get_document",  # 11회
         "list_documents",  # 8회
@@ -1855,11 +1984,14 @@ CORE_TOOLS = frozenset(
         "patch_file",  # 부분 편집 — 대형 문서 병합 시 전체 재전송 회피
         "graph_explain",  # 그래프 읽기 최소 2종 — 07-24 추가라 호출 이력이 짧다
         "graph_query",
+        "graph_overview",  # 질문 없이 기존 연결 관계의 제한된 스냅샷
+        "graph_extraction_status",  # 문서별 자동 그래프 처리 상태
         "graph_map",  # 그래프를 눈으로 보는 유일한 경로. 없으면 CLI로 나가야 한다
         "list_categories",  # 카테고리 목록 — list_documents 전체 조회·doctor보다 빠르다
         "related_documents",  # 문서 벡터 기준 관련 문서
         "put_attachment",  # 볼트 밖 첨부 업로드 (회의 오디오 등)
         "get_attachment",
+        "import_attachment",  # 첨부 → draft 메타데이터/텍스트 카드와 즉시 색인
         "search_media",  # 이미지·오디오 검색 — 회의 앱이 녹음 구간을 찾는다
         "get_media",
         "list_media",  # pkb media-sync가 게이트웨이로 부른다
@@ -1891,10 +2023,11 @@ def _warmup_background() -> None:
     실패해도 서버 기동·정상 경로를 막지 않는다."""
     try:
         from pkb.config import settings
+        from pkb.embedding_runtime import embedding_operation
         from pkb.retrieve import hybrid_search
         from pkb.store import get_client
 
-        with access.acting_as(access.SYSTEM):  # 요청 밖 스레드라 토큰이 없다
+        with access.acting_as(access.SYSTEM), embedding_operation():  # 요청 밖 스레드라 토큰이 없다
             hybrid_search(
                 get_client(),
                 "warmup",

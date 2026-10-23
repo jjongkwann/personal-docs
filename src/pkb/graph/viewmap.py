@@ -12,13 +12,12 @@ import json
 import sqlite3
 
 from pkb.graph import query as gquery
-from pkb.graph import store as gstore
 
 _CONF_ORDER = ["explicit", "inferred", "weak", "legacy"]
 
 
 def _node_mentions(conn: sqlite3.Connection, slug: str, *, limit: int = 10) -> list[dict]:
-    row = gstore.get_concept(conn, slug)
+    row = gquery.resolve_concept(conn, slug)
     return gquery._mentions(conn, row["id"], limit=limit) if row else []
 
 

@@ -7,6 +7,9 @@ class _FakeES:
     def __init__(self):
         self.calls = []
 
+    def options(self, **kwargs):
+        return self
+
     def msearch(self, **kwargs):
         self.calls.append(kwargs)
         return {

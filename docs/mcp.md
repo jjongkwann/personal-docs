@@ -195,6 +195,22 @@ For each client, verify the connection with `claude` → `/mcp`, `codex mcp list
 
 ## Available Tools
 
+### Embedding model settings
+
+These admin tools are available in the core profile and remain responsive during a migration.
+Refresh the gateway's tool inventory after deploying them. App clients use the gateway names
+`pkb-embedding-status`, `pkb-embedding-models` and `pkb-configure-embedding`.
+
+| Tool | Description |
+|------|------|
+| `embedding_status` | Returns `active` (provider, endpoint, model, dimensions, digest) and the durable `job` (id, status, phase, processed, total, error). A candidate is not active until migration succeeds |
+| `embedding_models(endpoint)` | Reads Ollama metadata and lists only models with embedding capability. Does not download or load a model |
+| `configure_embedding(endpoint, model)` | Starts a detached migration, preserving the old index and graph. Validates actual vectors and model digest, re-embeds text and concepts in new stores, preserves compatible media vectors, then atomically publishes the selection. Normal tools return a busy error during migration |
+
+See [Windows Ollama embeddings](windows-ollama-embeddings.md) for selection and recovery. A busy
+response before a job is created means another operation owns the gate; check status and retry
+after it finishes. After an uncertain response, read status before starting another job.
+
 ### Search / Document Operations
 
 | Tool | Description |
@@ -351,8 +367,9 @@ without `start`/`end` for an image, non-overlapping windows of at most 30 s for 
 each vector `EMBEDDING_DIMS` finite numbers (the server rescales it to unit length). `sha256` must
 match the file as it is now.
 
-**Client.** On a Mac with the model (`uv sync` installs torchvision, which EmbeddingGemma 2's
-processor imports here and on the server, even when the server loads only the text tower):
+**Client.** On a Mac, use the active backend returned by PKB. With the local provider, the client
+loads the Python model (`uv sync` includes torchvision). With Ollama it sends inputs to the
+selected endpoint and does not load a local embedding model:
 
 ```bash
 uv run pkb media-sync --url https://<gateway>/mcp      # Bearer token from ~/.config/mcp-gateway/token (https only)
@@ -360,14 +377,17 @@ uv run pkb media-sync --url http://<server>:8787/mcp --dry-run
 uv run pkb media-sync --kinds audio --limit 20
 ```
 
-It lists files without current vectors (`list_media(missing_only=True)`), downloads each with
-`get_media`, embeds it with EmbeddingGemma 2 loaded once (bf16 on MPS, float32 on CPU; no prompt,
-normalized), and calls `put_media_embeddings`. Audio is decoded with macOS `afconvert` to 16 kHz
+It lists files without current vectors (`list_media(missing_only=True)`), reads the authoritative
+`embedding_backend` in that response, downloads each with `get_media`, embeds it and calls
+`put_media_embeddings`. The Ollama path validates the pinned model digest and output dimensions;
+an unavailable or changed backend fails without a local fallback. Audio is decoded with macOS `afconvert` to 16 kHz
 mono and cut into 30-second windows; SVG and HEIC go through `sips`. A gateway's `pkb-…` tool names
 are detected from `tools/list`. Re-running does nothing for files that are already current. After an
-embedding model switch, `pkb reembed` leaves out media chunks from the previous media model, so
+manual local embedding model switch, `pkb reembed` leaves out media chunks from the previous media model, so
 `list_media(missing_only=True)` lists those files until `pkb media-sync` runs again (see
 [the model switch runbook](usage.md#switching-the-embedding-model-on-a-small-server-reembed)).
+The app's Ollama migration instead preserves compatible media and refuses incompatible existing
+vectors without deleting them; see [Windows Ollama embeddings](windows-ollama-embeddings.md).
 
 ### Receiving original files on another client
 

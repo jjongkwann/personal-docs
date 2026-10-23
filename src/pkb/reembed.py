@@ -14,6 +14,7 @@ MEDIA_EMBEDDING_MODEL이 만든 것이면 그대로 옮긴다. 다른 미디어 
 from __future__ import annotations
 
 import contextlib
+import copy
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -111,6 +112,7 @@ def reembed_index(
     max_batches: int = 0,
     dry_run: bool = False,
     progress: Callable[[ReembedResult], None] | None = None,
+    strict_media: bool = False,
 ) -> ReembedResult:
     """source의 청크를 현재 임베딩 설정으로 target에 옮긴다.
 
@@ -124,7 +126,9 @@ def reembed_index(
     result = ReembedResult()
     target_exists = es.indices.exists(index=target)
     if not target_exists and not dry_run:
-        es.indices.create(index=target, body=INDEX_SETTINGS)
+        mapping = copy.deepcopy(INDEX_SETTINGS)
+        mapping["mappings"]["properties"]["embedding"]["dims"] = settings.embedding_dims
+        es.indices.create(index=target, body=mapping)
         target_exists = True
 
     source_ids: set[str] = set()
@@ -143,6 +147,8 @@ def reembed_index(
         dropped: list[str] = []  # 다른 미디어 모델의 청크
         for _id, doc in docs.items():
             if "media_model" in doc and doc["media_model"] != settings.media_embedding_model:
+                if strict_media:
+                    raise ValueError(f"미디어 청크 {_id}의 임베딩 모델이 호환되지 않습니다.")
                 dropped.append(_id)
                 continue
             old = current.get(_id)
@@ -169,6 +175,9 @@ def reembed_index(
         for index, ids in ((target, to_copy), (source, from_source)):
             vectors = _mget_sources(es, index, ids, source_includes=["embedding"]) if ids else {}
             for _id in ids:
+                if (strict_media and index == source
+                        and len(vectors[_id].get("embedding", [])) != settings.embedding_dims):
+                    raise ValueError(f"미디어 청크 {_id}의 벡터 차원이 일치하지 않습니다.")
                 ops.extend([{"index": {"_index": target, "_id": _id}}, {**docs[_id], **vectors[_id]}])
         if to_embed:
             from pkb.embeddings import embed_documents
